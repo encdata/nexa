@@ -380,7 +380,10 @@ a {{ color:#45d6c5; overflow-wrap:anywhere; }} li {{ margin:10px 0; }}
 <h2>recent pages</h2><ul>{history}</ul></body></html>"""
 
     def _handle_webview_event(self, event):
-        tab_id = self.webviews.get(event.id)
+        event_id = getattr(event, "id", None)
+        if event_id is None:
+            return False
+        tab_id = self.webviews.get(event_id)
         tab = self.tabs.get(tab_id)
         if tab is None:
             return False
