@@ -209,7 +209,7 @@ class BrowserSession:
         self.buttons[close_button.id] = ("close_tab", tab_id)
         webview = tg.WebView(self.activity, self.pages)
         webview.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
-        webview.allownavigation(False)
+        webview.allownavigation(True)
         tab["webview"] = webview
         self.webviews[webview.id] = tab_id
         self._select_tab(tab_id)
@@ -381,9 +381,11 @@ a {{ color:#45d6c5; overflow-wrap:anywhere; }} li {{ margin:10px 0; }}
 
     def _handle_webview_event(self, event):
         event_id = getattr(event, "id", None)
-        if event_id is None:
-            return False
-        tab_id = self.webviews.get(event_id)
+        tab_id = self.webviews.get(event_id) if event_id is not None else None
+        if tab_id is None and event.type != tg.Event.webviewDestroyed:
+            # Some Termux:GUI WebView events omit the view id; only the visible
+            # tab can safely own an unscoped navigation or load result.
+            tab_id = self.active_tab
         tab = self.tabs.get(tab_id)
         if tab is None:
             return False
@@ -426,7 +428,7 @@ a {{ color:#45d6c5; overflow-wrap:anywhere; }} li {{ margin:10px 0; }}
         self.webviews.pop(old.id, None)
         webview = tg.WebView(self.activity, self.pages)
         webview.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
-        webview.allownavigation(False)
+        webview.allownavigation(True)
         tab["webview"] = webview
         tab["javascript"] = False
         self.webviews[webview.id] = tab["id"]
