@@ -213,7 +213,7 @@ class BrowserSession:
         tab["webview"] = webview
         self.webviews[webview.id] = tab_id
         self._select_tab(tab_id)
-        webview.setdata(self._home_page())
+        self._load_url(tab, "https://www.google.com")
         return tab_id
 
     def _select_tab(self, tab_id):
