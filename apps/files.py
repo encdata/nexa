@@ -13,7 +13,7 @@ from shell.text_direction import is_rtl
 
 class FilesApp:
     app_id = "files"
-    name = "home"
+    name = "File Explorer"
     icon = "folder"
     preload_ui = False
 

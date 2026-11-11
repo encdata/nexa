@@ -43,8 +43,9 @@ class Desktop:
         self.surface.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
         self.surface.setbackgroundcolor(0x00000000)
 
-        columns = max(1, (screen_width - self.gap) // (self.icon_width + self.gap))
-        max_rows = max(1, (screen_height - 100) // (self.icon_height + self.gap))
+        x_positions, y_positions = self._grid_axes(screen_width, screen_height)
+        columns = len(x_positions)
+        max_rows = len(y_positions)
         capacity = columns * max_rows
         home_capacity = max(0, capacity - len(apps))
         self.home_capacity = home_capacity
@@ -54,15 +55,20 @@ class Desktop:
         items.extend((app.app_id, app.icon, app.name, app.app_id, None, None)
                      for app in apps.values())
         for index, (key, symbol, label, app_id, context, is_folder) in enumerate(items):
-            col, row = index % columns, index // columns
-            x = self.gap + col * (self.icon_width + self.gap)
-            y = self.gap + row * (self.icon_height + self.gap)
+            grid_index = index
             saved_position = self.positions.get(key)
-            if (isinstance(saved_position, list) and len(saved_position) == 2
+            if isinstance(saved_position, int) and not isinstance(saved_position, bool):
+                grid_index = max(0, saved_position)
+                x, y = self._grid_position(grid_index, x_positions, y_positions)
+            elif (isinstance(saved_position, list) and len(saved_position) == 2
                     and all(isinstance(value, (int, float)) for value in saved_position)):
                 x = max(0, min(screen_width - self.icon_width, saved_position[0]))
                 y = max(0, min(screen_height - 56 - self.icon_height, saved_position[1]))
-            self._add_icon(key, symbol, label, app_id, context, x, y, is_folder)
+                grid_index = self._grid_index_for(x, y, x_positions, y_positions)
+                x, y = self._grid_position(grid_index, x_positions, y_positions)
+            else:
+                x, y = self._grid_position(grid_index, x_positions, y_positions)
+            self._add_icon(key, symbol, label, app_id, context, x, y, is_folder, grid_index)
             if progress is not None:
                 percent = 72 + round(24 * (index + 1) / max(1, len(items)))
                 progress(f"placing desktop icons {index + 1}/{len(items)}", percent)
@@ -95,47 +101,57 @@ class Desktop:
             self.drag = None
             self.pointer.hide()
 
-        max_x = max(0, self.screen_width - self.icon_width)
-        max_y = max(0, self.screen_height - 56 - self.icon_height)
-        placed = []
+        x_positions, y_positions = self._grid_axes(self.screen_width, self.screen_height)
+        largest_index = max((icon["grid_index"] for icon in self.icons.values()), default=0)
+        required_rows = max((len(self.icons) + len(x_positions) - 1) // len(x_positions),
+                            largest_index // len(x_positions) + 1)
+        while len(y_positions) < required_rows:
+            y_positions.append(y_positions[-1] + self.icon_height + self.gap)
+        slots = [(x, y) for y in y_positions for x in x_positions]
+        occupied = set()
         icon_ids = list(self.icon_order)
         if preferred_icon in self.icons:
             icon_ids.remove(preferred_icon)
             icon_ids.insert(0, preferred_icon)
         for icon_id in icon_ids:
             icon = self.icons[icon_id]
-            x = icon["x"] * self.screen_width / old_width
-            y = icon["y"] * self.screen_height / old_height
-            x = max(0, min(max_x, round(x)))
-            y = max(0, min(max_y, round(y)))
-            def overlaps(point):
-                return any(point[0] < px + self.icon_width and point[0] + self.icon_width > px
-                           and point[1] < py + self.icon_height and point[1] + self.icon_height > py
-                           for px, py in placed)
-
-            if overlaps((x, y)):
-                preferred = (x, y)
-                slots = [
-                    (min(max_x, self.gap + col * (self.icon_width + self.gap)),
-                     min(max_y, self.gap + row * (self.icon_height + self.gap)))
-                    for row in range(max(1, self.screen_height // (self.icon_height + self.gap)))
-                    for col in range(max(1, self.screen_width // (self.icon_width + self.gap)))
-                ]
-                available = [point for point in slots if not overlaps(point)]
-                if available:
-                    x, y = min(available, key=lambda point:
-                               (point[0] - preferred[0]) ** 2 + (point[1] - preferred[1]) ** 2)
+            desired = self._grid_position(icon["grid_index"], x_positions, y_positions)
+            available = [point for point in slots if point not in occupied]
+            candidates = available or slots
+            x, y = min(candidates, key=lambda point:
+                       (point[0] - desired[0]) ** 2 + (point[1] - desired[1]) ** 2)
             icon["x"], icon["y"] = x, y
             place(icon["view"], x, y)
-            placed.append((x, y))
+            occupied.add((x, y))
 
-        self.positions = {item["key"]: [round(item["x"]), round(item["y"])]
+        self.positions = {item["key"]: item["grid_index"]
                           for item in self.icons.values()}
         save_positions(self.positions)
         if self.context_visible:
             self.context_menu.reposition()
 
-    def _add_icon(self, key, symbol, label, app_id, context, x, y, is_folder=None):
+    def _grid_axes(self, width, height):
+        max_x = max(0, width - self.icon_width)
+        max_y = max(0, height - 56 - self.icon_height)
+        x_positions = list(range(self.gap, max_x + 1, self.icon_width + self.gap)) or [0]
+        y_positions = list(range(self.gap, max_y + 1, self.icon_height + self.gap)) or [0]
+        return x_positions, y_positions
+
+    def _grid_position(self, index, x_positions, y_positions):
+        row, col = divmod(max(0, index), len(x_positions))
+        y = (y_positions[row] if row < len(y_positions) else
+             y_positions[-1] + (row - len(y_positions) + 1) * (self.icon_height + self.gap))
+        return x_positions[col], y
+
+    def _grid_index_for(self, x, y, x_positions=None, y_positions=None):
+        if x_positions is None or y_positions is None:
+            x_positions, y_positions = self._grid_axes(self.screen_width, self.screen_height)
+        col = min(range(len(x_positions)), key=lambda i: abs(x_positions[i] - x))
+        row = min(range(len(y_positions)), key=lambda i: abs(y_positions[i] - y))
+        return row * len(x_positions) + col
+
+    def _add_icon(self, key, symbol, label, app_id, context, x, y, is_folder=None,
+                  grid_index=None):
         cell = tg.LinearLayout(self.activity, self.surface)
         cell.setdimensions(self.icon_width, self.icon_height)
         place(cell, x, y)
@@ -154,7 +170,9 @@ class Desktop:
         self.icons[cell.id] = {"key": key, "app_id": app_id, "context": context,
                                "is_folder": is_folder,
                                "label": label, "view": cell, "image": icon, "symbol": symbol,
-                               "x": x, "y": y}
+                               "x": x, "y": y,
+                               "grid_index": self._grid_index_for(x, y) if grid_index is None
+                               else grid_index}
         self.icon_order.append(cell.id)
 
     def refresh_associated_icons(self, _path=None, _app_id=None):
@@ -180,16 +198,7 @@ class Desktop:
 
     def _snap_icon_to_grid(self, icon_id):
         icon = self.icons[icon_id]
-        max_x = max(0, self.screen_width - self.icon_width)
-        max_y = max(0, self.screen_height - 56 - self.icon_height)
-        step_x = self.icon_width + self.gap
-        step_y = self.icon_height + self.gap
-        x_positions = list(range(self.gap, max_x + 1, step_x)) or [0]
-        y_positions = list(range(self.gap, max_y + 1, step_y)) or [0]
-        if x_positions[-1] != max_x:
-            x_positions.append(max_x)
-        if y_positions[-1] != max_y:
-            y_positions.append(max_y)
+        x_positions, y_positions = self._grid_axes(self.screen_width, self.screen_height)
         occupied = [(other["x"], other["y"]) for other_id, other in self.icons.items()
                     if other_id != icon_id]
 
@@ -200,9 +209,12 @@ class Desktop:
 
         slots = [(x, y) for y in y_positions for x in x_positions if not overlaps(x, y)]
         if not slots:
-            slots = [(x, y) for y in y_positions for x in x_positions]
+            y = y_positions[-1] + self.icon_height + self.gap
+            slots = [(x, y) for x in x_positions]
         icon["x"], icon["y"] = min(
             slots, key=lambda point: (point[0] - icon["x"]) ** 2 + (point[1] - icon["y"]) ** 2)
+        icon["grid_index"] = self._grid_index_for(icon["x"], icon["y"],
+                                                  x_positions, y_positions)
         place(icon["view"], icon["x"], icon["y"])
 
     def _show_context_menu(self, icon_id):
@@ -278,16 +290,13 @@ class Desktop:
             print(f"nexa: {error}")
 
     def _arrange_icons(self):
-        columns = max(1, (self.screen_width - self.gap) // (self.icon_width + self.gap))
+        x_positions, y_positions = self._grid_axes(self.screen_width, self.screen_height)
         for index, icon_id in enumerate(self.icon_order):
             icon = self.icons[icon_id]
-            col, row = index % columns, index // columns
-            icon["x"] = min(self.screen_width - self.icon_width,
-                            self.gap + col * (self.icon_width + self.gap))
-            icon["y"] = min(self.screen_height - 56 - self.icon_height,
-                            self.gap + row * (self.icon_height + self.gap))
+            icon["grid_index"] = index
+            icon["x"], icon["y"] = self._grid_position(index, x_positions, y_positions)
             place(icon["view"], icon["x"], icon["y"])
-        self.positions = {icon["key"]: [icon["x"], icon["y"]]
+        self.positions = {icon["key"]: icon["grid_index"]
                           for icon in self.icons.values()}
         save_positions(self.positions)
 
@@ -369,11 +378,17 @@ class Desktop:
                 continue
             x, y = self._next_icon_position()
             saved = self.positions.get(path)
-            if isinstance(saved, list) and len(saved) == 2:
+            grid_index = None
+            if isinstance(saved, int) and not isinstance(saved, bool):
+                grid_index = max(0, saved)
+                x_positions, y_positions = self._grid_axes(self.screen_width, self.screen_height)
+                x, y = self._grid_position(grid_index, x_positions, y_positions)
+            elif isinstance(saved, list) and len(saved) == 2:
                 x, y = saved
+                grid_index = self._grid_index_for(x, y)
             symbol = "folder" if is_folder else file_associations.icon_for(path, self.apps, "window")
             self._add_icon(path, symbol, name,
-                           "files", path, x, y, is_folder)
+                           "files", path, x, y, is_folder, grid_index)
         self.home_item_snapshot = available
         self._resize(self.screen_width, self.screen_height, force=True)
 
