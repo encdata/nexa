@@ -1,4 +1,5 @@
 from threading import Lock
+from time import monotonic
 
 import termuxgui as tg
 
@@ -6,7 +7,7 @@ from shell import palette
 from shell.geometry import place
 from shell.icons import load
 from shell.surface import add as add_surface, add_rounded, set_color as set_surface_color
-from shell.surface import set_rounded_color
+from shell.surface import set_image_scale_type, set_rounded_color
 
 
 class WindowManager:
@@ -15,6 +16,10 @@ class WindowManager:
     control_width = 48
     border_width = 4
     drag_threshold = 10
+    resize_corner_size = 44
+    resize_update_interval = 0.016
+    minimum_width = 280
+    minimum_height = 220
 
     def __init__(self, activity, root, apps, screen_width, screen_height, density, rtl=False):
         self.activity = activity
@@ -70,8 +75,8 @@ class WindowManager:
         place(frame, x, y, top=True)
         border_surface = add_rounded(self.activity, frame, width, height,
                                      palette.surface_light, 14)
+        set_image_scale_type(border_surface, "fit_xy")
         place(border_surface, 0, 0)
-
         panel_width = width - self.border_width * 2
         panel_height = height - self.border_width * 2
         panel = tg.LinearLayout(self.activity, frame, vertical=True)
@@ -127,7 +132,6 @@ class WindowManager:
                 {"apps": self.apps, "open_app": self.on_open_app or self.open_app,
                  "association_changed": self.on_association_change})
         self._notify_window_resize(event_handler, panel_width, panel_height - self.titlebar_height)
-
         window = {
             "id": window_id,
             "app": app,
@@ -362,8 +366,8 @@ class WindowManager:
                           palette.surface_light)
         self._notify_window_resize(window["event_handler"], panel_width,
                                    max(1, panel_height - self.titlebar_height))
-        place(window["border_surface"], 0, 0)
         place(window["panel"], self.border_width, self.border_width)
+        place(window["border_surface"], 0, 0)
         self._place_window(window, top=top)
 
     @staticmethod
@@ -389,13 +393,25 @@ class WindowManager:
                 return False
             self._raise_window(window)
             self._set_active(window["id"])
-            if (window["x"] + 2 <= local_x <= window["x"] + window["width"] - 2
-                    and window["y"] + 2 <= local_y <= window["y"] + 2 + self.titlebar_height):
-                self.drag = {"window_id": window["id"], "pointer_id": pointer["id"],
-                             "start_x": window["x"], "start_y": window["y"],
-                             "start_pointer_x": local_x, "start_pointer_y": local_y,
-                             "moved": False}
-                self.pointer.move(local_x, local_y)
+            mode = None
+            bottom = window["y"] + window["height"]
+            if not window["maximized"] and local_y >= bottom - self.resize_corner_size:
+                if local_x <= window["x"] + self.resize_corner_size:
+                    mode = "resize-left"
+                elif local_x >= window["x"] + window["width"] - self.resize_corner_size:
+                    mode = "resize-right"
+            if mode is None and (window["x"] + 2 <= local_x <= window["x"] + window["width"] - 2
+                                 and window["y"] + 2 <= local_y <= window["y"] + 2 + self.titlebar_height):
+                mode = "move"
+            if mode is None:
+                return True
+            self.drag = {"window_id": window["id"], "pointer_id": pointer["id"],
+                         "mode": mode, "start_x": window["x"], "start_y": window["y"],
+                         "start_width": window["width"], "start_height": window["height"],
+                         "start_pointer_x": local_x, "start_pointer_y": local_y,
+                         "last_resize_update": 0,
+                         "moved": False}
+            self.pointer.move(local_x, local_y)
             return True
         if self.drag is None:
             return False
@@ -415,22 +431,63 @@ class WindowManager:
             distance_y = local_y - self.drag["start_pointer_y"]
             if not self.drag["moved"] and distance_x * distance_x + distance_y * distance_y >= self.drag_threshold ** 2:
                 self.drag["moved"] = True
-            if window["maximized"] or not self.drag["moved"]:
+            if not self.drag["moved"]:
                 self.pointer.move(local_x, local_y)
                 return True
 
-            window["x"] = round(max(0, min(self.screen_width - window["width"],
-                                           self.drag["start_x"] + distance_x)))
-            window["y"] = round(max(0, min(self.screen_height - self.taskbar_height - self.titlebar_height,
-                                           self.drag["start_y"] + distance_y)))
-            self._place_window(window, top=False)
+            mode = self.drag["mode"]
+            if mode == "move":
+                if window["maximized"]:
+                    self.pointer.move(local_x, local_y)
+                    return True
+                window["x"] = round(max(0, min(self.screen_width - window["width"],
+                                               self.drag["start_x"] + distance_x)))
+                window["y"] = round(max(0, min(self.screen_height - self.taskbar_height - self.titlebar_height,
+                                               self.drag["start_y"] + distance_y)))
+                self._place_window(window, top=False)
+            else:
+                max_bottom = max(1, self.screen_height - self.taskbar_height)
+                max_height = max(1, max_bottom - self.drag["start_y"])
+                min_height = min(self.minimum_height, max_height)
+                window["height"] = max(min_height, min(max_height,
+                                                       round(self.drag["start_height"] + distance_y)))
+                if mode == "resize-left":
+                    fixed_right = self.drag["start_x"] + self.drag["start_width"]
+                    max_width = max(1, fixed_right)
+                    min_width = min(self.minimum_width, max_width)
+                    window["width"] = max(min_width, min(max_width,
+                                                         round(self.drag["start_width"] - distance_x)))
+                    window["x"] = fixed_right - window["width"]
+                else:
+                    max_width = max(1, self.screen_width - self.drag["start_x"])
+                    min_width = min(self.minimum_width, max_width)
+                    window["width"] = max(min_width, min(max_width,
+                                                         round(self.drag["start_width"] + distance_x)))
+                    window["x"] = self.drag["start_x"]
+                now = monotonic()
+                if now - self.drag["last_resize_update"] >= self.resize_update_interval:
+                    self._apply_live_resize(window, move=mode == "resize-left")
+                    self.drag["last_resize_update"] = now
             self.pointer.move(local_x, local_y)
             return True
         if action in (tg.Event.touch_up, tg.Event.touch_cancel):
+            if self.drag["mode"].startswith("resize-"):
+                self._apply_window_geometry(window)
             self.pointer.hide()
             self.drag = None
             return True
         return True
+
+    def _apply_live_resize(self, window, move=False):
+        width, height = window["width"], window["height"]
+        panel_width = width - self.border_width * 2
+        panel_height = height - self.border_width * 2
+        window["frame"].setdimensions(width, height)
+        window["border_surface"].setdimensions(width, height)
+        window["panel"].setdimensions(panel_width, panel_height)
+        window["title_surface"].setdimensions(panel_width, self.titlebar_height)
+        if move:
+            self._place_window(window, top=False)
 
     def close(self, window_id):
         window = self.windows.pop(window_id, None)

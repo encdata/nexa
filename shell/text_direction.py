@@ -1,6 +1,8 @@
-RTL_LANGUAGES = {"ar", "fa", "he", "iw", "ps", "sd", "ug", "ur", "yi"}
+def is_rtl(_configuration):
+    return False
 
 
-def is_rtl(configuration):
-    language = configuration.get("language", "").lower().replace("_", "-").split("-", 1)[0]
-    return language in RTL_LANGUAGES
+def force_ltr(view):
+    view.a.c.send_msg({"method": "setLayoutDirection", "params": {
+        "aid": view.a.aid, "id": view.id, "direction": "ltr",
+    }})

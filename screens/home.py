@@ -5,7 +5,7 @@ from shell.desktop import Desktop
 from shell.taskbar import Taskbar
 from shell.window_manager import WindowManager
 from shell.pointer import Pointer
-from shell.text_direction import is_rtl
+from shell.text_direction import force_ltr
 from shell.wallpaper import add as add_wallpaper
 
 
@@ -19,8 +19,9 @@ class DesktopShell:
         self.density = config["density"]
         self.keyboard_hidden = config.get("keyboardHidden", True)
         self.next_wallpaper_resize_check = 0
-        self.rtl = is_rtl(config)
+        self.rtl = False
         self.root = tg.FrameLayout(activity, parent)
+        force_ltr(self.root)
         self.root.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
         self.root.setbackgroundcolor(0xFF10131A)
         self.root.sendtouchevent(True)

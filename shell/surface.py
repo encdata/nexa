@@ -1,4 +1,5 @@
 from functools import lru_cache
+from math import ceil, sqrt
 import struct
 import zlib
 
@@ -25,16 +26,24 @@ def _rounded_png(width, height, color, radius):
     scale = 2
     pixel_width, pixel_height = width * scale, height * scale
     radius = min(radius * scale, pixel_width // 2, pixel_height // 2)
+    if radius == 0:
+        return _solid_png(pixel_width, pixel_height, color)
     red, green, blue, alpha = ((color >> 16) & 255, (color >> 8) & 255,
                                color & 255, (color >> 24) & 255)
+    rgba = bytes((red, green, blue, alpha))
+    transparent = b"\0\0\0\0"
     rows = bytearray()
     for y in range(pixel_height):
-        rows.append(0)
-        for x in range(pixel_width):
-            near_x = min(max(x + 0.5, radius), pixel_width - radius)
-            near_y = min(max(y + 0.5, radius), pixel_height - radius)
-            inside = (x + 0.5 - near_x) ** 2 + (y + 0.5 - near_y) ** 2 <= radius ** 2
-            rows.extend((red, green, blue, alpha if inside else 0))
+        if y < radius:
+            distance_y = radius - y - 0.5
+        elif y >= pixel_height - radius:
+            distance_y = y + 0.5 - (pixel_height - radius)
+        else:
+            distance_y = 0
+        inset = max(0, min(pixel_width // 2,
+                           ceil(radius - sqrt(max(0, radius ** 2 - distance_y ** 2)) - 0.5)))
+        rows.extend(b"\0" + transparent * inset + rgba * (pixel_width - inset * 2)
+                    + transparent * inset)
 
     def chunk(kind, data):
         return (struct.pack(">I", len(data)) + kind + data
@@ -66,3 +75,9 @@ def add_rounded(activity, parent, width, height, color, radius=14):
     image = tg.ImageView(activity, parent)
     set_rounded_color(image, width, height, color, radius)
     return image
+
+
+def set_image_scale_type(image, scale_type):
+    image.a.c.send_msg({"method": "setImageScaleType", "params": {
+        "aid": image.a.aid, "id": image.id, "scaleType": scale_type,
+    }})
