@@ -180,9 +180,25 @@ class TerminalScreen:
         raw = raw.lstrip("?")
         params = []
         for value in raw.split(";") if raw else ():
+            if ":" not in value:
+                try:
+                    params.append(int(value) if value else 0)
+                except ValueError:
+                    params.append(0)
+                continue
+
+            parts = value.split(":")
             try:
-                params.append(int(value) if value else 0)
-            except ValueError:
+                code, mode = int(parts[0]), int(parts[1])
+                if code in (38, 48) and mode == 5:
+                    params.extend((code, mode, int(parts[-1])))
+                elif code in (38, 48) and mode == 2:
+                    channels = [int(part) for part in parts[2:] if part]
+                    if len(channels) >= 3:
+                        params.extend((code, mode, *channels[-3:]))
+                else:
+                    params.extend(int(part) if part else 0 for part in parts)
+            except (IndexError, ValueError):
                 params.append(0)
 
         def value(index, default=1):
