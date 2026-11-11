@@ -44,9 +44,9 @@ class Taskbar:
             self._add_window_scroll()
             self._add_clock()
 
-        menu_height = min(440, max(160, screen_height - self.height - 24))
+        menu_height = min(500, max(160, screen_height - self.height - 24))
         self.menu_height = menu_height
-        self.app_menu_width = min(320, max(1, screen_width - 16))
+        self.app_menu_width = min(380, max(1, screen_width - 16))
         self.menu_frame = tg.FrameLayout(activity, root)
         self.menu_frame.setdimensions(self.app_menu_width, menu_height)
         place(self.menu_frame, 8, screen_height - self.height - menu_height - 8)
@@ -55,43 +55,31 @@ class Taskbar:
         self.menu = tg.LinearLayout(activity, self.menu_frame)
         self.menu.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
         header = tg.LinearLayout(activity, self.menu, vertical=False)
-        header.setdimensions(tg.View.MATCH_PARENT, 56)
+        header.setdimensions(tg.View.MATCH_PARENT, 72)
         header.setlinearlayoutparams(0)
-
-        def add_heading():
-            heading = tg.TextView(activity, "all apps", header)
-            heading.setheight(56)
-            heading.setlinearlayoutparams(1)
-            heading.setmargin(16, "left")
-            heading.settextsize(18)
-            heading.settextcolor(palette.text)
-            heading.setgravity(2 if rtl else 0, 1)
-
-        def add_count():
-            count = tg.TextView(activity, f"{len(apps)}", header)
-            count.setdimensions(40, 56)
-            count.setlinearlayoutparams(0)
-            count.setmargin(12, "right")
-            count.settextsize(13)
-            count.settextcolor(palette.muted)
-            count.setgravity(0 if rtl else 2, 1)
-
-        if rtl:
-            add_count()
-            add_heading()
-        else:
-            add_heading()
-            add_count()
+        header.setbackgroundcolor(palette.surface_light)
+        heading = tg.TextView(activity, "\u2003All apps", header)
+        heading.setdimensions(tg.View.MATCH_PARENT, 72)
+        heading.setlinearlayoutparams(0)
+        heading.settextsize(20)
+        heading.settextcolor(palette.text)
+        heading.setgravity(0, 1)
         divider = tg.LinearLayout(activity, self.menu)
         divider.setdimensions(tg.View.MATCH_PARENT, 1)
         divider.setlinearlayoutparams(0)
-        divider.setbackgroundcolor(palette.surface_light)
+        divider.setbackgroundcolor(palette.accent)
         scroll = tg.NestedScrollView(activity, self.menu, fillviewport=True, nobar=True)
         scroll.setheight(0)
         scroll.setlinearlayoutparams(1)
         entries = tg.LinearLayout(activity, scroll)
         entries.setdimensions(tg.View.MATCH_PARENT, tg.View.WRAP_CONTENT)
-        for app in apps.values():
+        sorted_apps = sorted(apps.values(), key=lambda app: app.name.casefold())
+        previous_letter = None
+        for app in sorted_apps:
+            letter = app.name[:1].upper()
+            if letter != previous_letter:
+                self._add_app_heading(entries, letter)
+                previous_letter = letter
             self._add_app_entry(entries, app)
         self.menu_frame.setvisibility(tg.View.GONE)
 
@@ -103,13 +91,12 @@ class Taskbar:
         set_surface_color(self.surface, self.screen_width, self.height, palette.surface)
         self._layout_window_buttons()
 
-        self.app_menu_width = min(320, max(1, self.screen_width - 16))
-        self.menu_height = min(440, max(160, self.screen_height - self.height - 24))
+        self.app_menu_width = min(380, max(1, self.screen_width - 16))
+        self.menu_height = min(500, max(160, self.screen_height - self.height - 24))
         self.menu_frame.setdimensions(self.app_menu_width, self.menu_height)
         place(self.menu_frame, 8, self.screen_height - self.height - self.menu_height - 8,
               top=self.menu_visible)
         set_surface_color(self.menu_surface, self.app_menu_width, self.menu_height, palette.surface)
-
     def _add_window_scroll(self):
         self.window_scroll = tg.HorizontalScrollView(self.activity, self.view, nobar=True)
         self.window_scroll.setdimensions(0, tg.View.MATCH_PARENT)
@@ -152,6 +139,15 @@ class Taskbar:
         image.setlinearlayoutparams(0)
         self.buttons[button.id] = ("menu", None)
 
+    def _add_app_heading(self, parent, letter):
+        heading = tg.TextView(self.activity, "\u2003" + letter, parent)
+        heading.setdimensions(tg.View.MATCH_PARENT, 38)
+        heading.setlinearlayoutparams(0)
+        heading.setmargin(14, "top")
+        heading.settextsize(14)
+        heading.settextcolor(palette.muted)
+        heading.setgravity(0, 1)
+
     def _add_app_entry(self, parent, app):
         button = tg.LinearLayout(self.activity, parent, vertical=False)
         button.setdimensions(tg.View.MATCH_PARENT, 56)
@@ -160,32 +156,34 @@ class Taskbar:
         button.setmargin(8, "right")
         button.setmargin(3, "top")
         button.setmargin(3, "bottom")
-        button.setbackgroundcolor(palette.surface_light)
+        button.setbackgroundcolor(palette.window_content)
         button.sendclickevent(True)
         self.buttons[button.id] = ("app", app.app_id)
+
+        def add_icon():
+            image = tg.ImageView(self.activity, button)
+            image.setdimensions(28, 28)
+            image.setimage(load(app.icon))
+            image.setmargin(12, "left")
+            image.setmargin(4, "right")
+            image.setmargin(14, "top")
+            image.setmargin(14, "bottom")
+            image.setlinearlayoutparams(0)
+
         def add_label():
             label = tg.TextView(self.activity, app.name, button)
             label.setheight(56)
             label.setlinearlayoutparams(1)
-            label.setmargin(4, "left")
-            label.setmargin(12, "right")
+            label.setmargin(12, "left")
             label.settextsize(15)
             label.settextcolor(palette.text)
-            label.setgravity(2 if self.rtl else 0, 1)
+            label.setgravity(0, 1)
 
         if self.rtl:
             add_label()
-
-        image = tg.ImageView(self.activity, button)
-        image.setdimensions(32, 32)
-        image.setbackgroundcolor(0xFFE8EDF2)
-        image.setimage(load(app.icon))
-        image.setmargin(12, "left")
-        image.setmargin(12, "right")
-        image.setmargin(12, "top")
-        image.setmargin(12, "bottom")
-        image.setlinearlayoutparams(0)
-        if not self.rtl:
+            add_icon()
+        else:
+            add_icon()
             add_label()
 
     def add_window(self, window_id, app, title=None):
