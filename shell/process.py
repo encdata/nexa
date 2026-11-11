@@ -18,7 +18,11 @@ class CommandSession:
 
         child_env = os.environ.copy()
         if env is not None:
-            child_env.update(env)
+            for key, value in env.items():
+                if value is None:
+                    child_env.pop(key, None)
+                else:
+                    child_env[key] = value
 
         master_fd, slave_fd = pty.openpty()
         try:

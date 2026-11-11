@@ -73,7 +73,8 @@ class TerminalApp:
         shell = os.environ.get("SHELL") or "/data/data/com.termux/files/usr/bin/bash"
         self.session = CommandSession(
             [shell, "-i"], cwd=os.path.expanduser("~"),
-            env={"TERM": "xterm-256color", "COLORTERM": "truecolor"},
+            env={"TERM": "xterm-256color", "COLORTERM": "truecolor",
+                 "NO_COLOR": None, "FORCE_COLOR": "1"},
             columns=80, rows=24,
         )
         self.buttons = {interrupt.id: ("interrupt", None), enter.id: ("enter", None)}
