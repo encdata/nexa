@@ -2,7 +2,7 @@ import termuxgui as tg
 
 from shell import palette
 from shell.geometry import place
-from shell.surface import add as add_surface, set_color as set_surface_color
+from shell.surface import add_rounded, set_rounded_color
 
 
 class ContextMenu:
@@ -24,8 +24,8 @@ class ContextMenu:
         self.position = (0, 0)
         self.view = tg.FrameLayout(activity, parent)
         self.view.setdimensions(self.width, self.height)
-        self.view.setbackgroundcolor(palette.surface)
-        self.background = add_surface(activity, self.view, self.width, self.height, palette.surface)
+        self.background = add_rounded(activity, self.view, self.width, self.height,
+                                      palette.surface, 12)
         self.content = tg.LinearLayout(activity, self.view)
         self.content.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
         self.rows = {}
@@ -36,7 +36,6 @@ class ContextMenu:
             row.setmargin(6, "left")
             row.setmargin(6, "right")
             row.setmargin(2, "top")
-            row.setbackgroundcolor(palette.surface)
             row.sendclickevent(True)
             row.settextsize(14)
             row.settextcolor(palette.text)
@@ -56,7 +55,7 @@ class ContextMenu:
         height = max(1, len(actions)) * self.row_height + 8
         self.height = height
         self.view.setdimensions(self.width, height)
-        set_surface_color(self.background, self.width, height, palette.surface)
+        set_rounded_color(self.background, self.width, height, palette.surface, 12)
         width, screen_height = self.bounds()
         x = min(max(0, round(x)), max(0, width - self.width))
         y = min(max(0, round(y)), max(0, screen_height - height))

@@ -35,10 +35,10 @@ class TerminalApp:
         self.scroll.setheight(0)
         self.scroll.setlinearlayoutparams(1)
         self.output_scroll = tg.HorizontalScrollView(activity, self.scroll, nobar=True)
-        self.output_scroll.setdimensions(tg.View.MATCH_PARENT, tg.View.WRAP_CONTENT)
+        self.output_scroll.setdimensions(tg.View.MATCH_PARENT, 24 * 18 + 16)
         self.output_scroll.sendclickevent(True)
         self.output_rows = tg.LinearLayout(activity, self.output_scroll)
-        self.output_rows.setdimensions(80 * 9, tg.View.WRAP_CONTENT)
+        self.output_rows.setdimensions(80 * 9, 24 * 18)
         self.output_rows.setmargin(10, "left")
         self.output_rows.setmargin(10, "right")
         self.output_rows.setmargin(8, "top")
@@ -172,6 +172,8 @@ class TerminalApp:
 
     def _render(self, force=False):
         rows = self.screen.render_rows()
+        self.output_scroll.setheight(len(rows) * 18 + 16)
+        self.output_rows.setheight(len(rows) * 18)
         if force or len(rows) != len(self.row_views):
             self.output_rows.clearchildren()
             self.row_views = []
