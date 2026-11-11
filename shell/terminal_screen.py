@@ -1,4 +1,5 @@
 from collections import deque
+from unicodedata import combining, east_asian_width
 
 
 ANSI_COLORS = (
@@ -26,6 +27,10 @@ class TerminalScreen:
         self.foreground = self.default_fg
         self.background = self.default_bg
         self.bold = False
+        self.dim = False
+        self.italic = False
+        self.underline = False
+        self.strikethrough = False
         self.reverse = False
         self.primary = self._blank()
         self.alternate = None
@@ -36,21 +41,35 @@ class TerminalScreen:
         self.scroll_top = 0
         self.scroll_bottom = self.rows - 1
         self.cursor_visible = True
+        self.application_cursor_keys = False
+        self.bracketed_paste = False
+        self.mouse_tracking = 0
+        self.mouse_sgr = False
+        self.origin_mode = False
+        self.auto_wrap = True
+        self.insert_mode = False
+        self.wrap_pending = False
         self.state = "text"
         self.sequence = ""
         self.charset = "ascii"
+        self.tab_stops = set(range(8, self.columns, 8))
+        self.last_printed = " "
+        self.title = ""
+        self.string_kind = ""
+        self.responses = deque()
 
     def _style(self):
         fg, bg = self.foreground, self.background
         if self.bold and fg in ANSI_COLORS[:8]:
             fg = ANSI_COLORS[ANSI_COLORS.index(fg) + 8]
+        if self.dim:
+            fg = (fg & 0x00FFFFFF) | (((fg >> 24) // 2) << 24)
         if self.reverse:
             fg, bg = bg, fg
-        return fg, bg, self.bold
+        return fg, bg, self.bold, self.italic, self.underline, self.strikethrough
 
     def _blank_cell(self):
-        fg, bg, bold = self._style()
-        return " ", fg, bg, bold
+        return " ", *self._style()
 
     def _blank_row(self):
         return [self._blank_cell() for _ in range(self.columns)]
@@ -60,14 +79,25 @@ class TerminalScreen:
 
     def feed(self, text):
         for char in text:
-            if self.state == "osc":
+            if self.state in ("osc", "string"):
                 if char == "\x07":
+                    if self.state == "osc":
+                        self._finish_osc()
                     self.state = "text"
                 elif char == "\x1b":
-                    self.state = "osc_escape"
+                    self.state = "string_escape"
+                elif self.state == "osc" and len(self.sequence) < 2048:
+                    self.sequence += char
                 continue
-            if self.state == "osc_escape":
-                self.state = "text" if char == "\\" else "osc"
+            if self.state == "string_escape":
+                if char == "\\":
+                    if self.string_kind == "osc":
+                        self._finish_osc()
+                    self.state = "text"
+                else:
+                    if self.string_kind == "osc" and len(self.sequence) < 2048:
+                        self.sequence += "\x1b" + char
+                    self.state = "osc" if self.string_kind == "osc" else "string"
                 continue
             if self.state == "charset":
                 self.charset = "dec" if char == "0" else "ascii"
@@ -88,13 +118,18 @@ class TerminalScreen:
                 self.state = "escape"
             elif char == "\r":
                 self.cursor_x = 0
+                self.wrap_pending = False
             elif char == "\n":
                 self._line_feed()
             elif char in ("\b", "\x7f"):
                 self.cursor_x = max(0, self.cursor_x - 1)
+                self.wrap_pending = False
             elif char == "\t":
-                self.cursor_x = min(self.columns - 1, (self.cursor_x // 8 + 1) * 8)
-            elif char >= " ":
+                self.cursor_x = min(self.columns - 1,
+                                    min((stop for stop in self.tab_stops if stop > self.cursor_x),
+                                        default=self.columns - 1))
+                self.wrap_pending = False
+            elif char >= " " and char != "\x7f":
                 self._put(char)
 
     def resize(self, columns, rows):
@@ -114,6 +149,8 @@ class TerminalScreen:
         self.cursor_y = min(self.cursor_y, rows - 1)
         self.scroll_top = 0
         self.scroll_bottom = rows - 1
+        self.tab_stops = {stop for stop in self.tab_stops if stop < columns}
+        self.wrap_pending = False
 
     def _resize_buffer(self, buffer):
         resized = [self._resize_row(row) for row in buffer[:self.rows]]
@@ -121,7 +158,10 @@ class TerminalScreen:
         return resized
 
     def _resize_row(self, row):
-        return row[:self.columns] + [self._blank_cell() for _ in range(max(0, self.columns - len(row)))]
+        resized = row[:self.columns] + [self._blank_cell() for _ in range(max(0, self.columns - len(row)))]
+        if resized and not resized[-1][0]:
+            resized[-1] = self._blank_cell()
+        return resized
 
     def render_rows(self):
         rows = self.screen if self.alternate is not None else list(self.scrollback) + self.screen
@@ -130,13 +170,14 @@ class TerminalScreen:
         for y, source in enumerate(rows):
             cells = source.copy()
             if self.cursor_visible and y == cursor_row:
-                char, fg, bg, bold = cells[self.cursor_x]
-                cells[self.cursor_x] = ("▏" if char == " " else "█", bg, fg, bold)
+                char, fg, bg, bold, italic, underline, strikethrough = cells[self.cursor_x]
+                cells[self.cursor_x] = ("▏" if not char or char == " " else "█",
+                                        bg, fg, bold, italic, underline, strikethrough)
             runs = []
             text = []
             style = None
-            for char, fg, bg, bold in cells:
-                cell_style = (fg, bg, bold)
+            for char, fg, bg, bold, italic, underline, strikethrough in cells:
+                cell_style = (fg, bg, bold, italic, underline, strikethrough)
                 if style is not None and cell_style != style:
                     runs.append(("".join(text), *style))
                     text = []
@@ -154,24 +195,49 @@ class TerminalScreen:
             self.sequence = ""
         elif char == "]":
             self.state = "osc"
+            self.string_kind = "osc"
+            self.sequence = ""
+        elif char in ("P", "^", "_"):
+            self.state = "string"
+            self.string_kind = "string"
         elif char == "7":
             self.saved_cursor = (self.cursor_x, self.cursor_y)
         elif char == "8":
             self.cursor_x, self.cursor_y = self.saved_cursor
+            self.wrap_pending = False
         elif char == "D":
+            self._line_feed()
+        elif char == "E":
+            self.cursor_x = 0
             self._line_feed()
         elif char == "M":
             self._reverse_index()
+        elif char == "H":
+            self.tab_stops.add(self.cursor_x)
         elif char == "c":
-            self.screen = self.primary
+            self.foreground = self.default_fg
+            self.background = self.default_bg
+            self.bold = self.dim = self.italic = self.underline = self.strikethrough = False
+            self.reverse = False
+            self.insert_mode = False
+            self.application_cursor_keys = False
+            self.bracketed_paste = False
+            self.mouse_tracking = 0
+            self.mouse_sgr = False
+            self.origin_mode = False
+            self.auto_wrap = True
+            self.wrap_pending = False
+            self.scroll_top = 0
+            self.scroll_bottom = self.rows - 1
+            self.tab_stops = set(range(8, self.columns, 8))
+            self.cursor_visible = True
+            self.charset = "ascii"
+            self.cursor_x = self.cursor_y = 0
+            self.saved_cursor = (0, 0)
+            self.scrollback.clear()
             self.alternate = None
             self.primary = self._blank()
             self.screen = self.primary
-            self.cursor_x = self.cursor_y = 0
-            self.scrollback.clear()
-            self.foreground = self.default_fg
-            self.background = self.default_bg
-            self.bold = self.reverse = False
         elif char in ("(", ")"):
             self.state = "charset"
 
@@ -206,10 +272,30 @@ class TerminalScreen:
             return current or default
 
         if private and final in ("h", "l"):
+            enabled = final == "h"
+            if 1 in params:
+                self.application_cursor_keys = enabled
             if 25 in params:
-                self.cursor_visible = final == "h"
+                self.cursor_visible = enabled
+            if 6 in params:
+                self.origin_mode = enabled
+                self.cursor_x = 0
+                self.cursor_y = self.scroll_top if enabled else 0
+            if 7 in params:
+                self.auto_wrap = enabled
+                self.wrap_pending = False
+            if 2004 in params:
+                self.bracketed_paste = enabled
+            if 1000 in params:
+                self.mouse_tracking = 1000 if enabled else 0
+            if 1002 in params:
+                self.mouse_tracking = 1002 if enabled else 0
+            if 1003 in params:
+                self.mouse_tracking = 1003 if enabled else 0
+            if 1006 in params:
+                self.mouse_sgr = enabled
             if any(p in (47, 1047, 1049) for p in params):
-                if final == "h" and self.alternate is None:
+                if enabled and self.alternate is None:
                     self.saved_cursor = (self.cursor_x, self.cursor_y)
                     self.alternate = self._blank()
                     self.screen = self.alternate
@@ -222,27 +308,40 @@ class TerminalScreen:
                     self.cursor_x, self.cursor_y = self.saved_cursor
                     self.scroll_top = 0
                     self.scroll_bottom = self.rows - 1
+                    self.wrap_pending = False
+            return
+
+        if final in ("h", "l") and 4 in params:
+            self.insert_mode = final == "h"
             return
 
         count = max(1, min(value(0), max(self.columns, self.rows)))
         if final == "A":
-            self.cursor_y = max(self.scroll_top, self.cursor_y - count)
+            top = self.scroll_top if self.origin_mode else 0
+            self.cursor_y = max(top, self.cursor_y - count)
         elif final == "B":
-            self.cursor_y = min(self.scroll_bottom, self.cursor_y + count)
+            bottom = self.scroll_bottom if self.origin_mode else self.rows - 1
+            self.cursor_y = min(bottom, self.cursor_y + count)
         elif final == "C":
             self.cursor_x = min(self.columns - 1, self.cursor_x + count)
         elif final == "D":
             self.cursor_x = max(0, self.cursor_x - count)
         elif final in ("E", "F"):
-            self.cursor_y = max(self.scroll_top, min(self.scroll_bottom,
+            top = self.scroll_top if self.origin_mode else 0
+            bottom = self.scroll_bottom if self.origin_mode else self.rows - 1
+            self.cursor_y = max(top, min(bottom,
                                  self.cursor_y + count if final == "E" else self.cursor_y - count))
             self.cursor_x = 0
         elif final == "G":
             self.cursor_x = min(self.columns - 1, value(0) - 1)
         elif final == "d":
-            self.cursor_y = min(self.rows - 1, value(0) - 1)
+            top = self.scroll_top if self.origin_mode else 0
+            bottom = self.scroll_bottom if self.origin_mode else self.rows - 1
+            self.cursor_y = min(bottom, top + value(0) - 1)
         elif final in ("H", "f"):
-            self.cursor_y = min(self.rows - 1, value(0) - 1)
+            top = self.scroll_top if self.origin_mode else 0
+            bottom = self.scroll_bottom if self.origin_mode else self.rows - 1
+            self.cursor_y = min(bottom, top + value(0) - 1)
             self.cursor_x = min(self.columns - 1, value(1) - 1)
         elif final == "J":
             self._erase_display(params[0] if params else 0)
@@ -267,13 +366,39 @@ class TerminalScreen:
             self.scroll_bottom = min(self.rows - 1, value(1, self.rows) - 1)
             if self.scroll_bottom < self.scroll_top:
                 self.scroll_top, self.scroll_bottom = 0, self.rows - 1
-            self.cursor_x = self.cursor_y = 0
+            self.cursor_x = 0
+            self.cursor_y = self.scroll_top if self.origin_mode else 0
+            self.wrap_pending = False
         elif final == "s":
             self.saved_cursor = (self.cursor_x, self.cursor_y)
         elif final == "u":
             self.cursor_x, self.cursor_y = self.saved_cursor
+        elif final == "I":
+            for _ in range(count):
+                self.cursor_x = min(self.columns - 1,
+                                    min((stop for stop in self.tab_stops if stop > self.cursor_x),
+                                        default=self.columns - 1))
+        elif final == "Z":
+            self.cursor_x = max((stop for stop in self.tab_stops if stop < self.cursor_x), default=0)
+        elif final == "g":
+            if params and params[0] == 3:
+                self.tab_stops.clear()
+            else:
+                self.tab_stops.discard(self.cursor_x)
+        elif final == "b" and self.last_printed:
+            for _ in range(count):
+                self._put(self.last_printed)
         elif final == "m":
             self._sgr(params)
+        elif final == "n":
+            if params and params[0] == 5:
+                self.responses.append("\x1b[0n")
+            elif params and params[0] == 6:
+                self.responses.append(f"\x1b[{self.cursor_y + 1};{self.cursor_x + 1}R")
+        elif final == "c":
+            self.responses.append("\x1b[?1;2c" if not raw.startswith(">") else "\x1b[>0;0;0c")
+        if final in ("A", "B", "C", "D", "E", "F", "G", "d", "H", "f", "r", "s", "u"):
+            self.wrap_pending = False
 
     def _sgr(self, params):
         params = params or [0]
@@ -282,11 +407,25 @@ class TerminalScreen:
             code = params[index]
             if code == 0:
                 self.foreground, self.background = self.default_fg, self.default_bg
-                self.bold = self.reverse = False
+                self.bold = self.dim = self.italic = self.underline = self.strikethrough = self.reverse = False
             elif code == 1:
                 self.bold = True
+            elif code == 2:
+                self.dim = True
+            elif code == 3:
+                self.italic = True
+            elif code == 4 or code == 21:
+                self.underline = True
+            elif code == 9:
+                self.strikethrough = True
             elif code == 22:
-                self.bold = False
+                self.bold = self.dim = False
+            elif code == 23:
+                self.italic = False
+            elif code == 24:
+                self.underline = False
+            elif code == 29:
+                self.strikethrough = False
             elif code == 7:
                 self.reverse = True
             elif code == 27:
@@ -310,7 +449,8 @@ class TerminalScreen:
                     setattr(self, target, self._indexed_color(params[index + 2]))
                     index += 2
                 elif mode == 2 and index + 4 < len(params):
-                    red, green, blue = params[index + 2:index + 5]
+                    red, green, blue = (max(0, min(255, channel))
+                                        for channel in params[index + 2:index + 5])
                     setattr(self, target, 0xFF000000 | (red << 16) | (green << 8) | blue)
                     index += 4
             index += 1
@@ -327,17 +467,73 @@ class TerminalScreen:
         gray = 8 + max(0, min(23, index - 232)) * 10
         return 0xFF000000 | (gray << 16) | (gray << 8) | gray
 
+    def _finish_osc(self):
+        command, separator, value = self.sequence.partition(";")
+        if separator and command in ("0", "1", "2"):
+            self.title = "".join(char for char in value if char.isprintable())[:128]
+        self.sequence = ""
+
+    def take_responses(self):
+        responses = list(self.responses)
+        self.responses.clear()
+        return responses
+
     def _put(self, char):
+        width = 0 if combining(char) else 2 if east_asian_width(char) in ("W", "F") else 1
+        if width == 0:
+            previous_x = self.cursor_x - 1
+            if self.wrap_pending:
+                previous_x = self.columns - 1
+            if previous_x >= 0:
+                if self.screen[self.cursor_y][previous_x][0] == "" and previous_x > 0:
+                    previous_x -= 1
+                old = self.screen[self.cursor_y][previous_x]
+                self.screen[self.cursor_y][previous_x] = (old[0] + char, *old[1:])
+            return
+        if self.wrap_pending:
+            if self.auto_wrap:
+                self.cursor_x = 0
+                self._line_feed()
+            self.wrap_pending = False
         if self.cursor_x >= self.columns:
             self.cursor_x = 0
             self._line_feed()
+        if width == 2 and self.cursor_x == self.columns - 1:
+            if self.auto_wrap:
+                self.cursor_x = 0
+                self._line_feed()
+            else:
+                width = 1
         if self.charset == "dec":
             char = self.DEC_GRAPHICS.get(char, char)
-        fg, bg, bold = self._style()
-        self.screen[self.cursor_y][self.cursor_x] = (char, fg, bg, bold)
-        self.cursor_x += 1
+        if self.insert_mode:
+            self._insert_chars(width)
+        row = self.screen[self.cursor_y]
+        self._clear_wide_cell(row, self.cursor_x)
+        if width == 2 and self.cursor_x + 1 < self.columns:
+            self._clear_wide_cell(row, self.cursor_x + 1)
+        style = self._style()
+        row[self.cursor_x] = (char, *style)
+        if width == 2:
+            row[self.cursor_x + 1] = ("", *style)
+        self.last_printed = char
+        if self.cursor_x + width >= self.columns:
+            self.cursor_x = self.columns - 1
+            self.wrap_pending = self.auto_wrap
+        else:
+            self.cursor_x += width
+
+    def _clear_wide_cell(self, row, column):
+        if row[column][0] == "" and column > 0:
+            row[column - 1] = self._blank_cell()
+            row[column] = self._blank_cell()
+        elif row[column][0] and east_asian_width(row[column][0][0]) in ("W", "F"):
+            row[column] = self._blank_cell()
+            if column + 1 < self.columns and row[column + 1][0] == "":
+                row[column + 1] = self._blank_cell()
 
     def _line_feed(self):
+        self.wrap_pending = False
         if self.cursor_y == self.scroll_bottom:
             self._scroll_up(1)
         else:

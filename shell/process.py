@@ -5,7 +5,6 @@ import pty
 import queue
 import signal
 import struct
-import subprocess
 import termios
 from threading import Event, Lock, Thread, current_thread
 
@@ -24,23 +23,17 @@ class CommandSession:
                 else:
                     child_env[key] = value
 
-        master_fd, slave_fd = pty.openpty()
-        try:
-            self.process = subprocess.Popen(
-                argv,
-                cwd=cwd,
-                env=child_env,
-                stdin=slave_fd,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                close_fds=True,
-                start_new_session=True,
-            )
-        except Exception:
-            os.close(master_fd)
-            os.close(slave_fd)
-            raise
-        os.close(slave_fd)
+        pid, master_fd = pty.fork()
+        if pid == 0:
+            try:
+                if cwd is not None:
+                    os.chdir(cwd)
+                os.execvpe(argv[0], argv, child_env)
+            except BaseException as error:
+                try:
+                    os.write(2, f"nexa terminal: {error}\n".encode())
+                finally:
+                    os._exit(127)
 
         self.on_output = on_output
         self.on_event = on_event
@@ -48,6 +41,7 @@ class CommandSession:
         self.output = queue.Queue(maxsize=64)
         self.error = None
         self.exit_code = None
+        self.pid = pid
         self._fd = master_fd
         self._closed = Event()
         self._write_lock = Lock()
@@ -56,14 +50,17 @@ class CommandSession:
         self._reader.start()
 
     def write(self, data):
-        if self._closed.is_set() or self.process.poll() is not None:
+        if self._closed.is_set() or self.exit_code is not None:
             return False
         if isinstance(data, str):
             data = data.encode()
         with self._write_lock:
             offset = 0
-            while offset < len(data):
-                offset += os.write(self._fd, data[offset:])
+            try:
+                while offset < len(data):
+                    offset += os.write(self._fd, data[offset:])
+            except OSError:
+                return False
         return True
 
     def resize(self, columns, rows):
@@ -73,19 +70,19 @@ class CommandSession:
         rows = max(1, min(65535, int(rows)))
         fcntl.ioctl(self._fd, termios.TIOCSWINSZ,
                     struct.pack("HHHH", rows, columns, 0, 0))
-        if self.process.poll() is None:
+        if self.exit_code is None:
             try:
-                os.killpg(self.process.pid, signal.SIGWINCH)
+                os.killpg(self.pid, signal.SIGWINCH)
             except ProcessLookupError:
                 pass
 
     def read_output(self):
-        chunks = []
+        chunks = bytearray()
         while True:
             try:
-                chunks.append(self.output.get_nowait())
+                chunks.extend(self.output.get_nowait())
             except queue.Empty:
-                return b"".join(chunks)
+                return bytes(chunks)
 
     def handle_event(self, event):
         return self.on_event(event) if self.on_event is not None else False
@@ -114,7 +111,11 @@ class CommandSession:
             self.error = error
             self._terminate()
         finally:
-            self.exit_code = self.process.wait()
+            try:
+                _, status = os.waitpid(self.pid, 0)
+                self.exit_code = os.waitstatus_to_exitcode(status)
+            except ChildProcessError:
+                pass
             try:
                 os.close(self._fd)
             except OSError:
@@ -123,10 +124,10 @@ class CommandSession:
                 self.on_exit(self.exit_code)
 
     def _terminate(self):
-        if self.process.poll() is not None:
+        if self.exit_code is not None:
             return
         try:
-            os.killpg(self.process.pid, signal.SIGTERM)
+            os.killpg(self.pid, signal.SIGTERM)
         except ProcessLookupError:
             return
 
@@ -135,13 +136,12 @@ class CommandSession:
             return
         self._closed.set()
         self._terminate()
-        try:
-            self.process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
+        if self._reader is current_thread():
+            return
+        self._reader.join(timeout=1)
+        if self._reader.is_alive():
             try:
-                os.killpg(self.process.pid, signal.SIGKILL)
+                os.killpg(self.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
-            self.process.wait()
-        if self._reader is not current_thread():
-            self._reader.join(timeout=1)
+            self._reader.join()
