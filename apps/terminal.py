@@ -34,10 +34,8 @@ class TerminalApp:
         self.scroll = tg.NestedScrollView(activity, root, fillviewport=True, nobar=False)
         self.scroll.setheight(0)
         self.scroll.setlinearlayoutparams(1)
-        self.output_scroll = tg.HorizontalScrollView(activity, self.scroll, nobar=True)
-        self.output_scroll.setdimensions(tg.View.MATCH_PARENT, 24 * 18 + 16)
-        self.output_scroll.sendclickevent(True)
-        self.output_rows = tg.LinearLayout(activity, self.output_scroll)
+        self.scroll.sendclickevent(True)
+        self.output_rows = tg.LinearLayout(activity, self.scroll)
         self.output_rows.setdimensions(80 * 9, 24 * 18)
         self.output_rows.setmargin(10, "left")
         self.output_rows.setmargin(10, "right")
@@ -143,7 +141,7 @@ class TerminalApp:
         if event.type == tg.Event.key and event.id == self.keyboard_input.id:
             self._send_key(event.value)
             return True
-        if event.type == tg.Event.click and (event.id == self.output_scroll.id
+        if event.type == tg.Event.click and (event.id == self.scroll.id
                                                or event.id in {row.id for row in self.row_views}):
             self.keyboard_input.focus(forcesoft=True)
             return True
@@ -172,7 +170,7 @@ class TerminalApp:
 
     def _render(self, force=False):
         rows = self.screen.render_rows()
-        self.output_scroll.setheight(len(rows) * 18 + 16)
+        self.output_rows.setwidth(self.screen.columns * 9)
         self.output_rows.setheight(len(rows) * 18)
         if force or len(rows) != len(self.row_views):
             self.output_rows.clearchildren()
