@@ -197,7 +197,7 @@ class TerminalApp:
                 segment.settextsize(13)
                 segment.settextcolor(foreground)
                 segment.setbackgroundcolor(background)
-                segment.setgravity(1, 1)
+                segment.setgravity(0, 1)
                 place(segment, column * 9, 0)
                 column += len(text)
             self.rendered_rows[index] = signature
@@ -207,7 +207,6 @@ class TerminalApp:
         if data:
             self.screen.feed(self.decoder.decode(data))
             self._render()
-            self.scroll.setscrollposition(0, 1_000_000, smooth=False)
 
     def on_window_resize(self, width, height):
         columns = max(20, round(width / (8.5 * self.density)))

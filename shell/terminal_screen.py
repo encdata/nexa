@@ -22,7 +22,7 @@ class TerminalScreen:
         self.columns = max(1, columns)
         self.rows = max(1, rows)
         self.default_fg = 0xFFE8EDF2
-        self.default_bg = 0xFF171C24
+        self.default_bg = 0xFF000000
         self.foreground = self.default_fg
         self.background = self.default_bg
         self.bold = False
