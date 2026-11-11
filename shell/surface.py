@@ -66,6 +66,16 @@ def add(activity, parent, width, height, color):
     return image
 
 
+def add_keyboard_input(activity, parent):
+    view_id = activity.c.send_read_msg({"method": "createImageView", "params": {
+        "aid": activity.aid, "parent": parent.id, "keyboard": True,
+    }})
+    view = tg.View(activity, view_id)
+    view.setdimensions(1, 1)
+    view.setlinearlayoutparams(0)
+    return view
+
+
 def set_rounded_color(image, width, height, color, radius=14):
     image.setdimensions(width, height)
     image.setimage(_rounded_png(width, height, color, radius))

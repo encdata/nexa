@@ -2,10 +2,10 @@ from collections import deque
 
 
 ANSI_COLORS = (
-    0xFF171C24, 0xFFCC6666, 0xFF99CC99, 0xFFDDBB77,
-    0xFF6699CC, 0xFFCC99CC, 0xFF66CCCC, 0xFFE8EDF2,
-    0xFF667080, 0xFFFF7777, 0xFFAAEEAA, 0xFFFFDD88,
-    0xFF77AAEE, 0xFFEEAAEE, 0xFF77EEEE, 0xFFFFFFFF,
+    0xFF000000, 0xFFCD3131, 0xFF0DBC79, 0xFFE5E510,
+    0xFF2472C8, 0xFFBC3FBC, 0xFF11A8CD, 0xFFE5E5E5,
+    0xFF666666, 0xFFF14C4C, 0xFF23D18B, 0xFFF5F543,
+    0xFF3B8EEA, 0xFFD670D6, 0xFF29B8DB, 0xFFFFFFFF,
 )
 
 
@@ -42,6 +42,8 @@ class TerminalScreen:
 
     def _style(self):
         fg, bg = self.foreground, self.background
+        if self.bold and fg in ANSI_COLORS[:8]:
+            fg = ANSI_COLORS[ANSI_COLORS.index(fg) + 8]
         if self.reverse:
             fg, bg = bg, fg
         return fg, bg, self.bold
