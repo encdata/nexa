@@ -5,11 +5,12 @@ import termuxgui as tg
 from shell import palette
 from shell.geometry import place
 from shell.icons import load
-from shell.surface import add as add_surface, set_color as set_surface_color
+from shell.surface import add_rounded, set_rounded_color
 
 
 class Taskbar:
     height = 56
+    content_height = 48
     menu_button_width = 56
     clock_width = 72
     window_width = 56
@@ -31,10 +32,13 @@ class Taskbar:
         self.frame = tg.FrameLayout(activity, root)
         self.frame.setdimensions(tg.View.MATCH_PARENT, self.height)
         place(self.frame, 0, screen_height - self.height, top=True)
-        self.surface = add_surface(activity, self.frame, screen_width, self.height, palette.surface)
+        self.surface = add_rounded(activity, self.frame, max(1, screen_width - 16),
+                                   self.content_height, palette.surface, 14)
+        place(self.surface, 8, 4)
 
         self.view = tg.LinearLayout(activity, self.frame, vertical=False)
-        self.view.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
+        self.view.setdimensions(max(1, screen_width - 16), self.content_height)
+        place(self.view, 8, 4)
         if rtl:
             self._add_clock()
             self._add_window_scroll()
@@ -50,14 +54,13 @@ class Taskbar:
         self.menu_frame = tg.FrameLayout(activity, root)
         self.menu_frame.setdimensions(self.app_menu_width, menu_height)
         place(self.menu_frame, 8, screen_height - self.height - menu_height - 8)
-        self.menu_surface = add_surface(activity, self.menu_frame, self.app_menu_width, menu_height,
-                                        palette.surface)
+        self.menu_surface = add_rounded(activity, self.menu_frame, self.app_menu_width,
+                                        menu_height, palette.surface, 14)
         self.menu = tg.LinearLayout(activity, self.menu_frame)
         self.menu.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
         header = tg.LinearLayout(activity, self.menu, vertical=False)
         header.setdimensions(tg.View.MATCH_PARENT, 72)
         header.setlinearlayoutparams(0)
-        header.setbackgroundcolor(palette.surface_light)
         heading = tg.TextView(activity, "\u2003All apps", header)
         heading.setdimensions(tg.View.MATCH_PARENT, 72)
         heading.setlinearlayoutparams(0)
@@ -88,7 +91,11 @@ class Taskbar:
         self.screen_height = max(1, screen_height)
         self.frame.setdimensions(tg.View.MATCH_PARENT, self.height)
         place(self.frame, 0, self.screen_height - self.height, top=True)
-        set_surface_color(self.surface, self.screen_width, self.height, palette.surface)
+        set_rounded_color(self.surface, max(1, self.screen_width - 16),
+                          self.content_height, palette.surface, 14)
+        self.view.setdimensions(max(1, self.screen_width - 16), self.content_height)
+        place(self.surface, 8, 4)
+        place(self.view, 8, 4)
         self._layout_window_buttons()
 
         self.app_menu_width = min(380, max(1, self.screen_width - 16))
@@ -96,7 +103,8 @@ class Taskbar:
         self.menu_frame.setdimensions(self.app_menu_width, self.menu_height)
         place(self.menu_frame, 8, self.screen_height - self.height - self.menu_height - 8,
               top=self.menu_visible)
-        set_surface_color(self.menu_surface, self.app_menu_width, self.menu_height, palette.surface)
+        set_rounded_color(self.menu_surface, self.app_menu_width, self.menu_height,
+                          palette.surface, 14)
     def _add_window_scroll(self):
         self.window_scroll = tg.HorizontalScrollView(self.activity, self.view, nobar=True)
         self.window_scroll.setdimensions(0, tg.View.MATCH_PARENT)
@@ -105,16 +113,16 @@ class Taskbar:
         self.window_list.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
         if self.rtl:
             self.window_spacer = tg.LinearLayout(self.activity, self.window_list)
-            self.window_spacer.setdimensions(0, self.height)
+            self.window_spacer.setdimensions(0, self.content_height)
             self.window_spacer.setlinearlayoutparams(0, 0)
 
     def _layout_window_buttons(self):
-        viewport_width = max(0, self.screen_width - self.clock_width - self.menu_button_width)
+        viewport_width = max(0, self.screen_width - 16 - self.clock_width - self.menu_button_width)
         content_width = max(viewport_width, len(self.window_views) * self.window_width)
-        self.window_list.setdimensions(content_width, self.height)
+        self.window_list.setdimensions(content_width, self.content_height)
         if self.window_spacer is not None:
             self.window_spacer.setdimensions(
-                content_width - len(self.window_views) * self.window_width, self.height)
+                content_width - len(self.window_views) * self.window_width, self.content_height)
             offset = round(max(0, content_width - viewport_width) * self.density)
             self.window_scroll.setscrollposition(offset, 0, smooth=False)
 
@@ -122,20 +130,19 @@ class Taskbar:
         self.clock = tg.TextView(self.activity, datetime.now().strftime("%H:%M"), self.view)
         self.clock.settextcolor(palette.text)
         self.clock.setgravity(1, 1)
-        self.clock.setdimensions(self.clock_width, self.height)
+        self.clock.setdimensions(self.clock_width, self.content_height)
         self.clock.setlinearlayoutparams(0)
 
     def _add_menu_button(self):
         button = tg.LinearLayout(self.activity, self.view, vertical=True)
-        button.setdimensions(self.menu_button_width, self.height)
+        button.setdimensions(self.menu_button_width, self.content_height)
         button.setlinearlayoutparams(0)
-        button.setbackgroundcolor(palette.surface_light)
         button.sendclickevent(True)
         image = tg.ImageView(self.activity, button)
         image.setdimensions(28, 28)
         image.setimage(load("apps"))
         image.setmargin((self.menu_button_width - 28) // 2, "left")
-        image.setmargin((self.height - 28) // 2, "top")
+        image.setmargin((self.content_height - 28) // 2, "top")
         image.setlinearlayoutparams(0)
         self.buttons[button.id] = ("menu", None)
 
@@ -188,7 +195,7 @@ class Taskbar:
 
     def add_window(self, window_id, app, title=None):
         button = tg.LinearLayout(self.activity, self.window_list, vertical=False)
-        button.setdimensions(self.window_width, self.height)
+        button.setdimensions(self.window_width, self.content_height)
         button.setlinearlayoutparams(0, 1 if self.rtl else None)
         button.setbackgroundcolor(palette.surface)
         button.sendclickevent(True)
@@ -197,7 +204,7 @@ class Taskbar:
         image.setbackgroundcolor(0xFFE8EDF2)
         image.setimage(load(app.icon))
         image.setmargin((self.window_width - 28) // 2, "left")
-        image.setmargin((self.height - 28) // 2, "top")
+        image.setmargin((self.content_height - 28) // 2, "top")
         image.setlinearlayoutparams(0)
         self.buttons[button.id] = ("window", window_id)
         self.window_views[window_id] = button

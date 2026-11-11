@@ -5,14 +5,15 @@ import termuxgui as tg
 from shell import palette
 from shell.geometry import place
 from shell.icons import load
-from shell.surface import add as add_surface, set_color as set_surface_color
+from shell.surface import add as add_surface, add_rounded, set_color as set_surface_color
+from shell.surface import set_rounded_color
 
 
 class WindowManager:
     titlebar_height = 52
     taskbar_height = 56
     control_width = 48
-    border_width = 2
+    border_width = 4
     drag_threshold = 10
 
     def __init__(self, activity, root, apps, screen_width, screen_height, density, rtl=False):
@@ -64,48 +65,21 @@ class WindowManager:
         x = max(0, (self.screen_width - width) // 2)
         y = max(0, (self.screen_height - self.taskbar_height - height) // 2)
 
-        frame = tg.LinearLayout(self.activity, self.root, vertical=True)
+        frame = tg.FrameLayout(self.activity, self.root)
         frame.setdimensions(width, height)
-        frame.setbackgroundcolor(palette.window_border)
         place(frame, x, y, top=True)
+        border_surface = add_rounded(self.activity, frame, width, height,
+                                     palette.surface_light, 14)
+        place(border_surface, 0, 0)
 
         panel_width = width - self.border_width * 2
         panel_height = height - self.border_width * 2
+        panel = tg.LinearLayout(self.activity, frame, vertical=True)
+        panel.setdimensions(panel_width, panel_height)
+        panel.setbackgroundcolor(palette.window_content)
+        place(panel, self.border_width, self.border_width)
 
-        top_border = tg.LinearLayout(self.activity, frame)
-        top_border.setdimensions(tg.View.MATCH_PARENT, self.border_width)
-        top_border.setlinearlayoutparams(0)
-        top_border.setbackgroundcolor(palette.window_border)
-
-        middle = tg.LinearLayout(self.activity, frame, vertical=False)
-        middle.setdimensions(tg.View.MATCH_PARENT, 0)
-        middle.setlinearlayoutparams(1)
-
-        left_border = tg.LinearLayout(self.activity, middle)
-        left_border.setdimensions(self.border_width, tg.View.MATCH_PARENT)
-        left_border.setlinearlayoutparams(0)
-        left_border.setbackgroundcolor(palette.window_border)
-
-        panel = tg.FrameLayout(self.activity, middle)
-        panel.setdimensions(0, tg.View.MATCH_PARENT)
-        panel.setlinearlayoutparams(1)
-
-        right_border = tg.LinearLayout(self.activity, middle)
-        right_border.setdimensions(self.border_width, tg.View.MATCH_PARENT)
-        right_border.setlinearlayoutparams(0)
-        right_border.setbackgroundcolor(palette.window_border)
-
-        bottom_border = tg.LinearLayout(self.activity, frame)
-        bottom_border.setdimensions(tg.View.MATCH_PARENT, self.border_width)
-        bottom_border.setlinearlayoutparams(0)
-        bottom_border.setbackgroundcolor(palette.window_border)
-
-        surface = add_surface(self.activity, panel, panel_width, panel_height, palette.window_content)
-
-        body = tg.LinearLayout(self.activity, panel)
-        body.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
-
-        title_frame = tg.FrameLayout(self.activity, body)
+        title_frame = tg.FrameLayout(self.activity, panel)
         title_frame.setdimensions(tg.View.MATCH_PARENT, self.titlebar_height)
         title_frame.setlinearlayoutparams(0)
         title_surface = add_surface(self.activity, title_frame, panel_width, self.titlebar_height,
@@ -139,7 +113,7 @@ class WindowManager:
                 self._add_control(titlebar, window_id, "close", "close", 0xFF8E3340),
             ]
 
-        content = tg.FrameLayout(self.activity, body)
+        content = tg.FrameLayout(self.activity, panel)
         content.setwidth(tg.View.MATCH_PARENT)
         content.setheight(0)
         content.setlinearlayoutparams(1)
@@ -159,7 +133,7 @@ class WindowManager:
             "app": app,
             "frame": frame,
             "panel": panel,
-            "surface": surface,
+            "border_surface": border_surface,
             "title_surface": title_surface,
             "titlebar": titlebar,
             "title_view": title_view,
@@ -179,6 +153,8 @@ class WindowManager:
         self.windows[window_id] = window
         self.window_order.append(window_id)
         # termux:gui sometimes needs a location update after child views are added to lay them out.
+        place(border_surface, 0, 0)
+        place(panel, self.border_width, self.border_width)
         place(frame, x, y, top=True)
         self._set_active(window_id)
         return window_id
@@ -378,13 +354,16 @@ class WindowManager:
         window["frame"].setdimensions(width, height)
         panel_width = width - self.border_width * 2
         panel_height = height - self.border_width * 2
-        window["panel"].setdimensions(0, tg.View.MATCH_PARENT)
-        window["frame"].setbackgroundcolor(palette.window_border)
-        set_surface_color(window["surface"], panel_width, panel_height, palette.window_content)
+        window["panel"].setdimensions(panel_width, panel_height)
+        radius = 0 if window["maximized"] else 14
+        set_rounded_color(window["border_surface"], width, height, palette.surface_light, radius)
+        window["panel"].setbackgroundcolor(palette.window_content)
         set_surface_color(window["title_surface"], panel_width, self.titlebar_height,
                           palette.surface_light)
         self._notify_window_resize(window["event_handler"], panel_width,
                                    max(1, panel_height - self.titlebar_height))
+        place(window["border_surface"], 0, 0)
+        place(window["panel"], self.border_width, self.border_width)
         self._place_window(window, top=top)
 
     @staticmethod
