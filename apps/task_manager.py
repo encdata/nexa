@@ -211,6 +211,23 @@ class TaskManagerApp:
         search.settextsize(13)
         search.settextcolor(palette.text)
         search.sendtextevent(True)
+        columns = tg.LinearLayout(activity, process_page, vertical=False)
+        columns.setdimensions(tg.View.MATCH_PARENT, 34)
+        columns.setlinearlayoutparams(0)
+        sort_actions = {}
+        sort_headers = {}
+        for label, key, width in (("name", "name", 0), ("cpu", "cpu", 56),
+                                  ("memory", "memory", 72)):
+            header = tg.TextView(activity, label, columns)
+            header.setdimensions(width, 34)
+            header.setlinearlayoutparams(1 if key == "name" else 0)
+            header.setmargin(10 if key == "name" else 0, "left")
+            header.settextsize(11)
+            header.settextcolor(palette.muted)
+            header.setgravity(0 if key == "name" else 1, 1)
+            header.sendclickevent(True)
+            sort_actions[header.id] = key
+            sort_headers[key] = header
         process_scroll = tg.NestedScrollView(activity, process_page, fillviewport=True, nobar=True)
         process_scroll.setheight(0)
         process_scroll.setlinearlayoutparams(1)
@@ -268,7 +285,8 @@ class TaskManagerApp:
                            lambda: tuple(round(value / density) for value in parent.getdimensions()),
                            actions=("end_task",), labels={"end_task": "end task"})
         row_views = {}
-        state = {"snapshot": None, "selected": None, "active_page": process_page}
+        state = {"snapshot": None, "selected": None, "active_page": process_page,
+                 "sort_by": "name", "sort_descending": False}
         results = queue.Queue(maxsize=1)
         stop = threading.Event()
         protected = _protected_pids()
@@ -296,7 +314,7 @@ class TaskManagerApp:
 
         def make_process_row(process):
             row = tg.LinearLayout(activity, process_rows, vertical=False)
-            row.setdimensions(tg.View.MATCH_PARENT, 76)
+            row.setdimensions(tg.View.MATCH_PARENT, 62)
             row.setlinearlayoutparams(0)
             row.setmargin(6, "left")
             row.setmargin(6, "right")
@@ -317,10 +335,10 @@ class TaskManagerApp:
             if not rtl:
                 add_icon()
             info = tg.LinearLayout(activity, row)
-            info.setdimensions(0, 76)
+            info.setdimensions(0, 62)
             info.setlinearlayoutparams(1)
             title = tg.TextView(activity, process["name"], info)
-            title.setdimensions(tg.View.MATCH_PARENT, 38)
+            title.setdimensions(tg.View.MATCH_PARENT, 34)
             title.setlinearlayoutparams(0)
             title.setmargin(8 if rtl else 2, "left")
             title.setmargin(2 if rtl else 8, "right")
@@ -328,25 +346,43 @@ class TaskManagerApp:
             title.settextcolor(palette.text)
             title.setgravity(0, 1)
             details = tg.TextView(activity, "", info)
-            details.setdimensions(tg.View.MATCH_PARENT, 34)
+            details.setdimensions(tg.View.MATCH_PARENT, 24)
             details.setlinearlayoutparams(0)
             details.setmargin(8 if rtl else 2, "left")
             details.setmargin(2 if rtl else 8, "right")
             details.settextsize(11)
             details.settextcolor(palette.muted)
             details.setgravity(0, 1)
+            cpu_value = tg.TextView(activity, "", row)
+            cpu_value.setdimensions(56, 62)
+            cpu_value.settextsize(11)
+            cpu_value.settextcolor(palette.text)
+            cpu_value.setgravity(1, 1)
+            memory_value = tg.TextView(activity, "", row)
+            memory_value.setdimensions(72, 62)
+            memory_value.settextsize(11)
+            memory_value.settextcolor(palette.text)
+            memory_value.setgravity(1, 1)
             if rtl:
                 add_icon()
             return {"view": row, "title": title, "details": details,
+                    "cpu": cpu_value, "memory": memory_value,
                     "start_time": process["start_time"]}
 
         def render(snapshot):
-            processes = snapshot["processes"]
+            key = state["sort_by"]
+            processes = sorted(snapshot["processes"],
+                               key=lambda process: (process[key] if key != "name"
+                                                    else process[key].casefold(), process["pid"]),
+                               reverse=state["sort_descending"])
+            for sort_key, header in sort_headers.items():
+                arrow = (" ↓" if state["sort_descending"] else " ↑") if sort_key == key else ""
+                header.settext(sort_key + arrow)
             live = {process["pid"] for process in processes}
             for pid in tuple(row_views):
                 if pid not in live:
                     row_views.pop(pid)["view"].delete()
-            for process in processes:
+            for position, process in enumerate(processes):
                 pid = process["pid"]
                 row = row_views.get(pid)
                 if row is not None and row["start_time"] != process["start_time"]:
@@ -355,9 +391,11 @@ class TaskManagerApp:
                 if row is None:
                     row = make_process_row(process)
                     row_views[pid] = row
+                row["view"].setlinearlayoutparams(0, position)
                 row["title"].settext(process["name"])
-                row["details"].settext(
-                    f"pid {pid}   cpu {process['cpu']:.1f}%   ram {_format_size(process['memory'])}   {process['state']}")
+                row["details"].settext(f"pid {pid} · {process['state']}")
+                row["cpu"].settext(f"{process['cpu']:.1f}%")
+                row["memory"].settext(_format_size(process["memory"]))
                 row["view"].setbackgroundcolor(
                     palette.surface_light if state.get("selected") == pid else palette.surface)
                 query = state.get("query", "")
@@ -398,6 +436,16 @@ class TaskManagerApp:
                     render(state["snapshot"])
                 return True
             if event.type == tg.Event.click:
+                sort_by = sort_actions.get(event.id)
+                if sort_by is not None:
+                    if state["sort_by"] == sort_by:
+                        state["sort_descending"] = not state["sort_descending"]
+                    else:
+                        state["sort_by"] = sort_by
+                        state["sort_descending"] = sort_by != "name"
+                    if state["snapshot"] is not None:
+                        render(state["snapshot"])
+                    return True
                 selected_tab = tab_actions.get(event.id)
                 if selected_tab is not None:
                     _label, page = selected_tab
