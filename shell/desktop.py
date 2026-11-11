@@ -3,11 +3,12 @@ from threading import Lock, Timer
 
 import termuxgui as tg
 
-from shell import file_actions, palette
+from shell import file_actions, file_associations, palette
 from shell.context_menu import ContextMenu
 from shell.desktop_state import load_home_items, save_positions
 from shell.geometry import place
 from shell.icons import load
+from shell.open_with import OpenWithChooser
 
 
 class Desktop:
@@ -21,6 +22,7 @@ class Desktop:
                  positions, home_items, progress=None):
         self.activity = activity
         self.root = root
+        self.apps = apps
         self.open_app = open_app
         self.screen_width = screen_width
         self.screen_height = screen_height
@@ -46,7 +48,8 @@ class Desktop:
         capacity = columns * max_rows
         home_capacity = max(0, capacity - len(apps))
         self.home_capacity = home_capacity
-        items = [(path, "folder" if is_folder else "window", name, "files", path, is_folder)
+        items = [(path, "folder" if is_folder else file_associations.icon_for(path, apps, "window"),
+                  name, "files", path, is_folder)
                  for path, name, is_folder in home_items[:home_capacity]]
         items.extend((app.app_id, app.icon, app.name, app.app_id, None, None)
                      for app in apps.values())
@@ -65,6 +68,9 @@ class Desktop:
                 progress(f"placing desktop icons {index + 1}/{len(items)}", percent)
         self.context_menu = ContextMenu(activity, root,
                                         lambda: (self.screen_width, self.screen_height))
+        self.open_with = OpenWithChooser(
+            activity, root, lambda: (self.screen_width, self.screen_height), apps, open_app,
+            self.refresh_associated_icons)
         if progress is not None:
             progress("positioning desktop", 97)
         self._resize(screen_width, screen_height, force=True)
@@ -147,8 +153,18 @@ class Desktop:
         caption.setlinearlayoutparams(0)
         self.icons[cell.id] = {"key": key, "app_id": app_id, "context": context,
                                "is_folder": is_folder,
-                               "label": label, "view": cell, "x": x, "y": y}
+                               "label": label, "view": cell, "image": icon, "symbol": symbol,
+                               "x": x, "y": y}
         self.icon_order.append(cell.id)
+
+    def refresh_associated_icons(self, _path=None, _app_id=None):
+        for icon in self.icons.values():
+            if icon["context"] is None or icon["is_folder"]:
+                continue
+            symbol = file_associations.icon_for(icon["context"], self.apps, "window")
+            if symbol != icon["symbol"]:
+                icon["symbol"] = symbol
+                icon["image"].setimage(load(symbol))
 
     def _hide_context_menu(self):
         self.context_menu.hide()
@@ -206,7 +222,9 @@ class Desktop:
         elif icon["context"] is None:
             actions = ["open", "paste"]
         else:
-            actions = ["open", "copy", "cut", "paste", "delete"]
+            actions = ["open", "properties", "copy", "cut", "paste", "delete"]
+            if not icon["is_folder"]:
+                actions.insert(1, "open_with")
         self.context_menu.show(actions, *self.context_anchor, self._context_action)
         return True
 
@@ -229,7 +247,11 @@ class Desktop:
                 elif icon["is_folder"]:
                     self.open_app("files", icon["context"])
                 else:
-                    file_actions.open_file(icon["context"])
+                    self.open_with.open(icon["context"])
+            elif action == "properties" and icon is not None and icon["context"] is not None:
+                self.open_app("files", {"properties": icon["context"]})
+            elif action == "open_with" and icon is not None and not icon["is_folder"]:
+                self.open_with.show(icon["context"])
             elif action == "paste":
                 destination = os.path.expanduser("~")
                 if icon is not None and icon["context"] is not None:
@@ -340,12 +362,17 @@ class Desktop:
             if path in current:
                 icon = self.icons[current[path]]
                 icon["label"] = name
+                symbol = "folder" if is_folder else file_associations.icon_for(path, self.apps, "window")
+                if symbol != icon["symbol"]:
+                    icon["symbol"] = symbol
+                    icon["image"].setimage(load(symbol))
                 continue
             x, y = self._next_icon_position()
             saved = self.positions.get(path)
             if isinstance(saved, list) and len(saved) == 2:
                 x, y = saved
-            self._add_icon(path, "folder" if is_folder else "window", name,
+            symbol = "folder" if is_folder else file_associations.icon_for(path, self.apps, "window")
+            self._add_icon(path, symbol, name,
                            "files", path, x, y, is_folder)
         self.home_item_snapshot = available
         self._resize(self.screen_width, self.screen_height, force=True)
@@ -398,7 +425,14 @@ class Desktop:
             self.drag = None
 
     def _handle_event(self, event):
+        if self.open_with.handle_event(event):
+            return True
         if self.context_menu.handle_event(event):
+            return True
+        if event.type == tg.Event.back and self.open_with.visible:
+            self.open_with.hide()
+            return True
+        if self.open_with.visible:
             return True
         if event.type == tg.Event.back and self.context_visible:
             self._hide_context_menu()
@@ -473,8 +507,9 @@ class Desktop:
                 elif icon is not None:
                     context = icon["context"]
                     if icon["is_folder"] is False and context is not None:
-                        context = os.path.dirname(context)
-                    self.open_app(icon["app_id"], context)
+                        self.open_with.open(context)
+                    else:
+                        self.open_app(icon["app_id"], context)
             elif self.drag and action == tg.Event.touch_cancel:
                 self._cancel_long_press()
                 icon = self.icons.get(self.drag["icon_id"])

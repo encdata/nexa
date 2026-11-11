@@ -32,6 +32,7 @@ def main():
             while True:
                 event = connection.checkevent()
                 file_actions.process_completions()
+                shell.tick()
                 if event is None:
                     sleep(0.025)
                     continue

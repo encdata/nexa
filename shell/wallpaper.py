@@ -10,11 +10,16 @@ class Wallpaper:
         self.source = prepared["source"]
         self.density = density
         self.size = prepared["size"]
+        self.width = round(self.size[0] / density)
+        self.height = round(self.size[1] / density)
         self.view = tg.ImageView(activity, root)
-        self.view.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
+        self.view.setdimensions(self.width, self.height)
         self.view.setimage(prepared["image"])
 
     def resize(self, width, height):
+        width, height = max(1, round(width)), max(1, round(height))
+        self.view.setdimensions(width, height)
+        self.width, self.height = width, height
         size = (max(1, round(width * self.density)), max(1, round(height * self.density)))
         if size == self.size:
             return

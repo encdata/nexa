@@ -1,3 +1,5 @@
+from threading import Lock
+
 import termuxgui as tg
 
 from shell import palette
@@ -23,20 +25,37 @@ class WindowManager:
         self.rtl = rtl
         self.windows = {}
         self.window_order = []
+        self.preloaded = {}
         self.button_events = {}
         self.next_id = 0
+        self.id_lock = Lock()
         self.drag = None
         self.active_window = None
         self.on_active_change = None
         self.on_close = None
+        self.on_open_app = None
+        self.on_association_change = None
 
     def open_app(self, app_id, context=None):
         app = self.apps[app_id]
+        cache_key = (app_id, context)
         if self.restore_app(app_id, context):
             return None
+        if cache_key in self.preloaded:
+            window = self.preloaded.pop(cache_key)
+            self.windows[window["id"]] = window
+            self.window_order.append(window["id"])
+            for control_id, (_owner, action) in window["button_actions"].items():
+                self.button_events[control_id] = (window["id"], action)
+            window["minimized"] = False
+            self._apply_window_geometry(window, top=True)
+            window["frame"].setvisibility(tg.View.VISIBLE)
+            self._set_active(window["id"])
+            return window["id"]
 
-        self.next_id += 1
-        window_id = self.next_id
+        with self.id_lock:
+            self.next_id += 1
+            window_id = self.next_id
         title = getattr(app, "get_title", None)
         window_title = title(context) if title is not None else app.name
         available_height = max(160, self.screen_height - self.taskbar_height - 24)
@@ -48,6 +67,7 @@ class WindowManager:
         frame = tg.LinearLayout(self.activity, self.root, vertical=True)
         frame.setdimensions(width, height)
         frame.setbackgroundcolor(palette.window_border)
+        place(frame, x, y, top=True)
 
         panel_width = width - self.border_width * 2
         panel_height = height - self.border_width * 2
@@ -124,10 +144,17 @@ class WindowManager:
         content.setheight(0)
         content.setlinearlayoutparams(1)
         content.setbackgroundcolor(palette.window_content)
-        event_handler = app.build(self.activity, content, context)
+        build_with_services = getattr(app, "build_with_services", None)
+        if build_with_services is None:
+            event_handler = app.build(self.activity, content, context)
+        else:
+            event_handler = build_with_services(
+                self.activity, content, context,
+                {"apps": self.apps, "open_app": self.on_open_app or self.open_app,
+                 "association_changed": self.on_association_change})
         self._notify_window_resize(event_handler, panel_width, panel_height - self.titlebar_height)
 
-        self.windows[window_id] = {
+        window = {
             "id": window_id,
             "app": app,
             "frame": frame,
@@ -147,11 +174,22 @@ class WindowManager:
             "restore_geometry": None,
             "maximized": False,
             "minimized": False,
+            "button_actions": {control.id: self.button_events[control.id] for control in controls},
         }
+        self.windows[window_id] = window
         self.window_order.append(window_id)
+        # termux:gui sometimes needs a location update after child views are added to lay them out.
         place(frame, x, y, top=True)
         self._set_active(window_id)
         return window_id
+
+    def _discard_window(self, window):
+        close = getattr(window["event_handler"], "close", None)
+        if close is not None:
+            close()
+        for control_id in window["button_actions"]:
+            self.button_events.pop(control_id, None)
+        window["frame"].delete()
 
     def _add_title_icon(self, parent, app):
         slot = tg.LinearLayout(self.activity, parent, vertical=False)
@@ -208,6 +246,13 @@ class WindowManager:
             if handler is not None and self._handle_app_event(handler, event):
                 return True
         return False
+
+    def tick(self):
+        for window in tuple(self.windows.values()):
+            handler = window["event_handler"]
+            on_tick = getattr(handler, "on_tick", None)
+            if on_tick is not None:
+                on_tick()
 
     @staticmethod
     def _handle_app_event(handler, event):
@@ -295,6 +340,11 @@ class WindowManager:
             else:
                 window["x"], window["y"], window["width"], window["height"] = self._fit_geometry(
                     window["x"], window["y"], window["width"], window["height"])
+            self._apply_window_geometry(window)
+
+        for window in self.preloaded.values():
+            window["x"], window["y"], window["width"], window["height"] = self._fit_geometry(
+                window["x"], window["y"], window["width"], window["height"])
             self._apply_window_geometry(window)
 
     def _fit_geometry(self, x, y, width, height):
@@ -410,12 +460,28 @@ class WindowManager:
         if window_id in self.window_order:
             self.window_order.remove(window_id)
         self._cancel_drag(window_id)
+        was_active = self.active_window == window_id
+        cache_key = (window["app"].app_id, window["context"])
+        if getattr(window["app"], "preload_ui", False) and window["context"] is None:
+            window["frame"].setvisibility(tg.View.GONE)
+            for event_id, (owner, _) in list(self.button_events.items()):
+                if owner == window_id:
+                    self.button_events.pop(event_id, None)
+            previous = self.preloaded.get(cache_key)
+            if previous is not None:
+                self._discard_window(previous)
+            self.preloaded[cache_key] = window
+            if self.on_close is not None:
+                self.on_close(window_id)
+            if was_active:
+                self._activate_top_window()
+            return
+
         handler = window["event_handler"]
         close = getattr(handler, "close", None)
         if close is not None:
             close()
         window["frame"].delete()
-        was_active = self.active_window == window_id
         for event_id, (owner, _) in list(self.button_events.items()):
             if owner == window_id:
                 self.button_events.pop(event_id, None)
@@ -430,6 +496,9 @@ class WindowManager:
             close = getattr(window["event_handler"], "close", None)
             if close is not None:
                 close()
+        for window in tuple(self.preloaded.values()):
+            self._discard_window(window)
+        self.preloaded.clear()
         self.windows.clear()
         self.window_order.clear()
         self.button_events.clear()

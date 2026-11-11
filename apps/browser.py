@@ -16,7 +16,8 @@ SEARCH_URL = "https://duckduckgo.com/?q={}"
 class BrowserApp:
     app_id = "browser"
     name = "Nexa Browser"
-    icon = "window"
+    icon = "nexa"
+    preload_ui = False
 
     def build(self, activity, parent, context=None):
         return BrowserSession(activity, parent)

@@ -8,12 +8,14 @@ from shell.surface import add as add_surface, set_color as set_surface_color
 class ContextMenu:
     width = 224
     row_height = 44
-    actions = ("open", "copy", "cut", "paste", "delete", "refresh", "realign")
-    labels = {"realign": "realign icons"}
+    actions = ("open", "properties", "open_with", "copy", "cut", "paste", "delete", "refresh", "realign")
+    labels = {"open_with": "open with", "realign": "realign icons"}
 
-    def __init__(self, activity, parent, bounds):
+    def __init__(self, activity, parent, bounds, actions=None, labels=None):
         self.activity = activity
         self.bounds = bounds
+        self.actions = tuple(actions) if actions is not None else type(self).actions
+        self.labels = {**type(self).labels, **(labels or {})}
         self.on_action = None
         self.visible_actions = ()
         self.anchor = (0, 0)

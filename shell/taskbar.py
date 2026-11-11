@@ -22,8 +22,10 @@ class Taskbar:
         self.screen_width = screen_width
         self.screen_height = screen_height
         self.rtl = rtl
+        self.density = activity.getconfiguration()["density"]
         self.buttons = {}
         self.window_views = {}
+        self.window_spacer = None
         self.menu_visible = False
 
         self.frame = tg.FrameLayout(activity, root)
@@ -99,6 +101,7 @@ class Taskbar:
         self.frame.setdimensions(tg.View.MATCH_PARENT, self.height)
         place(self.frame, 0, self.screen_height - self.height, top=True)
         set_surface_color(self.surface, self.screen_width, self.height, palette.surface)
+        self._layout_window_buttons()
 
         self.app_menu_width = min(320, max(1, self.screen_width - 16))
         self.menu_height = min(440, max(160, self.screen_height - self.height - 24))
@@ -112,7 +115,21 @@ class Taskbar:
         self.window_scroll.setdimensions(0, tg.View.MATCH_PARENT)
         self.window_scroll.setlinearlayoutparams(1)
         self.window_list = tg.LinearLayout(self.activity, self.window_scroll, vertical=False)
-        self.window_list.setdimensions(tg.View.WRAP_CONTENT, tg.View.MATCH_PARENT)
+        self.window_list.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
+        if self.rtl:
+            self.window_spacer = tg.LinearLayout(self.activity, self.window_list)
+            self.window_spacer.setdimensions(0, self.height)
+            self.window_spacer.setlinearlayoutparams(0, 0)
+
+    def _layout_window_buttons(self):
+        viewport_width = max(0, self.screen_width - self.clock_width - self.menu_button_width)
+        content_width = max(viewport_width, len(self.window_views) * self.window_width)
+        self.window_list.setdimensions(content_width, self.height)
+        if self.window_spacer is not None:
+            self.window_spacer.setdimensions(
+                content_width - len(self.window_views) * self.window_width, self.height)
+            offset = round(max(0, content_width - viewport_width) * self.density)
+            self.window_scroll.setscrollposition(offset, 0, smooth=False)
 
     def _add_clock(self):
         self.clock = tg.TextView(self.activity, datetime.now().strftime("%H:%M"), self.view)
@@ -154,10 +171,11 @@ class Taskbar:
             label.setmargin(12, "right")
             label.settextsize(15)
             label.settextcolor(palette.text)
-            label.setgravity(0, 1)
+            label.setgravity(2 if self.rtl else 0, 1)
 
         if self.rtl:
             add_label()
+
         image = tg.ImageView(self.activity, button)
         image.setdimensions(32, 32)
         image.setbackgroundcolor(0xFFE8EDF2)
@@ -173,7 +191,7 @@ class Taskbar:
     def add_window(self, window_id, app, title=None):
         button = tg.LinearLayout(self.activity, self.window_list, vertical=False)
         button.setdimensions(self.window_width, self.height)
-        button.setlinearlayoutparams(0)
+        button.setlinearlayoutparams(0, 1 if self.rtl else None)
         button.setbackgroundcolor(palette.surface)
         button.sendclickevent(True)
         image = tg.ImageView(self.activity, button)
@@ -185,6 +203,7 @@ class Taskbar:
         image.setlinearlayoutparams(0)
         self.buttons[button.id] = ("window", window_id)
         self.window_views[window_id] = button
+        self._layout_window_buttons()
 
     def set_active_window(self, window_id):
         for current_id, button in self.window_views.items():
@@ -196,6 +215,7 @@ class Taskbar:
             return
         self.buttons.pop(view.id, None)
         view.delete()
+        self._layout_window_buttons()
 
     def dismiss_menu(self):
         if not self.menu_visible:

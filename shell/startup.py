@@ -13,7 +13,8 @@ def load(update, configuration):
     home_items = load_home_items()
 
     update("loading icon assets", 50)
-    preload({"apps", "close", "cursor", "folder", "maximize", "minimize"}
+    preload({"apps", "calc", "calender", "clock", "close", "cursor", "folder", "home",
+             "maximize", "minimize", "nexa", "settings", "terminal"}
             | {app.icon for app in apps.values()})
 
     update("loading wallpaper", 68)

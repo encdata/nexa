@@ -1,5 +1,5 @@
 import termuxgui as tg
-from time import sleep
+from time import monotonic, sleep
 
 from shell.desktop import Desktop
 from shell.taskbar import Taskbar
@@ -17,6 +17,8 @@ class DesktopShell:
         self.screen_width = config["screenwidth"]
         self.screen_height = config["screenheight"]
         self.density = config["density"]
+        self.keyboard_hidden = config.get("keyboardHidden", True)
+        self.next_wallpaper_resize_check = 0
         self.rtl = is_rtl(config)
         self.root = tg.FrameLayout(activity, parent)
         self.root.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
@@ -41,9 +43,11 @@ class DesktopShell:
         self.wallpaper.resize(self.screen_width, self.screen_height)
         self.windows = WindowManager(activity, self.root, self.apps, self.screen_width, self.screen_height,
                                      self.density, rtl=self.rtl)
+        self.windows.on_open_app = self.open_app
         self.desktop = Desktop(activity, self.root, self.apps, self.open_app,
                                self.screen_width, self.screen_height, self.density,
                                startup["positions"], startup["home_items"], progress)
+        self.windows.on_association_change = self.desktop.refresh_associated_icons
         self.taskbar = Taskbar(activity, self.root, self.apps, self.open_app,
                                self.windows.activate_from_taskbar,
                                self.screen_width, self.screen_height, rtl=self.rtl)
@@ -63,11 +67,7 @@ class DesktopShell:
         if event.type == tg.Event.config:
             width = event.value.get("screenwidth", self.screen_width)
             height = event.value.get("screenheight", self.screen_height)
-            self.wallpaper.resize(width, height)
-            self.screen_width, self.screen_height = width, height
-            self.windows.resize(width, height)
-            self.desktop.resize(width, height)
-            self.taskbar.resize(width, height)
+            self._resize_screen(width, height)
             return True
         if (event.type == tg.Event.touch
                 and event.id == self.root.id
@@ -76,6 +76,25 @@ class DesktopShell:
         return (self.windows.handle_event(event)
                 or self.desktop.handle_event(event)
                 or self.taskbar.handle_event(event))
+
+    def tick(self):
+        now = monotonic()
+        if now >= self.next_wallpaper_resize_check:
+            self.next_wallpaper_resize_check = now + 0.3
+            config = self.activity.getconfiguration()
+            self.keyboard_hidden = config.get("keyboardHidden", self.keyboard_hidden)
+            self._resize_screen(config.get("screenwidth", self.screen_width),
+                                config.get("screenheight", self.screen_height))
+        self.windows.tick()
+
+    def _resize_screen(self, width, height):
+        if (width, height) == (self.screen_width, self.screen_height):
+            return
+        self.screen_width, self.screen_height = width, height
+        self.wallpaper.resize(width, height)
+        self.windows.resize(width, height)
+        self.desktop.resize(width, height)
+        self.taskbar.resize(width, height)
 
     def close(self):
         self.desktop.close()
