@@ -198,15 +198,16 @@ class FilesApp:
                 for entry_path, entry_name, is_directory, size, modified in entries:
                     if state["closed"] or render_id != state["render_id"]:
                         return None
-                    app_icon = None if is_directory else file_associations.icon_for(entry_path, apps)
-                    icon = load("folder" if is_directory else app_icon) if is_directory or app_icon else None
+                    app_icon = None if is_directory else file_associations.icon_for(
+                        entry_path, apps, "window")
+                    icon = load("folder" if is_directory else app_icon)
                     date = datetime.fromtimestamp(modified).strftime("%Y-%m-%d %H:%M")
                     detail = f"file folder · {date}" if is_directory else f"{_format_size(size)} · {date}"
                     items.append({
                         "key": entry_path,
                         "text": entry_name,
                         "subtitle": detail,
-                        "marker": "" if icon else "·",
+                        "marker": "",
                         "image": icon,
                     })
                 return items
