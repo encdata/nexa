@@ -5,6 +5,7 @@ import termuxgui as tg
 from shell import palette
 from shell.geometry import place
 from shell.icons import load
+from shell.context_menu import ContextMenu
 from shell.surface import add_rounded, set_rounded_color
 
 
@@ -16,10 +17,13 @@ class Taskbar:
     window_width = 56
 
     def __init__(self, activity, root, apps, open_app, activate_window, screen_width,
-                 screen_height, rtl=False):
+                 screen_height, rtl=False, context_action=None,
+                 window_context_actions=None):
         self.activity = activity
         self.open_app = open_app
         self.activate_window = activate_window
+        self.context_action = context_action
+        self.window_context_actions = window_context_actions
         self.screen_width = screen_width
         self.screen_height = screen_height
         self.rtl = rtl
@@ -38,6 +42,7 @@ class Taskbar:
 
         self.view = tg.LinearLayout(activity, self.frame, vertical=False)
         self.view.setdimensions(max(1, screen_width - 16), self.content_height)
+        self.view.sendlongclickevent(True)
         place(self.view, 8, 4)
         if rtl:
             self._add_clock()
@@ -85,6 +90,16 @@ class Taskbar:
                 previous_letter = letter
             self._add_app_entry(entries, app)
         self.menu_frame.setvisibility(tg.View.GONE)
+        self.context_menu = ContextMenu(
+            activity, root,
+            lambda: (self.screen_width, self.screen_height),
+            actions=("show_desktop", "open_task_manager", "open_settings", "open",
+                     "restore", "maximize", "minimize", "close_window"),
+            labels={"show_desktop": "show desktop",
+                    "open_task_manager": "task manager",
+                    "open_settings": "settings",
+                    "close_window": "close window"})
+        self.context_window = None
 
     def resize(self, screen_width, screen_height):
         self.screen_width = max(1, screen_width)
@@ -105,10 +120,13 @@ class Taskbar:
               top=self.menu_visible)
         set_rounded_color(self.menu_surface, self.app_menu_width, self.menu_height,
                           palette.surface, 14)
+        if self.context_menu.visible:
+            self.context_menu.reposition()
     def _add_window_scroll(self):
         self.window_scroll = tg.HorizontalScrollView(self.activity, self.view, nobar=True)
         self.window_scroll.setdimensions(0, tg.View.MATCH_PARENT)
         self.window_scroll.setlinearlayoutparams(1)
+        self.window_scroll.sendlongclickevent(True)
         self.window_list = tg.LinearLayout(self.activity, self.window_scroll, vertical=False)
         self.window_list.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
         if self.rtl:
@@ -128,6 +146,7 @@ class Taskbar:
 
     def _add_clock(self):
         self.clock = tg.TextView(self.activity, datetime.now().strftime("%H:%M"), self.view)
+        self.clock.sendlongclickevent(True)
         self.clock.settextcolor(palette.text)
         self.clock.setgravity(1, 1)
         self.clock.setdimensions(self.clock_width, self.content_height)
@@ -138,6 +157,7 @@ class Taskbar:
         button.setdimensions(self.menu_button_width, self.content_height)
         button.setlinearlayoutparams(0)
         button.sendclickevent(True)
+        button.sendlongclickevent(True)
         image = tg.ImageView(self.activity, button)
         image.setdimensions(28, 28)
         image.setimage(load("apps"))
@@ -199,6 +219,7 @@ class Taskbar:
         button.setlinearlayoutparams(0, 1 if self.rtl else None)
         button.setbackgroundcolor(palette.surface)
         button.sendclickevent(True)
+        button.sendlongclickevent(True)
         image = tg.ImageView(self.activity, button)
         image.setdimensions(28, 28)
         image.setbackgroundcolor(0xFFE8EDF2)
@@ -218,6 +239,8 @@ class Taskbar:
         view = self.window_views.pop(window_id, None)
         if view is None:
             return
+        if self.context_window == window_id:
+            self.dismiss_context_menu()
         self.buttons.pop(view.id, None)
         view.delete()
         self._layout_window_buttons()
@@ -228,7 +251,53 @@ class Taskbar:
         self.menu_visible = False
         self.menu_frame.setvisibility(tg.View.GONE)
 
+    def dismiss_context_menu(self):
+        self.context_menu.hide()
+        self.context_window = None
+
+    def _show_context_menu(self, window_id=None):
+        self.context_window = window_id
+        if window_id is None:
+            actions = ["show_desktop", "open_task_manager", "open_settings"]
+            x = (self.screen_width - self.context_menu.width) // 2
+        else:
+            actions = (self.window_context_actions(window_id)
+                       if self.window_context_actions is not None else
+                       ("open", "maximize", "minimize", "close_window"))
+            window_ids = tuple(self.window_views)
+            index = window_ids.index(window_id) if window_id in self.window_views else 0
+            scroll_x = self.window_scroll.getscrollposition()[0] / self.density
+            x = (8 + self.menu_button_width + index * self.window_width - scroll_x
+                 + self.window_width / 2 - self.context_menu.width / 2)
+        height = len(actions) * self.context_menu.row_height + 8
+        if not actions:
+            return
+        y = self.screen_height - self.height - height - 4
+        self.context_menu.show(actions, x, y, self._run_context_action)
+
+    def _run_context_action(self, action):
+        window_id = self.context_window
+        self.context_window = None
+        if self.context_action is not None:
+            self.context_action(window_id, action)
+
     def handle_event(self, event):
+        if self.context_menu.handle_event(event):
+            return True
+        if event.type == tg.Event.back and self.context_menu.visible:
+            self.dismiss_context_menu()
+            return True
+        if event.type == tg.Event.longClick:
+            if event.id in (self.view.id, self.window_scroll.id, self.clock.id):
+                self._show_context_menu()
+                return True
+            action = self.buttons.get(event.id)
+            if action is not None and action[0] == "window":
+                self._show_context_menu(action[1])
+                return True
+            if action is not None and action[0] == "menu":
+                self._show_context_menu()
+                return True
         if event.type == tg.Event.back and self.menu_visible:
             self.dismiss_menu()
             return True
@@ -236,6 +305,7 @@ class Taskbar:
             return False
         self.clock.settext(datetime.now().strftime("%H:%M"))
         action, value = self.buttons[event.id]
+        self.dismiss_context_menu()
         if action == "menu":
             self.menu_visible = not self.menu_visible
             self.menu_frame.setvisibility(tg.View.VISIBLE if self.menu_visible else tg.View.GONE)

@@ -40,6 +40,7 @@ class WindowManager:
         self.id_lock = Lock()
         self.drag = None
         self.active_window = None
+        self.show_desktop_windows = None
         self.on_active_change = None
         self.on_close = None
         self.on_open_app = None
@@ -326,6 +327,8 @@ class WindowManager:
 
     def restore(self, window_id):
         window = self.windows[window_id]
+        if self.show_desktop_windows is not None:
+            self.show_desktop_windows = None
         window["minimized"] = False
         window["frame"].setvisibility(tg.View.VISIBLE)
         self._raise_window(window)
@@ -339,6 +342,51 @@ class WindowManager:
             self.minimize(window_id)
         else:
             self.restore(window_id)
+
+    def taskbar_context_actions(self, window_id):
+        window = self.windows.get(window_id)
+        if window is None:
+            return ()
+        if window["minimized"]:
+            return ("restore", "close_window")
+        if window["maximized"]:
+            return ("restore", "minimize", "close_window")
+        return ("open", "maximize", "minimize", "close_window")
+
+    def taskbar_window_action(self, window_id, action):
+        window = self.windows.get(window_id)
+        if window is None:
+            return
+        if action == "open":
+            self.restore(window_id)
+        elif action == "restore":
+            if window["maximized"]:
+                self.toggle_maximize(window_id)
+            self.restore(window_id)
+        elif action == "maximize":
+            if not window["maximized"]:
+                self.toggle_maximize(window_id)
+            self.restore(window_id)
+        elif action == "minimize":
+            self.minimize(window_id)
+        elif action == "close_window":
+            self.close(window_id)
+
+    def toggle_show_desktop(self):
+        if self.show_desktop_windows is not None:
+            window_ids = self.show_desktop_windows
+            self.show_desktop_windows = None
+            for window_id in window_ids:
+                if window_id in self.windows:
+                    self.restore(window_id)
+            return
+        window_ids = [window_id for window_id in self.window_order
+                      if window_id in self.windows and not self.windows[window_id]["minimized"]]
+        if not window_ids:
+            return
+        self.show_desktop_windows = window_ids
+        for window_id in window_ids:
+            self.minimize(window_id)
 
     def _set_active(self, window_id):
         if self.active_window == window_id:
@@ -563,6 +611,11 @@ class WindowManager:
         window = self.windows.pop(window_id, None)
         if window is None:
             return
+        if self.show_desktop_windows is not None:
+            self.show_desktop_windows = [item for item in self.show_desktop_windows
+                                         if item != window_id]
+            if not self.show_desktop_windows:
+                self.show_desktop_windows = None
         if window["build_future"] is not None:
             self._finish_build(window)
         if window_id in self.window_order:

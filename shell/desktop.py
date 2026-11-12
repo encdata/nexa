@@ -10,6 +10,7 @@ from shell.desktop_state import load_home_items, save_positions
 from shell.geometry import place
 from shell.icons import load
 from shell.open_with import OpenWithChooser
+from shell.text_prompt import TextPrompt
 
 
 class Desktop:
@@ -77,6 +78,8 @@ class Desktop:
         self.progress = progress
         self.context_menu = ContextMenu(activity, root,
                                         lambda: (self.screen_width, self.screen_height))
+        self.name_prompt = TextPrompt(activity, root,
+                                      lambda: (self.screen_width, self.screen_height))
         self.open_with = OpenWithChooser(
             activity, root, lambda: (self.screen_width, self.screen_height), apps, open_app,
             self.refresh_associated_icons)
@@ -159,6 +162,7 @@ class Desktop:
     def resize(self, screen_width, screen_height):
         with self.gesture_lock:
             self._resize(screen_width, screen_height)
+            self.name_prompt.reposition()
 
     def _resize(self, screen_width, screen_height, force=False, preferred_icon=None):
         old_width, old_height = self.screen_width, self.screen_height
@@ -305,14 +309,18 @@ class Desktop:
         self.context_icon = icon_id
         self.context_visible = True
         if icon is None:
-            actions = ["paste", "refresh", "realign"]
+            actions = ["new_file", "new_folder", "open_terminal", "paste", "refresh",
+                       "realign"]
         elif icon["context"] is None:
-            actions = ["open", "paste"]
+            actions = ["open"]
         else:
-            actions = ["open", "properties", "copy", "cut", "paste", "delete"]
+            actions = ["open", "open_terminal", "copy", "cut", "rename", "delete",
+                       "properties", "paste"]
             if not icon["is_folder"]:
                 actions.insert(1, "open_with")
-        self.context_menu.show(actions, *self.context_anchor, self._context_action)
+        disabled = () if file_actions.has_clipboard_item() else ("paste",)
+        self.context_menu.show(actions, *self.context_anchor, self._context_action,
+                               disabled=disabled)
         return True
 
     def _context_action(self, action):
@@ -324,6 +332,28 @@ class Desktop:
                 self._refresh_home_items()
             elif action == "realign":
                 self._arrange_icons()
+            elif action in ("new_file", "new_folder"):
+                title, initial = (("new file", "New file.txt") if action == "new_file"
+                                  else ("new folder", "New folder"))
+                create = file_actions.create_file if action == "new_file" else file_actions.create_folder
+                self.name_prompt.show(title, initial,
+                                      lambda name: self._run_home_file_action(
+                                          lambda: create(os.path.expanduser("~"), name)))
+            elif action == "rename" and icon is not None and icon["context"] is not None:
+                path = icon["context"]
+                self.name_prompt.show(
+                    "rename", os.path.basename(path),
+                    lambda name: self._run_home_file_action(
+                        lambda: file_actions.rename(path, name)))
+            elif action == "open_terminal":
+                if icon is None:
+                    directory = os.path.expanduser("~")
+                elif icon["context"] is not None:
+                    directory = (icon["context"] if icon["is_folder"]
+                                 else os.path.dirname(icon["context"]))
+                else:
+                    return
+                self.open_app("terminal", directory)
             elif action in ("copy", "cut") and icon is not None:
                 getattr(file_actions, action)(icon["context"])
             elif action == "delete" and icon is not None:
@@ -363,6 +393,24 @@ class Desktop:
                             lambda: file_actions.paste_item(destination, source, is_cut), pasted)
         except (OSError, ValueError) as error:
             print(f"nexa: {error}")
+
+    def _run_home_file_action(self, operation):
+        home = os.path.realpath(os.path.expanduser("~"))
+        if home in self.pending_file_actions:
+            print("nexa: a desktop file operation is already running")
+            return
+        self.pending_file_actions.add(home)
+
+        def complete(_result, error):
+            self.pending_file_actions.discard(home)
+            if self.closed:
+                return
+            if error is not None:
+                print(f"nexa: couldn't update desktop files: {error}")
+                return
+            self._refresh_home_items()
+
+        file_actions.run_async(operation, complete)
 
     def _arrange_icons(self):
         x_positions, y_positions = self._grid_axes(self.screen_width, self.screen_height)
@@ -524,6 +572,7 @@ class Desktop:
     def close(self):
         with self.gesture_lock:
             self.closed = True
+            self.name_prompt.hide()
             self._cancel_long_press()
             if self.home_scan_timer is not None:
                 self.home_scan_timer.cancel()
@@ -532,6 +581,8 @@ class Desktop:
             self.drag = None
 
     def _handle_event(self, event):
+        if self.name_prompt.handle_event(event):
+            return True
         if self.open_with.handle_event(event):
             return True
         if self.context_menu.handle_event(event):

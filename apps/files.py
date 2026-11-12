@@ -9,6 +9,7 @@ from shell.context_menu import ContextMenu
 from shell.icons import load
 from shell.open_with import OpenWithChooser
 from shell.recycler_view import RecyclerListView
+from shell.text_prompt import TextPrompt
 from shell.text_direction import force_ltr, is_rtl
 
 
@@ -126,6 +127,8 @@ class FilesApp:
         density = configuration["density"]
         menu = ContextMenu(activity, parent, lambda: tuple(
             round(value / density) for value in parent.getdimensions()))
+        prompt = TextPrompt(activity, parent, lambda: tuple(
+            round(value / density) for value in parent.getdimensions()))
         def on_association_change(path_value, app_id):
             if association_changed is not None:
                 association_changed(path_value, app_id)
@@ -143,7 +146,7 @@ class FilesApp:
                  "selected": None, "busy": False, "query": "", "entries": [],
                  "history": [path], "history_index": 0, "scan_id": 0,
                  "loading": False, "error": None, "closed": False, "nav_paths": {},
-                 "render_id": 0}
+                 "render_id": 0, "prompt": prompt}
 
         shared = os.path.expanduser("~/storage/shared")
         locations = [("home", os.path.expanduser("~"))]
@@ -257,11 +260,15 @@ class FilesApp:
 
         def show_menu(item=None):
             state["selected"] = item
-            actions = ["paste", "refresh"] if item is None else [
-                "open", "properties", "copy", "cut", "paste", "delete"]
-            if item is not None and not item[1]:
-                actions.insert(1, "open_with")
-            menu.show(actions, 12, 60, handle_menu_action)
+            if item is None:
+                actions = ["new_file", "new_folder", "open_terminal", "paste", "refresh"]
+            else:
+                actions = ["open", "open_terminal"]
+                if not item[1]:
+                    actions.append("open_with")
+                actions.extend(("copy", "cut", "paste", "rename", "delete", "properties"))
+            disabled = () if file_actions.has_clipboard_item() else ("paste",)
+            menu.show(actions, 12, 60, handle_menu_action, disabled=disabled)
 
         def entry_from_event(event):
             key = event.value.get("key")
@@ -280,6 +287,7 @@ class FilesApp:
 
         def run_file_action(operation):
             if state["busy"]:
+                status.settext("wait for the current file operation")
                 return
             state["busy"] = True
 
@@ -295,12 +303,31 @@ class FilesApp:
 
         def handle_menu_action(action):
             if state["busy"]:
+                status.settext("wait for the current file operation")
                 return
             item = state["selected"]
             path_value = item[0] if item is not None else None
             try:
                 if action == "refresh":
                     load_directory()
+                elif action in ("new_file", "new_folder"):
+                    directory = state["path"]
+                    title, initial = (("new file", "New file.txt") if action == "new_file"
+                                      else ("new folder", "New folder"))
+                    create = file_actions.create_file if action == "new_file" else file_actions.create_folder
+                    state["prompt"].show(
+                        title, initial,
+                        lambda name: run_file_action(lambda: create(directory, name)))
+                elif action == "rename" and item is not None:
+                    source = path_value
+                    state["prompt"].show(
+                        "rename", os.path.basename(source),
+                        lambda name: run_file_action(lambda: file_actions.rename(source, name)))
+                elif action == "open_terminal":
+                    directory = (state["path"] if item is None or item[1]
+                                 else os.path.dirname(path_value))
+                    if open_app is not None:
+                        open_app("terminal", directory)
                 elif action == "open" and item is not None:
                     if item[1]:
                         load_directory(path_value, add_history=True)
@@ -312,6 +339,7 @@ class FilesApp:
                     open_app("files", {"properties": path_value})
                 elif action in ("copy", "cut") and item is not None:
                     getattr(file_actions, action)(path_value)
+                    status.settext(f"{action} {os.path.basename(path_value)}")
                 elif action == "delete" and item is not None:
                     run_file_action(lambda: file_actions.delete(path_value))
                 elif action == "paste":
@@ -329,6 +357,8 @@ class FilesApp:
         load_directory()
 
         def handle_event(event):
+            if state["prompt"].handle_event(event):
+                return True
             if state["open_with"].handle_event(event):
                 return True
             if state["menu"].handle_event(event):
@@ -398,9 +428,11 @@ class FilesApp:
         def close():
             state["closed"] = True
             state["scan_id"] += 1
+            state["prompt"].hide()
             rows.close()
 
         handle_event.close = close
+        handle_event.on_window_resize = lambda _width, _height: state["prompt"].reposition()
         return handle_event
 
     def _build_properties(self, activity, parent, path, apps, association_changed):

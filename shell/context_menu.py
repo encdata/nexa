@@ -8,8 +8,12 @@ from shell.surface import add_rounded, set_rounded_color
 class ContextMenu:
     width = 224
     row_height = 44
-    actions = ("open", "properties", "open_with", "copy", "cut", "paste", "delete", "refresh", "realign")
-    labels = {"open_with": "open with", "realign": "realign icons"}
+    actions = ("open", "open_with", "open_terminal", "new_file", "new_folder",
+               "copy", "cut", "paste", "rename", "delete", "properties", "refresh",
+               "realign")
+    labels = {"open_with": "open with", "open_terminal": "open in terminal",
+              "new_file": "new file", "new_folder": "new folder",
+              "realign": "realign icons"}
 
     def __init__(self, activity, parent, bounds, actions=None, labels=None):
         self.activity = activity
@@ -18,6 +22,7 @@ class ContextMenu:
         self.labels = {**type(self).labels, **(labels or {})}
         self.on_action = None
         self.visible_actions = ()
+        self.disabled_actions = set()
         self.anchor = (0, 0)
         self.events = {}
         self.height = self.row_height * len(self.actions) + 8
@@ -45,13 +50,15 @@ class ContextMenu:
         self.visible = False
         self.view.setvisibility(tg.View.GONE)
 
-    def show(self, actions, x, y, on_action):
+    def show(self, actions, x, y, on_action, disabled=()):
         actions = tuple(actions)
         self.visible_actions = actions
+        self.disabled_actions = set(disabled)
         self.anchor = (x, y)
         self.on_action = on_action
         for action, row in self.rows.items():
             row.setvisibility(tg.View.VISIBLE if action in actions else tg.View.GONE)
+            row.settextcolor(palette.muted if action in self.disabled_actions else palette.text)
         height = max(1, len(actions)) * self.row_height + 8
         self.height = height
         self.view.setdimensions(self.width, height)
@@ -66,7 +73,8 @@ class ContextMenu:
 
     def reposition(self):
         if self.visible:
-            self.show(self.visible_actions, *self.anchor, self.on_action)
+            self.show(self.visible_actions, *self.anchor, self.on_action,
+                      disabled=self.disabled_actions)
 
     def hide(self):
         self.view.setvisibility(tg.View.GONE)
@@ -80,6 +88,8 @@ class ContextMenu:
         if event.type != tg.Event.click or event.id not in self.events or not self.visible:
             return False
         action = self.events[event.id]
+        if action in self.disabled_actions:
+            return True
         if self.on_action is not None:
             callback = self.on_action
             self.hide()

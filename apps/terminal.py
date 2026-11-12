@@ -25,6 +25,9 @@ class TerminalApp:
         if isinstance(context, tuple) and len(context) == 2:
             path, interpreter = context
             return f"{os.path.basename(path)} - {interpreter} - {self.name}"
+        if isinstance(context, str) and os.path.isdir(context):
+            directory = os.path.basename(os.path.normpath(context)) or context
+            return f"{directory} - {self.name}"
         return self.name
 
     def build_with_services(self, activity, parent, context, services):
@@ -111,6 +114,8 @@ class TerminalApp:
         shell = os.environ.get("SHELL") or "/data/data/com.termux/files/usr/bin/bash"
         run_file = context if isinstance(context, tuple) and len(context) == 2 else None
         cwd = os.path.dirname(run_file[0]) if run_file else os.path.expanduser("~")
+        if run_file is None and isinstance(context, str) and os.path.isdir(context):
+            cwd = context
         self.session = CommandSession(
             [shell, "-i"], cwd=cwd or os.path.expanduser("~"),
             env={"TERM": "xterm-256color", "COLORTERM": "truecolor",

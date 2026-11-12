@@ -110,5 +110,37 @@ def delete(path):
         shutil.rmtree(path)
 
 
+def _child_path(directory, name):
+    name = name.strip()
+    if (not name or name in (".", "..") or "\0" in name
+            or os.path.basename(name) != name):
+        raise ValueError("enter a single file name")
+    return os.path.join(os.path.abspath(directory), name)
+
+
+def create_file(directory, name):
+    path = _child_path(directory, name)
+    with open(path, "x", encoding="utf-8"):
+        pass
+    return path
+
+
+def create_folder(directory, name):
+    path = _child_path(directory, name)
+    os.mkdir(path)
+    return path
+
+
+def rename(path, name):
+    path = os.path.abspath(path)
+    target = _child_path(os.path.dirname(path), name)
+    if target == path:
+        return path
+    if os.path.lexists(target):
+        raise FileExistsError(target)
+    os.rename(path, target)
+    return target
+
+
 def open_file(path):
     subprocess.Popen(["termux-open", path], close_fds=True)

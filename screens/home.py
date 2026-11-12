@@ -51,7 +51,9 @@ class DesktopShell:
         self.windows.on_association_change = self.desktop.refresh_associated_icons
         self.taskbar = Taskbar(activity, self.root, self.apps, self.open_app,
                                self.windows.activate_from_taskbar,
-                               self.screen_width, self.screen_height, rtl=self.rtl)
+                               self.screen_width, self.screen_height, rtl=self.rtl,
+                               context_action=self._taskbar_context_action,
+                               window_context_actions=self.windows.taskbar_context_actions)
         self.windows.on_active_change = self.taskbar.set_active_window
         self.windows.on_close = self.taskbar.remove_window
         self.pointer = Pointer(activity, self.root, self.density)
@@ -64,6 +66,16 @@ class DesktopShell:
             self.taskbar.add_window(window_id, self.apps[app_id], self.windows.windows[window_id]["title"])
             self.taskbar.set_active_window(self.windows.active_window)
 
+    def _taskbar_context_action(self, window_id, action):
+        if window_id is not None:
+            self.windows.taskbar_window_action(window_id, action)
+        elif action == "show_desktop":
+            self.windows.toggle_show_desktop()
+        elif action == "open_task_manager" and "task_manager" in self.apps:
+            self.open_app("task_manager")
+        elif action == "open_settings" and "settings" in self.apps:
+            self.open_app("settings")
+
     def handle_event(self, event):
         if event.type == tg.Event.config:
             width = event.value.get("screenwidth", self.screen_width)
@@ -74,6 +86,7 @@ class DesktopShell:
                 and event.id == self.root.id
                 and event.value.get("action") == tg.Event.touch_down):
             self.taskbar.dismiss_menu()
+            self.taskbar.dismiss_context_menu()
         return (self.windows.handle_event(event)
                 or self.desktop.handle_event(event)
                 or self.taskbar.handle_event(event))
