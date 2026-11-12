@@ -27,15 +27,14 @@ class NexaConnection(Connection):
             main_server.settimeout(5)
             event_server.settimeout(5)
 
-            result = run(
-                [
-                    "termux-am", "broadcast", "-n", "com.termux.gui/.NexaReceiver",
-                    "--es", "mainSocket", main_name,
-                    "--es", "eventSocket", event_name,
-                ],
-                stdout=DEVNULL,
-                stderr=DEVNULL,
-            )
+            broadcast = [
+                "broadcast", "-n", "com.termux.gui/.NexaReceiver",
+                "--es", "mainSocket", main_name,
+                "--es", "eventSocket", event_name,
+            ]
+            result = run(["termux-am", *broadcast], stdout=DEVNULL, stderr=DEVNULL)
+            if result.returncode != 0:
+                result = run(["am", *broadcast], stdout=DEVNULL, stderr=DEVNULL)
             if result.returncode != 0:
                 raise RuntimeError("could not request a Nexa connection")
 
