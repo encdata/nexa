@@ -28,7 +28,7 @@ class NexaConnection(Connection):
             event_server.settimeout(5)
 
             broadcast = [
-                "broadcast", "-n", "com.termux.gui/.NexaReceiver",
+                "broadcast", "-n", "dev.encdata.nexa/com.termux.gui.NexaReceiver",
                 "--es", "mainSocket", main_name,
                 "--es", "eventSocket", event_name,
             ]
