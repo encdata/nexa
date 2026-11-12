@@ -99,6 +99,7 @@ class CalculatorApp:
     name = "Calculator"
     icon = "calc"
     preload_ui = True
+    build_threaded = True
 
     def build(self, activity, parent, context=None):
         root = tg.LinearLayout(activity, parent)

@@ -79,6 +79,8 @@ class DesktopShell:
                 or self.taskbar.handle_event(event))
 
     def tick(self):
+        self.wallpaper.tick()
+        self.desktop.tick()
         now = monotonic()
         if now >= self.next_wallpaper_resize_check:
             self.next_wallpaper_resize_check = now + 0.3
@@ -100,6 +102,7 @@ class DesktopShell:
     def close(self):
         self.desktop.close()
         self.windows.shutdown()
+        self.wallpaper.close()
 
 
 def show(activity, startup, parent, progress, show_progress):

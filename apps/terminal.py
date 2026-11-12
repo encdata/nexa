@@ -1,10 +1,13 @@
 import codecs
 import os
+import re
+import shlex
 
 import termuxgui as tg
 
 from shell import palette
 from shell.geometry import place
+from shell.open_with import OpenWithChooser
 from shell.process import CommandSession
 from shell.surface import add_keyboard_input
 from shell.terminal_screen import TerminalScreen
@@ -14,11 +17,23 @@ class TerminalApp:
     app_id = "terminal"
     name = "Nexa Terminal"
     icon = "terminal"
+    content_background = 0xFF000000
+    build_threaded = False
+    file_token = re.compile(r'''"[^\"]+"|'[^']+'|[^\s]+''')
 
-    def build(self, activity, parent, context=None):
+    def get_title(self, context=None):
+        if isinstance(context, tuple) and len(context) == 2:
+            path, interpreter = context
+            return f"{os.path.basename(path)} - {interpreter} - {self.name}"
+        return self.name
+
+    def build_with_services(self, activity, parent, context, services):
+        return self.build(activity, parent, context, services)
+
+    def build(self, activity, parent, context=None, services=None):
         root = tg.LinearLayout(activity, parent)
         root.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
-        root.setbackgroundcolor(palette.window_content)
+        root.setbackgroundcolor(self.content_background)
 
         toolbar = tg.FrameLayout(activity, root)
         toolbar.setdimensions(tg.View.MATCH_PARENT, 44)
@@ -36,9 +51,11 @@ class TerminalApp:
         self.scroll = tg.NestedScrollView(activity, root, fillviewport=True, nobar=False)
         self.scroll.setheight(0)
         self.scroll.setlinearlayoutparams(1)
+        self.scroll.setbackgroundcolor(self.content_background)
         self.scroll.sendclickevent(True)
         self.output_rows = tg.LinearLayout(activity, self.scroll)
         self.output_rows.setdimensions(80 * 9, 24 * 18)
+        self.output_rows.setbackgroundcolor(self.content_background)
         self.output_rows.setmargin(10, "left")
         self.output_rows.setmargin(10, "right")
         self.output_rows.setmargin(8, "top")
@@ -66,24 +83,43 @@ class TerminalApp:
             key_controls.append((button, sequence, index))
 
         self.activity = activity
+        self.root = root
+        self.apps = services["apps"] if services else {}
+        self.open_app = services["open_app"] if services else None
+        self.open_with = None
+        if self.open_app is not None:
+            self.open_with = OpenWithChooser(
+                activity, root,
+                lambda: tuple(round(size / self.density) for size in root.getdimensions()),
+                self.apps, self.open_app,
+                services.get("association_changed"))
         self.keyboard_input = add_keyboard_input(activity, root)
         self.density = activity.getconfiguration()["density"]
         self.screen = TerminalScreen()
         self.rendered_rows = []
+        self.output_width = None
+        self.output_height = None
+        self.output_columns = None
         self.row_views = []
         self.row_view_ids = set()
         self.row_view_indexes = {}
         self.mouse_pressed = False
         self.last_mouse_location = None
         self.mouse_touch_enabled = False
+        self.file_touch = None
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
         shell = os.environ.get("SHELL") or "/data/data/com.termux/files/usr/bin/bash"
+        run_file = context if isinstance(context, tuple) and len(context) == 2 else None
+        cwd = os.path.dirname(run_file[0]) if run_file else os.path.expanduser("~")
         self.session = CommandSession(
-            [shell, "-i"], cwd=os.path.expanduser("~"),
+            [shell, "-i"], cwd=cwd or os.path.expanduser("~"),
             env={"TERM": "xterm-256color", "COLORTERM": "truecolor",
                  "NO_COLOR": None, "FORCE_COLOR": "1"},
             columns=80, rows=24,
         )
+        if run_file:
+            path, interpreter = run_file
+            self.session.write(f"{interpreter} {shlex.quote(path)}\n")
         self.buttons = {interrupt.id: ("interrupt", None), enter.id: ("enter", None)}
         self.buttons.update({button.id: ("key", sequence) for button, sequence, _ in key_controls})
         self.controls = [(interrupt, "right", 64), (enter, "right", 4)]
@@ -91,6 +127,7 @@ class TerminalApp:
         self._position_controls(0)
         self._resize_output(80)
         self._render(force=True)
+        self._sync_mouse_touch()
         self.keyboard_input.focus(forcesoft=True)
         return self
 
@@ -177,11 +214,21 @@ class TerminalApp:
             self.session.write(("\x1b" if alt else "") + chr(codepoint))
 
     def handle_event(self, event):
+        if self.open_with is not None and self.open_with.handle_event(event):
+            return True
+        if (event.type == tg.Event.back and self.open_with is not None
+                and self.open_with.visible):
+            self.open_with.hide()
+            return True
         if event.type == tg.Event.key and event.id == self.keyboard_input.id:
             self._send_key(event.value)
             return True
         if event.type == tg.Event.touch and event.id in self.row_view_indexes:
-            self._send_mouse(event)
+            if self.screen.mouse_tracking:
+                self.file_touch = None
+                self._send_mouse(event)
+            else:
+                self._handle_file_touch(event)
             return True
         if event.type == tg.Event.click and (event.id == self.scroll.id
                                                or event.id in self.row_view_ids):
@@ -210,6 +257,70 @@ class TerminalApp:
             self.keyboard_input.focus(forcesoft=True)
             return True
         return False
+
+    def _handle_file_touch(self, event):
+        action = event.value.get("action")
+        pointers = event.value.get("pointers", [])
+        pointer = pointers[0] if pointers else None
+        if action == tg.Event.touch_down and pointer is not None:
+            self.file_touch = (event.id, pointer["x"], pointer["y"])
+            return
+        if action == tg.Event.touch_move and pointer is not None and self.file_touch is not None:
+            _view_id, start_x, start_y = self.file_touch
+            if abs(pointer["x"] - start_x) > 14 * self.density or abs(pointer["y"] - start_y) > 14 * self.density:
+                self.file_touch = None
+            return
+        if action in (tg.Event.touch_cancel, tg.Event.touch_pointer_down, tg.Event.touch_pointer_up):
+            self.file_touch = None
+            return
+        if action != tg.Event.touch_up or pointer is None:
+            return
+
+        touch = self.file_touch
+        self.file_touch = None
+        if touch is None or touch[0] != event.id:
+            return
+        start_x, start_y = touch[1], touch[2]
+        if abs(pointer["x"] - start_x) > 14 * self.density or abs(pointer["y"] - start_y) > 14 * self.density:
+            return
+        path = self._file_path_at(event.id, start_x)
+        if path is not None and self.open_with is not None:
+            self.open_with.open(path)
+
+    def _file_path_at(self, view_id, x):
+        row_index = self.row_view_indexes[view_id]
+        rows = self.screen.screen if self.screen.alternate is not None else list(self.screen.scrollback) + self.screen.screen
+        if row_index >= len(rows):
+            return None
+
+        characters = []
+        columns = []
+        for column, cell in enumerate(rows[row_index]):
+            for character in cell[0]:
+                characters.append(character)
+                columns.append(column)
+        line = "".join(characters)
+        tapped_column = int(x / self.density / 9)
+        try:
+            cwd = os.readlink(f"/proc/{self.session.pid}/cwd")
+        except OSError:
+            cwd = os.path.expanduser("~")
+        for match in self.file_token.finditer(line):
+            start = columns[match.start()] if match.start() < len(columns) else 0
+            end = columns[match.end() - 1] + 1 if match.end() - 1 < len(columns) else start
+            if not start <= tapped_column < end:
+                continue
+            candidate = match.group()
+            if candidate[:1] in ("'", '"') and candidate[-1:] == candidate[:1]:
+                candidate = candidate[1:-1]
+            candidate = candidate.strip("`<>()[]{}\"'").rstrip(",;:.")
+            for value in (candidate, candidate.rsplit(":", 1)[0] if ":" in candidate else candidate):
+                expanded = os.path.expanduser(value)
+                path = expanded if os.path.isabs(expanded) else os.path.join(cwd, expanded)
+                if os.path.isfile(path):
+                    return os.path.realpath(path)
+            return None
+        return None
 
     def _send_mouse(self, event):
         if not self.screen.mouse_tracking:
@@ -259,37 +370,47 @@ class TerminalApp:
         self.session.write(sequence)
 
     def _resize_output(self, columns):
-        self.output_rows.setwidth(columns * 9)
+        width = columns * 9
+        if width != self.output_width:
+            self.output_rows.setwidth(width)
+            self.output_width = width
 
     def _render(self, force=False):
         rows = self.screen.render_rows()
-        self.output_rows.setwidth(self.screen.columns * 9)
-        self.output_rows.setheight(len(rows) * 18)
-        if force or len(rows) != len(self.row_views):
+        width = self.screen.columns * 9
+        height = len(rows) * 18
+        if width != self.output_width:
+            self.output_rows.setwidth(width)
+            self.output_width = width
+        if height != self.output_height:
+            self.output_rows.setheight(height)
+            self.output_height = height
+        rebuild = (force or self.output_columns != self.screen.columns
+                   or len(rows) < len(self.row_views))
+        if rebuild:
             self.output_rows.clearchildren()
             self.row_views = []
             self.rendered_rows = []
             self.row_view_ids = set()
             self.row_view_indexes = {}
             self.mouse_touch_enabled = False
-            for _ in rows:
-                row = tg.TextView(self.activity, "", self.output_rows)
-                row.setdimensions(self.screen.columns * 9, 18)
-                row.settextsize(13)
-                row.settextcolor(self.screen.default_fg)
-                row.setbackgroundcolor(self.screen.default_bg)
-                row.sendclickevent(True)
-                self.row_views.append(row)
-                self.row_view_ids.add(row.id)
-                self.row_view_indexes[row.id] = len(self.row_views) - 1
-                self.rendered_rows.append(None)
+            self.output_columns = self.screen.columns
+        while len(self.row_views) < len(rows):
+            row = tg.TextView(self.activity, "", self.output_rows)
+            row.setdimensions(self.screen.columns * 9, 18)
+            row.settextsize(13)
+            row.settextcolor(self.screen.default_fg)
+            row.setbackgroundcolor(self.screen.default_bg)
+            row.sendclickevent(True)
+            self.row_views.append(row)
+            self.row_view_ids.add(row.id)
+            self.row_view_indexes[row.id] = len(self.row_views) - 1
+            self.rendered_rows.append(None)
         changed = []
         for index, runs in enumerate(rows):
-            signature = tuple(runs)
-            if signature == self.rendered_rows[index]:
+            if runs is self.rendered_rows[index]:
                 continue
             row = {"id": self.row_views[index].id,
-                   "text": "\u200e" + "".join(run[0] for run in runs),
                    "runs": [
                        {"text": text, "foreground": foreground,
                         "background": background, "bold": bold,
@@ -298,9 +419,8 @@ class TerminalApp:
                        for text, foreground, background, bold, italic, underline,
                        strikethrough in runs if text
                    ]}
-            self.row_views[index].settext(row["text"])
             changed.append(row)
-            self.rendered_rows[index] = signature
+            self.rendered_rows[index] = runs
         if changed:
             self.activity.c.send_msg({
                 "method": "setStyledRows",
@@ -308,7 +428,8 @@ class TerminalApp:
             })
 
     def on_tick(self):
-        data = self.session.read_output()
+        # Keep large command output from monopolizing the UI event loop.
+        data = self.session.read_output(max_bytes=8192)
         if data:
             self.screen.feed(self.decoder.decode(data))
             for response in self.screen.take_responses():
@@ -330,7 +451,7 @@ class TerminalApp:
         self._position_controls(width)
 
     def _sync_mouse_touch(self):
-        enabled = bool(self.screen.mouse_tracking)
+        enabled = True
         if enabled == self.mouse_touch_enabled:
             return
         if not enabled and self.mouse_pressed and self.last_mouse_location is not None:

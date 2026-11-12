@@ -8,6 +8,7 @@ from shell import file_actions, file_associations, palette
 from shell.context_menu import ContextMenu
 from shell.icons import load
 from shell.open_with import OpenWithChooser
+from shell.recycler_view import RecyclerListView
 from shell.text_direction import force_ltr, is_rtl
 
 
@@ -24,6 +25,7 @@ class FilesApp:
     name = "File Explorer"
     icon = "folder"
     preload_ui = False
+    build_threaded = True
 
     def get_title(self, context=None):
         if context is None:
@@ -69,7 +71,6 @@ class FilesApp:
             button.sendclickevent(True)
             return button
 
-        nav_toggle = add_button(toolbar, "☰", 36)
         back = add_button(toolbar, "‹", 36)
         forward = add_button(toolbar, "›", 36)
         up = add_button(toolbar, "↑", 36)
@@ -88,18 +89,11 @@ class FilesApp:
         search_bar.setdimensions(tg.View.MATCH_PARENT, 44)
         search_bar.setlinearlayoutparams(0)
         search_bar.setbackgroundcolor(palette.surface_light)
-        search_label = tg.TextView(activity, "search", search_bar)
-        search_label.setdimensions(52, 38)
-        search_label.setlinearlayoutparams(0)
-        search_label.setmargin(8, "left")
-        search_label.settextsize(12)
-        search_label.settextcolor(palette.muted)
-        search_label.setgravity(0, 1)
         search = tg.EditText(activity, "", search_bar, singleline=True, line=False,
                              inputtype="text")
         search.setdimensions(0, 38)
         search.setlinearlayoutparams(1)
-        search.setmargin(6, "left")
+        search.setmargin(10, "left")
         search.setmargin(6, "right")
         search.setbackgroundcolor(palette.window_content)
         search.settextcolor(palette.text)
@@ -110,26 +104,16 @@ class FilesApp:
         body.setdimensions(tg.View.MATCH_PARENT, 0)
         body.setlinearlayoutparams(1)
         navigation = tg.LinearLayout(activity, body)
-        navigation.setdimensions(88, tg.View.MATCH_PARENT)
+        navigation.setdimensions(64, tg.View.MATCH_PARENT)
         navigation.setbackgroundcolor(palette.surface)
         content = tg.LinearLayout(activity, body)
         content.setdimensions(0, tg.View.MATCH_PARENT)
         content.setlinearlayoutparams(1)
         content.setbackgroundcolor(palette.window_content)
 
-        nav_heading = tg.TextView(activity, "home", navigation)
-        nav_heading.setdimensions(tg.View.MATCH_PARENT, 38)
-        nav_heading.setlinearlayoutparams(0)
-        nav_heading.setmargin(10, "left")
-        nav_heading.settextsize(12)
-        nav_heading.settextcolor(palette.muted)
-        nav_heading.setgravity(0, 1)
-
-        scroll = tg.NestedScrollView(activity, content, fillviewport=True, nobar=True)
-        scroll.setheight(0)
-        scroll.setlinearlayoutparams(1)
-        rows = tg.LinearLayout(activity, scroll)
-        rows.setdimensions(tg.View.MATCH_PARENT, tg.View.WRAP_CONTENT)
+        rows = RecyclerListView(activity, content)
+        rows.setdimensions(tg.View.MATCH_PARENT, 0)
+        rows.setlinearlayoutparams(1)
 
         status = tg.TextView(activity, "", content)
         status.setdimensions(tg.View.MATCH_PARENT, 24)
@@ -152,13 +136,14 @@ class FilesApp:
                 round(value / density) for value in parent.getdimensions()), apps, open_app,
             on_association_change)
         state = {"path": path, "back_id": back.id, "forward_id": forward.id,
-                 "up_id": up.id, "refresh_id": refresh.id, "nav_toggle_id": nav_toggle.id,
-                 "search_id": search.id, "path_id": path_label.id, "rows": rows,
-                 "row_paths": {}, "menu": menu, "open_with": open_with,
+                 "up_id": up.id, "refresh_id": refresh.id, "search_id": search.id,
+                 "path_id": path_label.id, "rows": rows,
+                 "display_entries": [], "display_by_path": {},
+                 "menu": menu, "open_with": open_with,
                  "selected": None, "busy": False, "query": "", "entries": [],
                  "history": [path], "history_index": 0, "scan_id": 0,
-                 "loading": False, "error": None, "closed": False,
-                 "nav_visible": True, "nav_paths": {}}
+                 "loading": False, "error": None, "closed": False, "nav_paths": {},
+                 "render_id": 0}
 
         shared = os.path.expanduser("~/storage/shared")
         locations = [("home", os.path.expanduser("~"))]
@@ -169,88 +154,70 @@ class FilesApp:
             if os.path.isdir(target):
                 locations.append((label, target))
         for label, target in locations:
-            button = tg.TextView(activity, label, navigation)
-            button.setdimensions(tg.View.MATCH_PARENT, 40)
-            button.setlinearlayoutparams(0)
-            button.setmargin(6, "left")
-            button.settextsize(11)
+            row = tg.LinearLayout(activity, navigation, vertical=False)
+            row.setdimensions(tg.View.MATCH_PARENT, 32)
+            row.setlinearlayoutparams(0)
+            row.setmargin(2, "left")
+            row.setmargin(2, "right")
+            row.sendclickevent(True)
+            button = tg.TextView(activity, label, row)
+            button.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
+            button.setmargin(4, "left")
+            button.settextsize(12)
             button.settextcolor(palette.text)
             button.setgravity(0, 1)
-            button.sendclickevent(True)
-            state["nav_paths"][button.id] = target
+            state["nav_paths"][row.id] = target
 
         path_label.sendlongclickevent(True)
 
         def render():
-            rows.clearchildren()
-            state["row_paths"].clear()
+            state["render_id"] += 1
+            render_id = state["render_id"]
+            state["display_entries"] = []
+            state["display_by_path"] = {}
+            rows.setitems([])
             path_label.settext(state["path"])
             if state["loading"]:
                 status.settext("loading folder…")
                 return
             if state["error"] is not None:
-                row = tg.TextView(activity, str(state["error"]), rows)
-                row.setdimensions(tg.View.MATCH_PARENT, 52)
-                row.setlinearlayoutparams(0)
-                row.setmargin(12, "left")
-                row.settextcolor(palette.muted)
-                row.setgravity(0, 1)
                 status.settext("couldn't load folder")
                 return
 
             entries = [entry for entry in state["entries"]
                        if not state["query"] or state["query"] in entry[1].casefold()]
-            status.settext(f"{len(entries)} items" if not state["query"]
-                           else f"{len(entries)} of {len(state['entries'])} items")
-            for entry_path, entry_name, is_directory, size, modified in entries:
-                row = tg.LinearLayout(activity, rows, vertical=False)
-                row.setdimensions(tg.View.MATCH_PARENT, 56)
-                row.setlinearlayoutparams(0)
-                row.setbackgroundcolor(palette.window_content)
-                row.sendclickevent(True)
-                row.sendlongclickevent(True)
-                def add_icon():
-                    app_icon = None if is_directory else file_associations.icon_for(entry_path, apps)
-                    if is_directory or app_icon is not None:
-                        image = tg.ImageView(activity, row)
-                        image.setdimensions(30, 30)
-                        image.setimage(load("folder" if is_directory else app_icon))
-                        image.setmargin(12, "left")
-                        image.setmargin(4, "right")
-                        image.setmargin(12, "top")
-                        image.setmargin(12, "bottom")
-                        image.setlinearlayoutparams(0)
-                    else:
-                        marker = tg.TextView(activity, "·", row)
-                        marker.setdimensions(28, 52)
-                        marker.settextsize(24)
-                        marker.settextcolor(palette.muted)
-                        marker.setgravity(1, 1)
-                        marker.setlinearlayoutparams(0)
+            state["display_entries"] = entries
+            state["display_by_path"] = {entry[0]: entry for entry in entries}
+            status.settext(f"preparing {len(entries)} items…")
 
-                def add_label():
-                    labels = tg.LinearLayout(activity, row)
-                    labels.setdimensions(0, 52)
-                    labels.setlinearlayoutparams(1)
-                    labels.setmargin(8, "left")
-                    name = tg.TextView(activity, entry_name, labels)
-                    name.setdimensions(tg.View.MATCH_PARENT, 30)
-                    name.setlinearlayoutparams(0)
-                    name.settextcolor(palette.text)
-                    name.settextsize(14)
-                    name.setgravity(0, 1)
+            def prepare_items():
+                items = []
+                for entry_path, entry_name, is_directory, size, modified in entries:
+                    if state["closed"] or render_id != state["render_id"]:
+                        return None
+                    app_icon = None if is_directory else file_associations.icon_for(entry_path, apps)
+                    icon = load("folder" if is_directory else app_icon) if is_directory or app_icon else None
                     date = datetime.fromtimestamp(modified).strftime("%Y-%m-%d %H:%M")
                     detail = f"file folder · {date}" if is_directory else f"{_format_size(size)} · {date}"
-                    subtitle = tg.TextView(activity, detail, labels)
-                    subtitle.setdimensions(tg.View.MATCH_PARENT, 18)
-                    subtitle.setlinearlayoutparams(0)
-                    subtitle.settextcolor(palette.muted)
-                    subtitle.settextsize(10)
-                    subtitle.setgravity(0, 1)
+                    items.append({
+                        "key": entry_path,
+                        "text": entry_name,
+                        "subtitle": detail,
+                        "marker": "" if icon else "·",
+                        "image": icon,
+                    })
+                return items
 
-                add_icon()
-                add_label()
-                state["row_paths"][row.id] = (entry_path, is_directory)
+            def prepared(items, error):
+                if state["closed"] or render_id != state["render_id"]:
+                    return
+                if error is not None:
+                    status.settext(f"couldn't prepare folder: {error}")
+                    return
+                rows.setitems(items or [])
+                status.settext(f"{len(entries)} items")
+
+            file_actions.run_background(prepare_items, prepared)
 
         def scan_directory(directory):
             with os.scandir(directory) as source:
@@ -286,7 +253,7 @@ class FilesApp:
                 state["error"] = error
                 render()
 
-            file_actions.run_async(lambda: scan_directory(directory), scanned)
+            file_actions.run_background(lambda: scan_directory(directory), scanned)
 
         def show_menu(item=None):
             state["selected"] = item
@@ -295,6 +262,15 @@ class FilesApp:
             if item is not None and not item[1]:
                 actions.insert(1, "open_with")
             menu.show(actions, 12, 60, handle_menu_action)
+
+        def entry_from_event(event):
+            key = event.value.get("key")
+            if key is not None:
+                return state["display_by_path"].get(key)
+            position = event.value.get("position", -1)
+            if 0 <= position < len(state["display_entries"]):
+                return state["display_entries"][position]
+            return None
 
         def show_open_with(path_value):
             state["open_with"].show(path_value)
@@ -375,16 +351,13 @@ class FilesApp:
                 if event.id == state["path_id"]:
                     show_menu()
                     return True
-                item = state["row_paths"].get(event.id)
-                if item is not None:
-                    show_menu(item)
+                if event.id == rows.id:
+                    entry = entry_from_event(event)
+                    if entry is not None:
+                        show_menu((entry[0], entry[2]))
                     return True
             if event.type != tg.Event.click:
                 return False
-            if event.id == state["nav_toggle_id"]:
-                state["nav_visible"] = not state["nav_visible"]
-                navigation.setvisibility(tg.View.VISIBLE if state["nav_visible"] else tg.View.GONE)
-                return True
             if event.id == state["back_id"]:
                 if state["history_index"] > 0:
                     state["history_index"] -= 1
@@ -407,9 +380,12 @@ class FilesApp:
             if target is not None:
                 load_directory(target, add_history=True)
                 return True
-            item = state["row_paths"].get(event.id)
-            if item is None:
+            if event.id != rows.id:
                 return False
+            entry = entry_from_event(event)
+            if entry is None:
+                return True
+            item = (entry[0], entry[2])
             if item[1]:
                 load_directory(item[0], add_history=True)
             else:
@@ -422,6 +398,7 @@ class FilesApp:
         def close():
             state["closed"] = True
             state["scan_id"] += 1
+            rows.close()
 
         handle_event.close = close
         return handle_event

@@ -18,6 +18,7 @@ class BrowserApp:
     name = "Nexa Browser"
     icon = "nexa"
     preload_ui = False
+    build_threaded = True
 
     def build(self, activity, parent, context=None):
         return BrowserSession(activity, parent)
@@ -210,12 +211,19 @@ class BrowserSession:
         self.buttons[close_button.id] = ("close_tab", tab_id)
         webview = tg.WebView(self.activity, self.pages)
         webview.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
+        self._set_desktop_mode(webview)
         webview.allownavigation(True)
         tab["webview"] = webview
         self.webviews[webview.id] = tab_id
         self._select_tab(tab_id)
         self._load_url(tab, "https://www.google.com")
         return tab_id
+
+    def _set_desktop_mode(self, webview):
+        self.activity.c.send_msg({
+            "method": "setDesktopMode",
+            "params": {"aid": self.activity.aid, "id": webview.id, "enabled": True},
+        })
 
     def _select_tab(self, tab_id):
         tab = self.tabs.get(tab_id)
@@ -429,6 +437,7 @@ a {{ color:#45d6c5; overflow-wrap:anywhere; }} li {{ margin:10px 0; }}
         self.webviews.pop(old.id, None)
         webview = tg.WebView(self.activity, self.pages)
         webview.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
+        self._set_desktop_mode(webview)
         webview.allownavigation(True)
         tab["webview"] = webview
         tab["javascript"] = False

@@ -7,12 +7,12 @@ from queue import Empty, SimpleQueue
 
 clipboard = {"path": None, "cut": False}
 _worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nexa-files")
+_read_worker = ThreadPoolExecutor(max_workers=2, thread_name_prefix="nexa-file-read")
 _completed = SimpleQueue()
 
 
-def run_async(operation, callback):
-    future = _worker.submit(operation)
-
+def _submit(worker, operation, callback):
+    future = worker.submit(operation)
     def finish(future):
         try:
             result, error = future.result(), None
@@ -21,6 +21,14 @@ def run_async(operation, callback):
         _completed.put((callback, result, error))
 
     future.add_done_callback(finish)
+
+
+def run_async(operation, callback):
+    _submit(_worker, operation, callback)
+
+
+def run_background(operation, callback):
+    _submit(_read_worker, operation, callback)
 
 
 def process_completions():

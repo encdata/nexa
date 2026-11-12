@@ -22,6 +22,8 @@ def _register(apps, app, source):
         raise TypeError(f"{source}.build must be callable")
     if not isinstance(getattr(app, "preload_ui", False), bool):
         raise TypeError(f"{source}.preload_ui must be a bool")
+    if not isinstance(getattr(app, "build_threaded", False), bool):
+        raise TypeError(f"{source}.build_threaded must be a bool")
     if app.app_id in apps:
         raise ValueError(f"duplicate app id {app.app_id!r} from {source}")
     apps[app.app_id] = app

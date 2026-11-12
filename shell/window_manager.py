@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from time import monotonic
 
@@ -32,6 +33,8 @@ class WindowManager:
         self.windows = {}
         self.window_order = []
         self.preloaded = {}
+        self.pending_builds = []
+        self.build_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nexa-ui-build")
         self.button_events = {}
         self.next_id = 0
         self.id_lock = Lock()
@@ -44,10 +47,10 @@ class WindowManager:
 
     def open_app(self, app_id, context=None):
         app = self.apps[app_id]
-        cache_key = (app_id, context)
+        cache_key = (app_id, None) if context is None else None
         if self.restore_app(app_id, context):
             return None
-        if cache_key in self.preloaded:
+        if cache_key is not None and cache_key in self.preloaded:
             window = self.preloaded.pop(cache_key)
             self.windows[window["id"]] = window
             self.window_order.append(window["id"])
@@ -79,9 +82,14 @@ class WindowManager:
         place(border_surface, 0, 0)
         panel_width = width - self.border_width * 2
         panel_height = height - self.border_width * 2
+        content_background = getattr(app, "content_background", palette.window_content)
+        content_surface = add_rounded(self.activity, frame, panel_width, panel_height,
+                                      content_background, 10)
+        set_image_scale_type(content_surface, "fit_xy")
+        place(content_surface, self.border_width, self.border_width)
         panel = tg.LinearLayout(self.activity, frame, vertical=True)
         panel.setdimensions(panel_width, panel_height)
-        panel.setbackgroundcolor(palette.window_content)
+        panel.setbackgroundcolor(content_background)
         place(panel, self.border_width, self.border_width)
 
         title_frame = tg.FrameLayout(self.activity, panel)
@@ -122,29 +130,25 @@ class WindowManager:
         content.setwidth(tg.View.MATCH_PARENT)
         content.setheight(0)
         content.setlinearlayoutparams(1)
-        content.setbackgroundcolor(palette.window_content)
+        content.setbackgroundcolor(getattr(app, "content_background", palette.window_content))
         build_with_services = getattr(app, "build_with_services", None)
-        if build_with_services is None:
-            event_handler = app.build(self.activity, content, context)
-        else:
-            event_handler = build_with_services(
-                self.activity, content, context,
-                {"apps": self.apps, "open_app": self.on_open_app or self.open_app,
-                 "association_changed": self.on_association_change})
-        self._notify_window_resize(event_handler, panel_width, panel_height - self.titlebar_height)
         window = {
             "id": window_id,
             "app": app,
             "frame": frame,
             "panel": panel,
+            "content": content,
             "border_surface": border_surface,
+            "content_surface": content_surface,
             "title_surface": title_surface,
             "titlebar": titlebar,
             "title_view": title_view,
             "controls": controls,
             "title": window_title,
             "context": context,
-            "event_handler": event_handler,
+            "event_handler": None,
+            "build_future": None,
+            "build_pending": False,
             "x": x,
             "y": y,
             "width": width,
@@ -154,6 +158,13 @@ class WindowManager:
             "minimized": False,
             "button_actions": {control.id: self.button_events[control.id] for control in controls},
         }
+        if getattr(app, "build_threaded", False):
+            window["build_pending"] = True
+        else:
+            event_handler = self._build_app(app, content, context)
+            window["event_handler"] = event_handler
+            self._notify_window_resize(event_handler, panel_width,
+                                       panel_height - self.titlebar_height)
         self.windows[window_id] = window
         self.window_order.append(window_id)
         # termux:gui sometimes needs a location update after child views are added to lay them out.
@@ -162,6 +173,36 @@ class WindowManager:
         place(frame, x, y, top=True)
         self._set_active(window_id)
         return window_id
+
+    def _build_app(self, app, content, context):
+        build_with_services = getattr(app, "build_with_services", None)
+        if build_with_services is None:
+            return app.build(self.activity, content, context)
+        return build_with_services(
+            self.activity, content, context,
+            {"apps": self.apps, "open_app": self.on_open_app or self.open_app,
+             "association_changed": self.on_association_change})
+
+    def _finish_build(self, window):
+        future = window["build_future"]
+        if future is None or not future.done():
+            return
+        window["build_future"] = None
+        try:
+            handler = future.result()
+        except Exception as error:
+            print(f"nexa: couldn't open {window['title']}: {error}")
+            message = tg.TextView(self.activity, f"couldn't open {window['title']}: {error}",
+                                  window["content"])
+            message.setdimensions(tg.View.MATCH_PARENT, 64)
+            message.settextcolor(palette.text)
+            message.setgravity(1, 1)
+            window["build_error"] = True
+            return
+        window["event_handler"] = handler
+        self._notify_window_resize(
+            handler, max(1, window["width"] - self.border_width * 2),
+            max(1, window["height"] - self.border_width * 2 - self.titlebar_height))
 
     def _discard_window(self, window):
         close = getattr(window["event_handler"], "close", None)
@@ -229,10 +270,34 @@ class WindowManager:
 
     def tick(self):
         for window in tuple(self.windows.values()):
+            self._finish_build(window)
+        for window in tuple(self.pending_builds):
+            if not window["build_future"].done():
+                continue
+            try:
+                handler = window["build_future"].result()
+                close = getattr(handler, "close", None)
+                if close is not None:
+                    close()
+            except Exception as error:
+                print(f"nexa: app closed while building: {error}")
+            window["frame"].delete()
+            self.pending_builds.remove(window)
+
+        for window in tuple(self.windows.values()):
+            if window["minimized"]:
+                continue
             handler = window["event_handler"]
             on_tick = getattr(handler, "on_tick", None)
             if on_tick is not None:
                 on_tick()
+
+        for window in tuple(self.windows.values()):
+            if not window["build_pending"]:
+                continue
+            window["build_pending"] = False
+            window["build_future"] = self.build_executor.submit(
+                self._build_app, window["app"], window["content"], window["context"])
 
     @staticmethod
     def _handle_app_event(handler, event):
@@ -361,12 +426,16 @@ class WindowManager:
         window["panel"].setdimensions(panel_width, panel_height)
         radius = 0 if window["maximized"] else 14
         set_rounded_color(window["border_surface"], width, height, palette.surface_light, radius)
-        window["panel"].setbackgroundcolor(palette.window_content)
+        content_background = getattr(window["app"], "content_background", palette.window_content)
+        set_rounded_color(window["content_surface"], panel_width, panel_height,
+                          content_background, max(0, radius - self.border_width))
+        window["panel"].setbackgroundcolor(content_background)
         set_surface_color(window["title_surface"], panel_width, self.titlebar_height,
                           palette.surface_light)
         self._notify_window_resize(window["event_handler"], panel_width,
                                    max(1, panel_height - self.titlebar_height))
         place(window["panel"], self.border_width, self.border_width)
+        place(window["content_surface"], self.border_width, self.border_width)
         place(window["border_surface"], 0, 0)
         self._place_window(window, top=top)
 
@@ -484,6 +553,7 @@ class WindowManager:
         panel_height = height - self.border_width * 2
         window["frame"].setdimensions(width, height)
         window["border_surface"].setdimensions(width, height)
+        window["content_surface"].setdimensions(panel_width, panel_height)
         window["panel"].setdimensions(panel_width, panel_height)
         window["title_surface"].setdimensions(panel_width, self.titlebar_height)
         if move:
@@ -493,12 +563,17 @@ class WindowManager:
         window = self.windows.pop(window_id, None)
         if window is None:
             return
+        if window["build_future"] is not None:
+            self._finish_build(window)
         if window_id in self.window_order:
             self.window_order.remove(window_id)
         self._cancel_drag(window_id)
         was_active = self.active_window == window_id
-        cache_key = (window["app"].app_id, window["context"])
-        if getattr(window["app"], "preload_ui", False) and window["context"] is None:
+        cache_key = (window["app"].app_id, None)
+        if (window["build_future"] is None and not window["build_pending"]
+                and not window.get("build_error")
+                and getattr(window["app"], "preload_ui", False)
+                and window["context"] is None):
             window["frame"].setvisibility(tg.View.GONE)
             for event_id, (owner, _) in list(self.button_events.items()):
                 if owner == window_id:
@@ -507,6 +582,18 @@ class WindowManager:
             if previous is not None:
                 self._discard_window(previous)
             self.preloaded[cache_key] = window
+            if self.on_close is not None:
+                self.on_close(window_id)
+            if was_active:
+                self._activate_top_window()
+            return
+
+        if window["build_future"] is not None:
+            window["frame"].setvisibility(tg.View.GONE)
+            self.pending_builds.append(window)
+            for event_id, (owner, _) in list(self.button_events.items()):
+                if owner == window_id:
+                    self.button_events.pop(event_id, None)
             if self.on_close is not None:
                 self.on_close(window_id)
             if was_active:
@@ -528,6 +615,16 @@ class WindowManager:
 
     def shutdown(self):
         self.drag = None
+        building = [*self.windows.values(), *self.pending_builds]
+        for window in building:
+            future = window["build_future"]
+            if future is None or future.cancel():
+                continue
+            if future.done():
+                self._close_build_result(future)
+            else:
+                future.add_done_callback(self._close_build_result)
+        self.build_executor.shutdown(wait=False, cancel_futures=True)
         for window in self.windows.values():
             close = getattr(window["event_handler"], "close", None)
             if close is not None:
@@ -539,3 +636,16 @@ class WindowManager:
         self.window_order.clear()
         self.button_events.clear()
         self.active_window = None
+
+    @staticmethod
+    def _close_build_result(future):
+        try:
+            handler = future.result()
+        except Exception:
+            return
+        close = getattr(handler, "close", None)
+        if close is not None:
+            try:
+                close()
+            except Exception as error:
+                print(f"nexa: couldn't clean up a background app: {error}")

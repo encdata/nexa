@@ -44,6 +44,15 @@ class LoadingScreen:
         y = max(0, (self.screen_height - self.panel_height) // 2)
         place(self.panel, x, y, top=True)
 
+    def resize(self, configuration):
+        self.screen_width = configuration["screenwidth"]
+        self.screen_height = configuration["screenheight"]
+        panel_width = min(type(self).panel_width, max(1, self.screen_width - 32))
+        if panel_width != self.panel_width:
+            self.panel_width = panel_width
+            self.panel.setwidth(panel_width)
+        self._place_panel()
+
     def show(self):
         self._place_panel()
         self.panel.setvisibility(tg.View.VISIBLE)

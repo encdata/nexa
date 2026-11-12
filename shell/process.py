@@ -39,6 +39,7 @@ class CommandSession:
         self.on_event = on_event
         self.on_exit = on_exit
         self.output = queue.Queue(maxsize=64)
+        self._pending_output = b""
         self.error = None
         self.exit_code = None
         self.pid = pid
@@ -76,13 +77,30 @@ class CommandSession:
             except ProcessLookupError:
                 pass
 
-    def read_output(self):
+    def read_output(self, max_bytes=None):
+        if max_bytes is not None and max_bytes <= 0:
+            return b""
         chunks = bytearray()
-        while True:
-            try:
-                chunks.extend(self.output.get_nowait())
-            except queue.Empty:
+        if self._pending_output:
+            if max_bytes is None or len(self._pending_output) <= max_bytes:
+                chunks.extend(self._pending_output)
+                self._pending_output = b""
+            else:
+                chunks.extend(self._pending_output[:max_bytes])
+                self._pending_output = self._pending_output[max_bytes:]
                 return bytes(chunks)
+
+        while max_bytes is None or len(chunks) < max_bytes:
+            try:
+                data = self.output.get_nowait()
+            except queue.Empty:
+                break
+            remaining = max_bytes - len(chunks) if max_bytes is not None else len(data)
+            chunks.extend(data[:remaining])
+            if remaining < len(data):
+                self._pending_output = data[remaining:]
+                break
+        return bytes(chunks)
 
     def handle_event(self, event):
         return self.on_event(event) if self.on_event is not None else False

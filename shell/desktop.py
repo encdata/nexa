@@ -1,4 +1,5 @@
 import os
+from queue import Empty, SimpleQueue
 from threading import Lock, Timer
 
 import termuxgui as tg
@@ -33,8 +34,11 @@ class Desktop:
         self.gesture_lock = Lock()
         self.long_press_timer = None
         self.home_scan_timer = None
+        self.home_scan_signature = None
+        self.home_scan_generation = 0
         self.closed = False
         self.pending_file_actions = set()
+        self.pending_home_items = SimpleQueue()
         self.gesture_number = 0
         self.context_icon = None
         self.context_visible = False
@@ -54,37 +58,103 @@ class Desktop:
                  for path, name, is_folder in home_items[:home_capacity]]
         items.extend((app.app_id, app.icon, app.name, app.app_id, None, None)
                      for app in apps.values())
+        self.population_items = []
         for index, (key, symbol, label, app_id, context, is_folder) in enumerate(items):
             grid_index = index
             saved_position = self.positions.get(key)
             if isinstance(saved_position, int) and not isinstance(saved_position, bool):
                 grid_index = max(0, saved_position)
-                x, y = self._grid_position(grid_index, x_positions, y_positions)
             elif (isinstance(saved_position, list) and len(saved_position) == 2
                     and all(isinstance(value, (int, float)) for value in saved_position)):
                 x = max(0, min(screen_width - self.icon_width, saved_position[0]))
                 y = max(0, min(screen_height - 56 - self.icon_height, saved_position[1]))
                 grid_index = self._grid_index_for(x, y, x_positions, y_positions)
-                x, y = self._grid_position(grid_index, x_positions, y_positions)
-            else:
-                x, y = self._grid_position(grid_index, x_positions, y_positions)
-            self._add_icon(key, symbol, label, app_id, context, x, y, is_folder, grid_index)
-            if progress is not None:
-                percent = 72 + round(24 * (index + 1) / max(1, len(items)))
-                progress(f"placing desktop icons {index + 1}/{len(items)}", percent)
+            self.population_items.append(
+                (key, symbol, label, app_id, context, is_folder, grid_index))
+        self.population_index = 0
+        self.population_total = len(self.population_items)
+        self.population_complete = self.population_total == 0
+        self.progress = progress
         self.context_menu = ContextMenu(activity, root,
                                         lambda: (self.screen_width, self.screen_height))
         self.open_with = OpenWithChooser(
             activity, root, lambda: (self.screen_width, self.screen_height), apps, open_app,
             self.refresh_associated_icons)
-        if progress is not None:
-            progress("positioning desktop", 97)
-        self._resize(screen_width, screen_height, force=True)
         self.home_item_snapshot = {path: (name, is_folder)
                                    for path, name, is_folder in home_items[:home_capacity]}
         self._schedule_home_scan()
-        if progress is not None:
-            progress("desktop ready", 98)
+
+    @property
+    def ready(self):
+        return self.population_complete
+
+    def tick(self):
+        with self.gesture_lock:
+            if self.closed:
+                return
+
+            if not self.population_complete:
+                key, symbol, label, app_id, context, is_folder, grid_index = (
+                    self.population_items[self.population_index])
+                x, y = self._initial_position(grid_index)
+                self._add_icon(key, symbol, label, app_id, context, x, y, is_folder, grid_index)
+                self.population_index += 1
+                if (self.progress is not None
+                        and (self.population_index == self.population_total
+                             or self.population_index % 3 == 0)):
+                    percent = 72 + round(24 * self.population_index / self.population_total)
+                    self.progress(f"placing desktop icons {self.population_index}/{self.population_total}", percent)
+
+                if self.population_index == self.population_total:
+                    if self.progress is not None:
+                        self.progress("positioning desktop", 97)
+                    self.population_complete = True
+                    positions = {item["key"]: item["grid_index"]
+                                 for item in self.icons.values()}
+                    if positions != self.positions:
+                        self.positions = positions
+                        save_positions(self.positions)
+                    if self.progress is not None:
+                        self.progress("desktop ready", 98)
+                    if self.context_visible:
+                        self.context_menu.reposition()
+
+            if self.drag is None:
+                try:
+                    available = self.pending_home_items.get_nowait()
+                except Empty:
+                    return
+                while True:
+                    try:
+                        available = self.pending_home_items.get_nowait()
+                    except Empty:
+                        break
+                if available != self.home_item_snapshot:
+                    if self.context_visible:
+                        self._hide_context_menu()
+                    self._sync_home_items(available)
+
+    def _initial_position(self, grid_index):
+        x_positions, y_positions = self._grid_axes(self.screen_width, self.screen_height)
+        total = len(self.icons) + self.population_total - self.population_index
+        largest_index = max(
+            [grid_index, *(icon["grid_index"] for icon in self.icons.values()),
+             *(item[6] for item in self.population_items[self.population_index + 1:])])
+        required_rows = max((total + len(x_positions) - 1) // len(x_positions),
+                            largest_index // len(x_positions) + 1)
+        while len(y_positions) < required_rows:
+            y_positions.append(y_positions[-1] + self.icon_height + self.gap)
+
+        desired = self._grid_position(grid_index, x_positions, y_positions)
+        occupied = {(icon["x"], icon["y"]) for icon in self.icons.values()}
+        if desired not in occupied:
+            return desired
+
+        slots = [(x, y) for y in y_positions for x in x_positions]
+        available = [point for point in slots if point not in occupied]
+        candidates = available or slots
+        return min(candidates, key=lambda point:
+                   (point[0] - desired[0]) ** 2 + (point[1] - desired[1]) ** 2)
 
     def resize(self, screen_width, screen_height):
         with self.gesture_lock:
@@ -116,17 +186,22 @@ class Desktop:
         for icon_id in icon_ids:
             icon = self.icons[icon_id]
             desired = self._grid_position(icon["grid_index"], x_positions, y_positions)
-            available = [point for point in slots if point not in occupied]
-            candidates = available or slots
-            x, y = min(candidates, key=lambda point:
-                       (point[0] - desired[0]) ** 2 + (point[1] - desired[1]) ** 2)
+            if desired in occupied:
+                available = [point for point in slots if point not in occupied]
+                candidates = available or slots
+                x, y = min(candidates, key=lambda point:
+                           (point[0] - desired[0]) ** 2 + (point[1] - desired[1]) ** 2)
+            else:
+                x, y = desired
             icon["x"], icon["y"] = x, y
             place(icon["view"], x, y)
             occupied.add((x, y))
 
-        self.positions = {item["key"]: item["grid_index"]
-                          for item in self.icons.values()}
-        save_positions(self.positions)
+        positions = {item["key"]: item["grid_index"]
+                     for item in self.icons.values()}
+        if self.population_complete and positions != self.positions:
+            self.positions = positions
+            save_positions(self.positions)
         if self.context_visible:
             self.context_menu.reposition()
 
@@ -335,8 +410,7 @@ class Desktop:
         return True
 
     def _refresh_home_items(self):
-        available = {path: (name, is_folder) for path, name, is_folder in load_home_items()}
-        self._sync_home_items(available)
+        self._schedule_home_scan(delay=0, force=True)
 
     def _next_icon_position(self):
         max_x = max(0, self.screen_width - self.icon_width)
@@ -392,24 +466,41 @@ class Desktop:
         self.home_item_snapshot = available
         self._resize(self.screen_width, self.screen_height, force=True)
 
-    def _schedule_home_scan(self):
+    def _schedule_home_scan(self, delay=3, force=False):
         if self.closed:
             return
-        self.home_scan_timer = Timer(3, self._scan_home_items)
+        if self.home_scan_timer is not None:
+            self.home_scan_timer.cancel()
+        self.home_scan_generation += 1
+        generation = self.home_scan_generation
+        self.home_scan_timer = Timer(delay, self._scan_home_items, (generation, force))
         self.home_scan_timer.daemon = True
         self.home_scan_timer.start()
 
-    def _scan_home_items(self):
+    def _scan_home_items(self, generation, force=False):
         with self.gesture_lock:
-            if self.closed:
+            if self.closed or generation != self.home_scan_generation:
                 return
-            available = dict(list({path: (name, is_folder)
-                                   for path, name, is_folder in load_home_items()}.items())
-                             [:self.home_capacity])
-            if self.drag is None and available != self.home_item_snapshot:
-                if self.context_visible:
-                    self._hide_context_menu()
-                self._sync_home_items(available)
+            capacity = self.home_capacity
+            previous_signature = self.home_scan_signature
+        home = os.path.expanduser("~")
+        try:
+            info = os.stat(home)
+            signature = (info.st_mtime_ns, info.st_ctime_ns, info.st_ino)
+        except OSError:
+            signature = None
+        if not force and signature == previous_signature:
+            with self.gesture_lock:
+                if not self.closed and generation == self.home_scan_generation:
+                    self._schedule_home_scan()
+            return
+        available = dict(list({path: (name, is_folder)
+                               for path, name, is_folder in load_home_items()}.items())[:capacity])
+        with self.gesture_lock:
+            if self.closed or generation != self.home_scan_generation:
+                return
+            self.home_scan_signature = signature
+            self.pending_home_items.put(available)
             self._schedule_home_scan()
 
     def handle_event(self, event):
@@ -437,6 +528,7 @@ class Desktop:
             if self.home_scan_timer is not None:
                 self.home_scan_timer.cancel()
                 self.home_scan_timer = None
+            self.home_scan_generation += 1
             self.drag = None
 
     def _handle_event(self, event):

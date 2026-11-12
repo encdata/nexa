@@ -1,4 +1,6 @@
 import sys
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from time import sleep
 
@@ -22,18 +24,60 @@ def run_connection(connection):
 
     configuration = activity.getconfiguration()
     loading = show_loading(activity, configuration)
-    startup = load_startup(loading.update, configuration)
+    pending_events = deque()
+    loading_active = True
+
+    def update_loading(status, progress):
+        if loading_active:
+            loading.update(status, progress)
+
+    closing = False
+    worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nexa-startup")
+    startup_future = worker.submit(load_startup, update_loading, configuration)
+    while not startup_future.done():
+        event = connection.checkevent()
+        if event is not None:
+            pending_events.append(event)
+            if event.type == tg.Event.config:
+                loading.resize(activity.getconfiguration())
+            if event.type == tg.Event.destroy and event.value.get("finishing"):
+                loading_active = False
+                closing = True
+                break
+        sleep(0.01)
+
+    if closing:
+        worker.shutdown(wait=False, cancel_futures=True)
+        return
+
+    try:
+        startup = startup_future.result()
+    finally:
+        worker.shutdown(wait=True)
 
     from screens.home import show as show_home
 
-    shell = show_home(activity, startup, loading.root, loading.update, loading.show)
-    loading.update("ready", 100)
-    loading.hide()
-    del loading, startup
-
+    shell = show_home(activity, startup, loading.root, update_loading, loading.show)
+    del startup
     try:
+        while not shell.desktop.ready:
+            event = pending_events.popleft() if pending_events else connection.checkevent()
+            if event is not None:
+                if event.type == tg.Event.destroy and event.value.get("finishing"):
+                    loading_active = False
+                    return
+                shell.handle_event(event)
+            file_actions.process_completions()
+            shell.tick()
+            if event is None:
+                sleep(0.01)
+
+        loading.update("ready", 100)
+        loading.hide()
+        loading_active = False
+
         while True:
-            event = connection.checkevent()
+            event = pending_events.popleft() if pending_events else connection.checkevent()
             file_actions.process_completions()
             shell.tick()
             if event is None:
@@ -50,15 +94,12 @@ def wait_for_launch(marker):
     marker.parent.mkdir(parents=True, exist_ok=True)
     while not marker.exists():
         sleep(0.2)
-    try:
-        marker.unlink()
-    except FileNotFoundError:
-        pass
 
 
 def main():
     background = "--background-wait" in sys.argv[1:]
     marker = Path.home() / ".cache" / "nexa" / "launch"
+    active_marker = marker.with_name("active")
     while True:
         if background:
             wait_for_launch(marker)
@@ -71,7 +112,14 @@ def main():
                     raise
                 sleep(1)
         with connection:
-            run_connection(connection)
+            if background:
+                active_marker.touch()
+                marker.unlink(missing_ok=True)
+            try:
+                run_connection(connection)
+            finally:
+                if background:
+                    active_marker.unlink(missing_ok=True)
         if not background:
             return
 

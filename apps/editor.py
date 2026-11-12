@@ -41,6 +41,7 @@ class EditorApp:
     name = "Nexa Editor"
     icon = "notepad"
     preload_ui = True
+    build_threaded = True
 
     def get_title(self, context=None):
         if context:
@@ -109,7 +110,7 @@ class EditorApp:
         status.settextcolor(palette.muted)
         status.setgravity(0, 1)
 
-        state = {"saved_text": "", "busy": False}
+        state = {"saved_text": "", "busy": False, "closed": False}
 
         def resolve_path():
             path = os.path.expanduser(path_field.gettext().strip())
@@ -140,13 +141,15 @@ class EditorApp:
             status.settext("opening…")
 
             def opened(text, error):
+                if state["closed"]:
+                    return
                 state["busy"] = False
                 if error is not None:
                     status.settext(f"couldn't open file: {error}")
                     return
                 set_document(path, text)
 
-            file_actions.run_async(lambda: _read_file(path), opened)
+            file_actions.run_background(lambda: _read_file(path), opened)
 
         def save_file():
             if state["busy"]:
@@ -161,6 +164,8 @@ class EditorApp:
             status.settext("saving…")
 
             def saved(_result, error):
+                if state["closed"]:
+                    return
                 state["busy"] = False
                 if error is not None:
                     status.settext(f"couldn't save file: {error}")
@@ -200,6 +205,10 @@ class EditorApp:
         if context:
             open_file()
 
+        def close():
+            state["closed"] = True
+
+        handle_event.close = close
         return handle_event
 
 

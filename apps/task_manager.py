@@ -9,7 +9,8 @@ import termuxgui as tg
 from shell import palette
 from shell.context_menu import ContextMenu
 from shell.icons import load
-from shell.text_direction import is_rtl
+from shell.recycler_view import RecyclerListView
+from shell.text_direction import force_ltr, is_rtl
 
 
 def _read_memory():
@@ -115,6 +116,7 @@ class TaskManagerApp:
     name = "Task Manager"
     icon = "apps"
     preload_ui = False
+    build_threaded = True
 
     def build(self, activity, parent, context=None):
         configuration = activity.getconfiguration()
@@ -122,6 +124,7 @@ class TaskManagerApp:
         rtl = is_rtl(configuration)
         root = tg.LinearLayout(activity, parent)
         root.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
+        force_ltr(root)
         root.setbackgroundcolor(palette.window_content)
 
         top = tg.LinearLayout(activity, root, vertical=False)
@@ -228,11 +231,10 @@ class TaskManagerApp:
             header.sendclickevent(True)
             sort_actions[header.id] = key
             sort_headers[key] = header
-        process_scroll = tg.NestedScrollView(activity, process_page, fillviewport=True, nobar=True)
-        process_scroll.setheight(0)
-        process_scroll.setlinearlayoutparams(1)
-        process_rows = tg.LinearLayout(activity, process_scroll)
-        process_rows.setdimensions(tg.View.MATCH_PARENT, tg.View.WRAP_CONTENT)
+        process_rows = RecyclerListView(activity, process_page)
+        force_ltr(process_rows)
+        process_rows.setdimensions(tg.View.MATCH_PARENT, 0)
+        process_rows.setlinearlayoutparams(1)
 
         performance_scroll = tg.NestedScrollView(activity, performance_page, fillviewport=True, nobar=True)
         performance_scroll.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
@@ -284,9 +286,9 @@ class TaskManagerApp:
         menu = ContextMenu(activity, parent,
                            lambda: tuple(round(value / density) for value in parent.getdimensions()),
                            actions=("end_task",), labels={"end_task": "end task"})
-        row_views = {}
         state = {"snapshot": None, "selected": None, "active_page": process_page,
-                 "sort_by": "name", "sort_descending": False}
+                 "sort_by": "name", "sort_descending": False,
+                 "display_processes": {}}
         results = queue.Queue(maxsize=1)
         stop = threading.Event()
         protected = _protected_pids()
@@ -312,64 +314,7 @@ class TaskManagerApp:
         sampler = threading.Thread(target=sample_processes, name="nexa-process-sampler", daemon=True)
         sampler.start()
 
-        def make_process_row(process):
-            row = tg.LinearLayout(activity, process_rows, vertical=False)
-            row.setdimensions(tg.View.MATCH_PARENT, 62)
-            row.setlinearlayoutparams(0)
-            row.setmargin(6, "left")
-            row.setmargin(6, "right")
-            row.setmargin(3, "top")
-            row.setmargin(3, "bottom")
-            row.setbackgroundcolor(palette.surface)
-            row.sendclickevent(True)
-            row.sendlongclickevent(True)
-            def add_icon():
-                icon = tg.ImageView(activity, row)
-                icon.setdimensions(32, 32)
-                icon.setimage(load("terminal"))
-                icon.setmargin(12, "left")
-                icon.setmargin(10, "right")
-                icon.setmargin(22, "top")
-                icon.setlinearlayoutparams(0)
-
-            if not rtl:
-                add_icon()
-            info = tg.LinearLayout(activity, row)
-            info.setdimensions(0, 62)
-            info.setlinearlayoutparams(1)
-            title = tg.TextView(activity, process["name"], info)
-            title.setdimensions(tg.View.MATCH_PARENT, 34)
-            title.setlinearlayoutparams(0)
-            title.setmargin(8 if rtl else 2, "left")
-            title.setmargin(2 if rtl else 8, "right")
-            title.settextsize(14)
-            title.settextcolor(palette.text)
-            title.setgravity(0, 1)
-            details = tg.TextView(activity, "", info)
-            details.setdimensions(tg.View.MATCH_PARENT, 24)
-            details.setlinearlayoutparams(0)
-            details.setmargin(8 if rtl else 2, "left")
-            details.setmargin(2 if rtl else 8, "right")
-            details.settextsize(11)
-            details.settextcolor(palette.muted)
-            details.setgravity(0, 1)
-            cpu_value = tg.TextView(activity, "", row)
-            cpu_value.setdimensions(56, 62)
-            cpu_value.settextsize(11)
-            cpu_value.settextcolor(palette.text)
-            cpu_value.setgravity(1, 1)
-            memory_value = tg.TextView(activity, "", row)
-            memory_value.setdimensions(72, 62)
-            memory_value.settextsize(11)
-            memory_value.settextcolor(palette.text)
-            memory_value.setgravity(1, 1)
-            if rtl:
-                add_icon()
-            return {"view": row, "title": title, "details": details,
-                    "cpu": cpu_value, "memory": memory_value,
-                    "start_time": process["start_time"]}
-
-        def render(snapshot):
+        def render(snapshot, keep_scroll=True):
             key = state["sort_by"]
             processes = sorted(snapshot["processes"],
                                key=lambda process: (process[key] if key != "name"
@@ -378,35 +323,27 @@ class TaskManagerApp:
             for sort_key, header in sort_headers.items():
                 arrow = (" ↓" if state["sort_descending"] else " ↑") if sort_key == key else ""
                 header.settext(sort_key + arrow)
-            live = {process["pid"] for process in processes}
-            for pid in tuple(row_views):
-                if pid not in live:
-                    row_views.pop(pid)["view"].delete()
-            for position, process in enumerate(processes):
-                pid = process["pid"]
-                row = row_views.get(pid)
-                if row is not None and row["start_time"] != process["start_time"]:
-                    row["view"].delete()
-                    row = None
-                if row is None:
-                    row = make_process_row(process)
-                    row_views[pid] = row
-                row["view"].setlinearlayoutparams(0, position)
-                row["title"].settext(process["name"])
-                row["details"].settext(f"pid {pid} · {process['state']}")
-                row["cpu"].settext(f"{process['cpu']:.1f}%")
-                row["memory"].settext(_format_size(process["memory"]))
-                row["view"].setbackgroundcolor(
-                    palette.surface_light if state.get("selected") == pid else palette.surface)
-                query = state.get("query", "")
-                matches = query in process["name"].casefold() or query in str(pid)
-                row["view"].setvisibility(tg.View.VISIBLE if matches else tg.View.GONE)
-                row_views[pid]["process"] = process
-
-            visible_count = sum(1 for process in processes
-                               if state.get("query", "") in process["name"].casefold()
-                               or state.get("query", "") in str(process["pid"]))
-            count_label.settext(f"{visible_count} of {len(processes)} processes")
+            query = state.get("query", "")
+            visible = [process for process in processes
+                       if query in process["name"].casefold() or query in str(process["pid"])]
+            display_processes = {}
+            items = []
+            for process in visible:
+                process_key = f"{process['pid']}:{process['start_time']}"
+                display_processes[process_key] = process
+                items.append({
+                    "key": process_key,
+                    "text": process["name"],
+                    "subtitle": f"pid {process['pid']} · {process['state']}",
+                    "cpu": f"{process['cpu']:.1f}%",
+                    "memory": _format_size(process["memory"]),
+                    "image": load("terminal"),
+                    "background": (palette.surface_light
+                                   if state["selected"] == process_key else palette.surface),
+                })
+            state["display_processes"] = display_processes
+            process_rows.setitems(items, keep_scroll=keep_scroll)
+            count_label.settext(f"{len(visible)} of {len(processes)} processes")
             cpu = sum(process["cpu"] for process in processes)
             total = snapshot["total_memory"]
             used = snapshot["used_memory"]
@@ -424,6 +361,14 @@ class TaskManagerApp:
                 str(len(processes)))
             state["snapshot"] = snapshot
 
+        def process_key_from_event(event):
+            key = event.value.get("key")
+            if key is not None:
+                return key
+            position = event.value.get("position", -1)
+            keys = tuple(state["display_processes"])
+            return keys[position] if 0 <= position < len(keys) else None
+
         def handle_event(event):
             if menu.handle_event(event):
                 return True
@@ -433,9 +378,16 @@ class TaskManagerApp:
             if event.type == tg.Event.text and event.id == search.id:
                 state["query"] = search.gettext().strip().casefold()
                 if state["snapshot"] is not None:
-                    render(state["snapshot"])
+                    render(state["snapshot"], keep_scroll=False)
                 return True
             if event.type == tg.Event.click:
+                if event.id == process_rows.id:
+                    process_key = process_key_from_event(event)
+                    if process_key not in state["display_processes"]:
+                        return True
+                    state["selected"] = process_key
+                    render(state["snapshot"])
+                    return True
                 sort_by = sort_actions.get(event.id)
                 if sort_by is not None:
                     if state["sort_by"] == sort_by:
@@ -444,7 +396,7 @@ class TaskManagerApp:
                         state["sort_by"] = sort_by
                         state["sort_descending"] = sort_by != "name"
                     if state["snapshot"] is not None:
-                        render(state["snapshot"])
+                        render(state["snapshot"], keep_scroll=False)
                     return True
                 selected_tab = tab_actions.get(event.id)
                 if selected_tab is not None:
@@ -456,29 +408,23 @@ class TaskManagerApp:
                         tab_buttons[tab_id].setbackgroundcolor(
                             palette.accent if tab_label == _label else palette.surface_light)
                     return True
-                selected = next((pid for pid, row in row_views.items()
-                                 if row["view"].id == event.id), None)
-                if selected is not None:
-                    state["selected"] = selected
-                    row_views[selected]["view"].setbackgroundcolor(palette.surface_light)
-                    return True
             if event.type == tg.Event.longClick:
-                selected = next((pid for pid, row in row_views.items()
-                                 if row["view"].id == event.id), None)
-                if selected is not None:
-                    state["selected"] = selected
-                    menu.show(("end_task",), 16, 64, end_task)
+                if event.id == process_rows.id:
+                    process_key = process_key_from_event(event)
+                    if process_key in state["display_processes"]:
+                        state["selected"] = process_key
+                        render(state["snapshot"])
+                        menu.show(("end_task",), 16, 64, end_task)
                     return True
             return False
 
         def end_task(action):
             if action != "end_task":
                 return
-            pid = state["selected"]
-            row = row_views.get(pid)
-            process = row.get("process") if row is not None else None
+            process = state["display_processes"].get(state["selected"])
             if process is None:
                 return
+            pid = process["pid"]
             if process["protected"]:
                 count_label.settext("can't end nexa or its terminal session")
                 return
@@ -502,6 +448,7 @@ class TaskManagerApp:
 
         def close():
             stop.set()
+            process_rows.close()
 
         handle_event.on_tick = on_tick
         handle_event.close = close

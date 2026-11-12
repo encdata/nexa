@@ -57,6 +57,7 @@ class TerminalScreen:
         self.title = ""
         self.string_kind = ""
         self.responses = deque()
+        self._render_cache = {}
 
     def _style(self):
         fg, bg = self.foreground, self.background
@@ -167,26 +168,50 @@ class TerminalScreen:
         rows = self.screen if self.alternate is not None else list(self.scrollback) + self.screen
         cursor_row = self.cursor_y + (len(self.scrollback) if self.alternate is None else 0)
         result = []
+        active_rows = set()
         for y, source in enumerate(rows):
-            cells = source.copy()
+            key = id(source)
+            active_rows.add(key)
+            cached = self._render_cache.get(key)
+            if cached is None or cached[0] is not source:
+                cached = (source, self._render_row(source))
+                self._render_cache[key] = cached
+            runs = cached[1]
             if self.cursor_visible and y == cursor_row:
-                char, fg, bg, bold, italic, underline, strikethrough = cells[self.cursor_x]
-                cells[self.cursor_x] = ("▏" if not char or char == " " else "█",
-                                        bg, fg, bold, italic, underline, strikethrough)
-            runs = []
-            text = []
-            style = None
-            for char, fg, bg, bold, italic, underline, strikethrough in cells:
-                cell_style = (fg, bg, bold, italic, underline, strikethrough)
-                if style is not None and cell_style != style:
-                    runs.append(("".join(text), *style))
-                    text = []
-                style = cell_style
-                text.append(char)
-            if text:
-                runs.append(("".join(text), *style))
+                runs = self._render_row(source, self.cursor_x)
             result.append(runs)
+        for key in self._render_cache.keys() - active_rows:
+            del self._render_cache[key]
         return result
+
+    @staticmethod
+    def _render_row(source, cursor_x=None):
+        cells = source
+        if cursor_x is not None:
+            cells = source.copy()
+            char, fg, bg, bold, italic, underline, strikethrough = cells[cursor_x]
+            cells[cursor_x] = ("▏" if not char or char == " " else "█",
+                               bg, fg, bold, italic, underline, strikethrough)
+
+        runs = []
+        text = []
+        style = None
+        for char, fg, bg, bold, italic, underline, strikethrough in cells:
+            cell_style = (fg, bg, bold, italic, underline, strikethrough)
+            if style is not None and cell_style != style:
+                runs.append(("".join(text), *style))
+                text = []
+            style = cell_style
+            text.append(char)
+        if text:
+            runs.append(("".join(text), *style))
+        return tuple(runs)
+
+    def _invalidate_row(self, row):
+        key = id(row)
+        cached = self._render_cache.get(key)
+        if cached is not None and cached[0] is row:
+            del self._render_cache[key]
 
     def _escape(self, char):
         self.state = "text"
@@ -487,6 +512,7 @@ class TerminalScreen:
             if previous_x >= 0:
                 if self.screen[self.cursor_y][previous_x][0] == "" and previous_x > 0:
                     previous_x -= 1
+                self._invalidate_row(self.screen[self.cursor_y])
                 old = self.screen[self.cursor_y][previous_x]
                 self.screen[self.cursor_y][previous_x] = (old[0] + char, *old[1:])
             return
@@ -509,6 +535,7 @@ class TerminalScreen:
         if self.insert_mode:
             self._insert_chars(width)
         row = self.screen[self.cursor_y]
+        self._invalidate_row(row)
         self._clear_wide_cell(row, self.cursor_x)
         if width == 2 and self.cursor_x + 1 < self.columns:
             self._clear_wide_cell(row, self.cursor_x + 1)
@@ -563,6 +590,7 @@ class TerminalScreen:
             if mode == 3:
                 self.scrollback.clear()
         elif mode == 0:
+            self._invalidate_row(self.screen[self.cursor_y])
             self.screen[self.cursor_y][self.cursor_x:] = [self._blank_cell() for _ in range(
                 self.columns - self.cursor_x)]
             for y in range(self.cursor_y + 1, self.rows):
@@ -570,10 +598,12 @@ class TerminalScreen:
         elif mode == 1:
             for y in range(self.cursor_y):
                 self.screen[y] = self._blank_row()
+            self._invalidate_row(self.screen[self.cursor_y])
             self.screen[self.cursor_y][:self.cursor_x + 1] = [self._blank_cell() for _ in range(
                 self.cursor_x + 1)]
 
     def _erase_line(self, mode):
+        self._invalidate_row(self.screen[self.cursor_y])
         if mode == 0:
             self.screen[self.cursor_y][self.cursor_x:] = [self._blank_cell() for _ in range(
                 self.columns - self.cursor_x)]
@@ -585,17 +615,20 @@ class TerminalScreen:
 
     def _erase_chars(self, count):
         end = min(self.columns, self.cursor_x + count)
+        self._invalidate_row(self.screen[self.cursor_y])
         self.screen[self.cursor_y][self.cursor_x:end] = [self._blank_cell() for _ in range(end - self.cursor_x)]
 
     def _delete_chars(self, count):
         count = min(count, self.columns - self.cursor_x)
         row = self.screen[self.cursor_y]
+        self._invalidate_row(row)
         del row[self.cursor_x:self.cursor_x + count]
         row.extend(self._blank_cell() for _ in range(count))
 
     def _insert_chars(self, count):
         count = min(count, self.columns - self.cursor_x)
         row = self.screen[self.cursor_y]
+        self._invalidate_row(row)
         row[self.cursor_x:self.cursor_x] = [self._blank_cell() for _ in range(count)]
         del row[self.columns:]
 
