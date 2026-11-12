@@ -49,6 +49,15 @@ class WindowManager:
     def open_app(self, app_id, context=None):
         app = self.apps[app_id]
         cache_key = (app_id, None) if context is None else None
+        for window in self.windows.values():
+            if (window.get("prewarming") and window["app"].app_id == app_id
+                    and window["context"] == context):
+                window["prewarming"] = False
+                self.window_order.append(window["id"])
+                place(window["frame"], window["x"], window["y"], top=True)
+                window["frame"].setvisibility(tg.View.VISIBLE)
+                self._set_active(window["id"])
+                return window["id"]
         if self.restore_app(app_id, context):
             return None
         if cache_key is not None and cache_key in self.preloaded:
@@ -175,6 +184,28 @@ class WindowManager:
         self._set_active(window_id)
         return window_id
 
+    def prewarm_app(self, app_id):
+        if app_id not in self.apps:
+            return False
+        if (app_id, None) in self.preloaded:
+            return False
+        if any(window["app"].app_id == app_id and window["context"] is None
+               for window in self.windows.values()):
+            return False
+
+        active_window = self.active_window
+        window_id = self.open_app(app_id)
+        window = self.windows.get(window_id)
+        if window is None:
+            return False
+        window["prewarming"] = True
+        if window_id in self.window_order:
+            self.window_order.remove(window_id)
+        window["frame"].setvisibility(tg.View.GONE)
+        if self.active_window == window_id:
+            self._set_active(active_window if active_window in self.windows else None)
+        return True
+
     def _build_app(self, app, content, context):
         build_with_services = getattr(app, "build_with_services", None)
         if build_with_services is None:
@@ -272,6 +303,9 @@ class WindowManager:
     def tick(self):
         for window in tuple(self.windows.values()):
             self._finish_build(window)
+            if (window.get("prewarming") and window["build_future"] is None
+                    and not window["build_pending"]):
+                self.close(window["id"])
         for window in tuple(self.pending_builds):
             if not window["build_future"].done():
                 continue

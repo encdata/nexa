@@ -59,6 +59,9 @@ class DesktopShell:
         self.pointer = Pointer(activity, self.root, self.density)
         self.desktop.pointer = self.pointer
         self.windows.pointer = self.pointer
+        self.preload_queue = [app_id for app_id, app in self.apps.items()
+                              if getattr(app, "preload_ui", False)]
+        self.next_preload_at = None
 
     def open_app(self, app_id, context=None):
         window_id = self.windows.open_app(app_id, context)
@@ -102,6 +105,17 @@ class DesktopShell:
             self._resize_screen(config.get("screenwidth", self.screen_width),
                                 config.get("screenheight", self.screen_height))
         self.windows.tick()
+        if self.desktop.ready and self.preload_queue:
+            if self.next_preload_at is None:
+                self.next_preload_at = now + 1.5
+            elif now >= self.next_preload_at:
+                warming = any(window.get("prewarming")
+                              for window in self.windows.windows.values())
+                if self.windows.active_window is None and not warming:
+                    self.windows.prewarm_app(self.preload_queue.pop(0))
+                    self.next_preload_at = now + 1.0
+                elif self.windows.active_window is not None:
+                    self.next_preload_at = now + 1.0
 
     def _resize_screen(self, width, height):
         if (width, height) == (self.screen_width, self.screen_height):
