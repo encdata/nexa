@@ -267,6 +267,8 @@ class CalculatorApp:
             if event.type != tg.Event.click:
                 return False
             action = key_actions.get(event.id)
+            if action is None:
+                return False
             if action == "inverse":
                 inverse_mode = not inverse_mode
                 inverse_button.settext("2nd on" if inverse_mode else "2nd")

@@ -58,7 +58,7 @@ class ClockApp:
     app_id = "clock"
     name = "Clock"
     icon = "clock"
-    preload_ui = False
+    preload_ui = True
     build_threaded = True
 
     def build(self, activity, parent, context=None):

@@ -15,6 +15,7 @@ class TextPrompt:
         self.on_submit = None
         self.width = 320
         self.overlay = tg.FrameLayout(activity, parent)
+        self.overlay.setvisibility(tg.View.GONE)
         self.overlay.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
         self.overlay.setbackgroundcolor(0x77000000)
         self.overlay.sendclickevent(True)
@@ -56,7 +57,6 @@ class TextPrompt:
         self.confirm = self._button(activity, buttons, "ok")
         self.events = {self.overlay.id: "cancel", self.cancel.id: "cancel",
                        self.confirm.id: "submit"}
-        self.overlay.setvisibility(tg.View.GONE)
 
     @staticmethod
     def _button(activity, parent, label):

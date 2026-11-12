@@ -4,7 +4,7 @@ import tempfile
 
 import termuxgui as tg
 
-from shell import file_actions, palette
+from shell import file_actions, palette, syntax_highlighting
 
 
 def _read_file(path):
@@ -123,6 +123,7 @@ class EditorApp:
         def set_document(path, text):
             path_field.settext(path)
             editor.settext(text)
+            syntax_highlighting.highlight(activity, editor, path, text)
             state["saved_text"] = text
             status.settext("opened")
 
@@ -186,7 +187,9 @@ class EditorApp:
 
         def handle_event(event):
             if event.type == tg.Event.text and event.id == editor.id:
-                dirty = event.value.get("text", "") != state["saved_text"]
+                text = event.value.get("text", "")
+                syntax_highlighting.highlight(activity, editor, path_field.gettext(), text)
+                dirty = text != state["saved_text"]
                 status.settext("unsaved changes" if dirty else "saved")
                 return True
             if event.type != tg.Event.click:

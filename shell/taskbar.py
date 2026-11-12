@@ -57,6 +57,7 @@ class Taskbar:
         self.menu_height = menu_height
         self.app_menu_width = min(380, max(1, screen_width - 16))
         self.menu_frame = tg.FrameLayout(activity, root)
+        self.menu_frame.setvisibility(tg.View.GONE)
         self.menu_frame.setdimensions(self.app_menu_width, menu_height)
         place(self.menu_frame, 8, screen_height - self.height - menu_height - 8)
         self.menu_surface = add_rounded(activity, self.menu_frame, self.app_menu_width,
@@ -89,7 +90,6 @@ class Taskbar:
                 self._add_app_heading(entries, letter)
                 previous_letter = letter
             self._add_app_entry(entries, app)
-        self.menu_frame.setvisibility(tg.View.GONE)
         self.context_menu = ContextMenu(
             activity, root,
             lambda: (self.screen_width, self.screen_height),

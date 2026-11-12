@@ -25,7 +25,7 @@ class FilesApp:
     app_id = "files"
     name = "File Explorer"
     icon = "folder"
-    preload_ui = False
+    preload_ui = True
     build_threaded = True
 
     def get_title(self, context=None):
@@ -433,6 +433,7 @@ class FilesApp:
             rows.close()
 
         handle_event.close = close
+        handle_event.set_context = lambda directory: load_directory(directory)
         handle_event.on_window_resize = lambda _width, _height: state["prompt"].reposition()
         return handle_event
 

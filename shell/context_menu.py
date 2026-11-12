@@ -28,6 +28,7 @@ class ContextMenu:
         self.height = self.row_height * len(self.actions) + 8
         self.position = (0, 0)
         self.view = tg.FrameLayout(activity, parent)
+        self.view.setvisibility(tg.View.GONE)
         self.view.setdimensions(self.width, self.height)
         self.background = add_rounded(activity, self.view, self.width, self.height,
                                       palette.surface, 12)
@@ -48,7 +49,6 @@ class ContextMenu:
             self.events[row.id] = action
             self.rows[action] = row
         self.visible = False
-        self.view.setvisibility(tg.View.GONE)
 
     def show(self, actions, x, y, on_action, disabled=()):
         actions = tuple(actions)

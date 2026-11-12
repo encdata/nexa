@@ -18,7 +18,8 @@ class TerminalApp:
     name = "Nexa Terminal"
     icon = "terminal"
     content_background = 0xFF000000
-    build_threaded = False
+    preload_ui = True
+    build_threaded = True
     file_token = re.compile(r'''"[^\"]+"|'[^']+'|[^\s]+''')
 
     def get_title(self, context=None):
@@ -116,15 +117,10 @@ class TerminalApp:
         cwd = os.path.dirname(run_file[0]) if run_file else os.path.expanduser("~")
         if run_file is None and isinstance(context, str) and os.path.isdir(context):
             cwd = context
-        self.session = CommandSession(
-            [shell, "-i"], cwd=cwd or os.path.expanduser("~"),
-            env={"TERM": "xterm-256color", "COLORTERM": "truecolor",
-                 "NO_COLOR": None, "FORCE_COLOR": "1"},
-            columns=80, rows=24,
-        )
-        if run_file:
-            path, interpreter = run_file
-            self.session.write(f"{interpreter} {shlex.quote(path)}\n")
+        self.session = None
+        self.shell = shell
+        self.cwd = cwd or os.path.expanduser("~")
+        self.run_file = run_file
         self.buttons = {interrupt.id: ("interrupt", None), enter.id: ("enter", None)}
         self.buttons.update({button.id: ("key", sequence) for button, sequence, _ in key_controls})
         self.controls = [(interrupt, "right", 64), (enter, "right", 4)]
@@ -133,8 +129,20 @@ class TerminalApp:
         self._resize_output(80)
         self._render(force=True)
         self._sync_mouse_touch()
-        self.keyboard_input.focus(forcesoft=True)
         return self
+
+    def on_window_open(self):
+        if self.session is None:
+            self.session = CommandSession(
+                [self.shell, "-i"], cwd=self.cwd,
+                env={"TERM": "xterm-256color", "COLORTERM": "truecolor",
+                     "NO_COLOR": None, "FORCE_COLOR": "1"},
+                columns=self.screen.columns, rows=self.screen.rows,
+            )
+            if self.run_file:
+                path, interpreter = self.run_file
+                self.session.write(f"{interpreter} {shlex.quote(path)}\n")
+        self.keyboard_input.focus(forcesoft=True)
 
     @staticmethod
     def _button(activity, parent, label, background, foreground):
@@ -434,6 +442,8 @@ class TerminalApp:
 
     def on_tick(self):
         # Keep large command output from monopolizing the UI event loop.
+        if self.session is None:
+            return
         data = self.session.read_output(max_bytes=8192)
         if data:
             self.screen.feed(self.decoder.decode(data))
@@ -449,7 +459,8 @@ class TerminalApp:
         columns = max(20, round(width / (8.5 * self.density)))
         rows = max(5, round((height - 136 * self.density) / (18 * self.density)))
         self.screen.resize(columns, rows)
-        self.session.resize(columns, rows)
+        if self.session is not None:
+            self.session.resize(columns, rows)
         self._resize_output(columns)
         self._render()
         self._sync_mouse_touch()
@@ -472,7 +483,9 @@ class TerminalApp:
         self.mouse_touch_enabled = enabled
 
     def close(self):
-        self.session.close()
+        if self.session is not None:
+            self.session.close()
+            self.session = None
 
 
 APP = TerminalApp()

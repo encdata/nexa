@@ -46,7 +46,7 @@ class WindowManager:
         self.on_open_app = None
         self.on_association_change = None
 
-    def open_app(self, app_id, context=None):
+    def open_app(self, app_id, context=None, prewarm=False):
         app = self.apps[app_id]
         cache_key = (app_id, None) if context is None else None
         for window in self.windows.values():
@@ -54,21 +54,46 @@ class WindowManager:
                     and window["context"] == context):
                 window["prewarming"] = False
                 self.window_order.append(window["id"])
-                place(window["frame"], window["x"], window["y"], top=True)
                 window["frame"].setvisibility(tg.View.VISIBLE)
+                if window.pop("prewarm_position", False):
+                    self._center_window(window)
+                    self._apply_window_geometry(window)
+                place(window["frame"], window["x"], window["y"], top=True)
                 self._set_active(window["id"])
                 return window["id"]
         if self.restore_app(app_id, context):
             return None
+        if (context is not None and not isinstance(context, dict)
+                and cache_key is None and (app_id, None) in self.preloaded):
+            window = self.preloaded.pop((app_id, None))
+            set_context = getattr(window["event_handler"], "set_context", None)
+            if set_context is not None:
+                set_context(context)
+                window["context"] = context
+                title = getattr(app, "get_title", None)
+                window["title"] = title(context) if title is not None else app.name
+                window["title_view"].settext(window["title"])
+                self.windows[window["id"]] = window
+                self.window_order.append(window["id"])
+                for control_id, (_owner, action) in window["button_actions"].items():
+                    self.button_events[control_id] = (window["id"], action)
+                window["minimized"] = False
+                window["frame"].setvisibility(tg.View.VISIBLE)
+                self._apply_window_geometry(window, top=True)
+                self._set_active(window["id"])
+                return window["id"]
+            self.preloaded[(app_id, None)] = window
         if cache_key is not None and cache_key in self.preloaded:
             window = self.preloaded.pop(cache_key)
+            if window.pop("prewarm_position", False):
+                self._center_window(window)
             self.windows[window["id"]] = window
             self.window_order.append(window["id"])
             for control_id, (_owner, action) in window["button_actions"].items():
                 self.button_events[control_id] = (window["id"], action)
             window["minimized"] = False
-            self._apply_window_geometry(window, top=True)
             window["frame"].setvisibility(tg.View.VISIBLE)
+            self._apply_window_geometry(window, top=True)
             self._set_active(window["id"])
             return window["id"]
 
@@ -84,6 +109,9 @@ class WindowManager:
         y = max(0, (self.screen_height - self.taskbar_height - height) // 2)
 
         frame = tg.FrameLayout(self.activity, self.root)
+        if prewarm:
+            frame.setvisibility(tg.View.HIDDEN)
+            x, y = self.screen_width + width, self.screen_height + height
         frame.setdimensions(width, height)
         place(frame, x, y, top=True)
         border_surface = add_rounded(self.activity, frame, width, height,
@@ -166,6 +194,9 @@ class WindowManager:
             "restore_geometry": None,
             "maximized": False,
             "minimized": False,
+            "prewarming": prewarm,
+            "prewarm_position": prewarm,
+            "handler_activated": False,
             "button_actions": {control.id: self.button_events[control.id] for control in controls},
         }
         if getattr(app, "build_threaded", False):
@@ -194,17 +225,22 @@ class WindowManager:
             return False
 
         active_window = self.active_window
-        window_id = self.open_app(app_id)
+        window_id = self.open_app(app_id, prewarm=True)
         window = self.windows.get(window_id)
         if window is None:
             return False
         window["prewarming"] = True
+        window["prewarm_position"] = True
         if window_id in self.window_order:
             self.window_order.remove(window_id)
-        window["frame"].setvisibility(tg.View.GONE)
+        window["frame"].setvisibility(tg.View.HIDDEN)
         if self.active_window == window_id:
             self._set_active(active_window if active_window in self.windows else None)
         return True
+
+    def _center_window(self, window):
+        window["x"] = max(0, (self.screen_width - window["width"]) // 2)
+        window["y"] = max(0, (self.screen_height - self.taskbar_height - window["height"]) // 2)
 
     def _build_app(self, app, content, context):
         build_with_services = getattr(app, "build_with_services", None)
@@ -235,6 +271,18 @@ class WindowManager:
         self._notify_window_resize(
             handler, max(1, window["width"] - self.border_width * 2),
             max(1, window["height"] - self.border_width * 2 - self.titlebar_height))
+        if self.active_window == window["id"]:
+            self._activate_window_handler(window)
+
+    @staticmethod
+    def _activate_window_handler(window):
+        if window.get("prewarming") or window.get("handler_activated"):
+            return
+        handler = window.get("event_handler")
+        on_window_open = getattr(handler, "on_window_open", None)
+        if on_window_open is not None:
+            on_window_open()
+            window["handler_activated"] = True
 
     def _discard_window(self, window):
         close = getattr(window["event_handler"], "close", None)
@@ -423,11 +471,12 @@ class WindowManager:
             self.minimize(window_id)
 
     def _set_active(self, window_id):
-        if self.active_window == window_id:
-            return
+        changed = self.active_window != window_id
         self.active_window = window_id
-        if self.on_active_change is not None:
+        if changed and self.on_active_change is not None:
             self.on_active_change(window_id)
+        if window_id is not None:
+            self._activate_window_handler(self.windows.get(window_id, {}))
 
     def _activate_top_window(self):
         window_id = next((item for item in reversed(self.window_order)
@@ -661,7 +710,9 @@ class WindowManager:
                 and not window.get("build_error")
                 and getattr(window["app"], "preload_ui", False)
                 and window["context"] is None):
-            window["frame"].setvisibility(tg.View.GONE)
+            window["frame"].setvisibility(
+                tg.View.HIDDEN if window.get("prewarm_position") else tg.View.GONE)
+            window["prewarming"] = False
             for event_id, (owner, _) in list(self.button_events.items()):
                 if owner == window_id:
                     self.button_events.pop(event_id, None)

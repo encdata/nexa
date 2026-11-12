@@ -115,7 +115,7 @@ class TaskManagerApp:
     app_id = "task_manager"
     name = "Task Manager"
     icon = "apps"
-    preload_ui = False
+    preload_ui = True
     build_threaded = True
 
     def build(self, activity, parent, context=None):
@@ -311,8 +311,15 @@ class TaskManagerApp:
                     print(f"nexa task manager: {error}")
                 stop.wait(1)
 
-        sampler = threading.Thread(target=sample_processes, name="nexa-process-sampler", daemon=True)
-        sampler.start()
+        sampler = None
+
+        def start_sampler():
+            nonlocal sampler
+            if sampler is not None:
+                return
+            sampler = threading.Thread(target=sample_processes,
+                                       name="nexa-process-sampler", daemon=True)
+            sampler.start()
 
         def render(snapshot, keep_scroll=True):
             key = state["sort_by"]
@@ -451,6 +458,7 @@ class TaskManagerApp:
             process_rows.close()
 
         handle_event.on_tick = on_tick
+        handle_event.on_window_open = start_sampler
         handle_event.close = close
         return handle_event
 
