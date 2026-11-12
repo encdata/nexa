@@ -11,6 +11,7 @@ from shell.geometry import place
 from shell.icons import load
 from shell.open_with import OpenWithChooser
 from shell.text_prompt import TextPrompt
+from shell.view_batch import create_views, set_image, set_text
 
 
 class Desktop:
@@ -19,6 +20,7 @@ class Desktop:
     gap = 12
     drag_threshold = 10
     long_press_seconds = 0.55
+    population_batch_size = 10
 
     def __init__(self, activity, root, apps, open_app, screen_width, screen_height, density,
                  positions, home_items, progress=None):
@@ -97,11 +99,12 @@ class Desktop:
                 return
 
             if not self.population_complete:
-                key, symbol, label, app_id, context, is_folder, grid_index = (
-                    self.population_items[self.population_index])
-                x, y = self._initial_position(grid_index)
-                self._add_icon(key, symbol, label, app_id, context, x, y, is_folder, grid_index)
-                self.population_index += 1
+                batch_end = min(self.population_index + self.population_batch_size,
+                                self.population_total)
+                items = self.population_items[self.population_index:batch_end]
+                occupied = {(icon["x"], icon["y"]) for icon in self.icons.values()}
+                self._add_icons(items, occupied=occupied)
+                self.population_index = batch_end
                 if (self.progress is not None
                         and (self.population_index == self.population_total
                              or self.population_index % 3 == 0)):
@@ -137,7 +140,7 @@ class Desktop:
                         self._hide_context_menu()
                     self._sync_home_items(available)
 
-    def _initial_position(self, grid_index):
+    def _initial_position(self, grid_index, occupied=None):
         x_positions, y_positions = self._grid_axes(self.screen_width, self.screen_height)
         total = len(self.icons) + self.population_total - self.population_index
         largest_index = max(
@@ -149,7 +152,8 @@ class Desktop:
             y_positions.append(y_positions[-1] + self.icon_height + self.gap)
 
         desired = self._grid_position(grid_index, x_positions, y_positions)
-        occupied = {(icon["x"], icon["y"]) for icon in self.icons.values()}
+        if occupied is None:
+            occupied = {(icon["x"], icon["y"]) for icon in self.icons.values()}
         if desired not in occupied:
             return desired
 
@@ -229,30 +233,45 @@ class Desktop:
         row = min(range(len(y_positions)), key=lambda i: abs(y_positions[i] - y))
         return row * len(x_positions) + col
 
-    def _add_icon(self, key, symbol, label, app_id, context, x, y, is_folder=None,
-                  grid_index=None):
-        cell = tg.LinearLayout(self.activity, self.surface)
-        cell.setdimensions(self.icon_width, self.icon_height)
-        place(cell, x, y)
-        icon = tg.ImageView(self.activity, cell)
-        icon.setdimensions(48, 48)
-        icon.setimage(load(symbol))
-        icon.setmargin((self.icon_width - 48) // 2, "left")
-        icon.setmargin(2, "top")
-        icon.setlinearlayoutparams(0)
-        caption = tg.TextView(self.activity, label, cell)
-        caption.setdimensions(self.icon_width, 36)
-        caption.settextsize(11)
-        caption.settextcolor(palette.text)
-        caption.setgravity(1, 1)
-        caption.setlinearlayoutparams(0)
-        self.icons[cell.id] = {"key": key, "app_id": app_id, "context": context,
-                               "is_folder": is_folder,
-                               "label": label, "view": cell, "image": icon, "symbol": symbol,
-                               "x": x, "y": y,
-                               "grid_index": self._grid_index_for(x, y) if grid_index is None
-                               else grid_index}
-        self.icon_order.append(cell.id)
+    def _add_icons(self, items, positions=None, occupied=None):
+        if not items:
+            return
+        if occupied is None:
+            occupied = {(icon["x"], icon["y"]) for icon in self.icons.values()}
+        if positions is None:
+            positions = []
+            for item in items:
+                position = self._initial_position(item[6], occupied)
+                positions.append(position)
+                occupied.add(position)
+
+        specifications = []
+        for index, item in enumerate(items):
+            _key, symbol, label, _app_id, _context, _is_folder, _grid_index = item
+            x, y = positions[index]
+            cell_index = len(specifications)
+            specifications.extend((
+                {"type": "linear", "vertical": True, "width": self.icon_width,
+                 "height": self.icon_height, "x": x, "y": y},
+                {"type": "image", "parent_index": cell_index, "width": 48, "height": 48,
+                 "weight": 0, "margins": {"left": (self.icon_width - 48) // 2, "top": 2},
+                 "image": load(symbol)},
+                {"type": "text", "parent_index": cell_index, "width": self.icon_width,
+                 "height": 36, "weight": 0, "text": label, "textSize": 11,
+                 "textColor": palette.text, "gravity": "center"},
+            ))
+
+        views = create_views(self.activity, self.surface, specifications)
+        for index, (key, symbol, label, app_id, context, is_folder, grid_index) in enumerate(items):
+            x, y = positions[index]
+            cell, icon, caption = views[index * 3:index * 3 + 3]
+            self.icons[cell.id] = {"key": key, "app_id": app_id, "context": context,
+                                   "is_folder": is_folder, "label": label, "view": cell,
+                                   "image": icon, "caption": caption, "symbol": symbol,
+                                   "x": x, "y": y,
+                                   "grid_index": self._grid_index_for(x, y)
+                                   if grid_index is None else grid_index}
+            self.icon_order.append(cell.id)
 
     def refresh_associated_icons(self, _path=None, _app_id=None):
         for icon in self.icons.values():
@@ -261,7 +280,7 @@ class Desktop:
             symbol = file_associations.icon_for(icon["context"], self.apps, "window")
             if symbol != icon["symbol"]:
                 icon["symbol"] = symbol
-                icon["image"].setimage(load(symbol))
+                set_image(self.activity, icon["image"].id, load(symbol))
 
     def _hide_context_menu(self):
         self.context_menu.hide()
@@ -460,12 +479,13 @@ class Desktop:
     def _refresh_home_items(self):
         self._schedule_home_scan(delay=0, force=True)
 
-    def _next_icon_position(self):
+    def _next_icon_position(self, occupied=None):
         max_x = max(0, self.screen_width - self.icon_width)
         max_y = max(0, self.screen_height - 56 - self.icon_height)
         columns = max(1, (self.screen_width - self.gap) // (self.icon_width + self.gap))
         rows = max(1, (self.screen_height - 56 - self.gap) // (self.icon_height + self.gap))
-        occupied = [(icon["x"], icon["y"]) for icon in self.icons.values()]
+        if occupied is None:
+            occupied = [(icon["x"], icon["y"]) for icon in self.icons.values()]
         for row in range(rows):
             for col in range(columns):
                 x = min(max_x, self.gap + col * (self.icon_width + self.gap))
@@ -489,16 +509,21 @@ class Desktop:
                 self.icon_order.remove(icon_id)
                 self.positions.pop(path, None)
                 icon["view"].delete()
+        additions = []
+        addition_positions = []
+        occupied = [(icon["x"], icon["y"]) for icon in self.icons.values()]
         for path, (name, is_folder) in available.items():
             if path in current:
                 icon = self.icons[current[path]]
-                icon["label"] = name
+                if icon["label"] != name:
+                    icon["label"] = name
+                    set_text(self.activity, icon["caption"].id, name)
                 symbol = "folder" if is_folder else file_associations.icon_for(path, self.apps, "window")
                 if symbol != icon["symbol"]:
                     icon["symbol"] = symbol
-                    icon["image"].setimage(load(symbol))
+                    set_image(self.activity, icon["image"].id, load(symbol))
                 continue
-            x, y = self._next_icon_position()
+            x, y = self._next_icon_position(occupied)
             saved = self.positions.get(path)
             grid_index = None
             if isinstance(saved, int) and not isinstance(saved, bool):
@@ -508,9 +533,11 @@ class Desktop:
             elif isinstance(saved, list) and len(saved) == 2:
                 x, y = saved
                 grid_index = self._grid_index_for(x, y)
+            occupied.append((x, y))
             symbol = "folder" if is_folder else file_associations.icon_for(path, self.apps, "window")
-            self._add_icon(path, symbol, name,
-                           "files", path, x, y, is_folder, grid_index)
+            additions.append((path, symbol, name, "files", path, is_folder, grid_index))
+            addition_positions.append((x, y))
+        self._add_icons(additions, addition_positions)
         self.home_item_snapshot = available
         self._resize(self.screen_width, self.screen_height, force=True)
 

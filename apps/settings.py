@@ -17,7 +17,7 @@ class SettingsApp:
     app_id = "settings"
     name = "Settings"
     icon = "settings"
-    preload_ui = False
+    preload_ui = True
     build_threaded = True
 
     def build(self, activity, parent, context=None):

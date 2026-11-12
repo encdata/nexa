@@ -23,6 +23,9 @@ LANGUAGES = {
     ".cpp": "c",
     ".cxx": "c",
     ".rs": "rust",
+    ".java": "java",
+    ".md": "markdown",
+    ".markdown": "markdown",
 }
 
 KEYWORDS = {
@@ -30,11 +33,13 @@ KEYWORDS = {
     "lua": set("and break do else elseif end false for function goto if in local nil not or repeat return then true until while".split()),
     "c": set("auto break case char const continue default do double else enum extern float for goto if inline int long register restrict return short signed sizeof static struct switch typedef union unsigned void volatile while bool _Bool".split()),
     "rust": set("as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type unsafe use where while".split()),
+    "java": set("abstract assert boolean break byte case catch char class const continue default do double else enum extends final finally float for goto if implements import instanceof int interface long native new package private protected public return short static strictfp super switch synchronized this throw throws transient try void volatile while var record sealed permits non-sealed yield".split()),
 }
 
 BUILTINS = {
     "python": set("abs all any bool dict enumerate filter float int isinstance len list map max min print range reversed set sorted str sum tuple type zip".split()),
     "lua": set("assert collectgarbage dofile error getmetatable ipairs load next pairs pcall print rawequal rawget rawset require select setmetatable tonumber tostring type xpcall".split()),
+    "java": set("String Object Class System Math Integer Long Boolean Double Float Character Byte Short Number Thread Runnable Exception RuntimeException IllegalArgumentException List ArrayList Map HashMap Set HashSet Optional Stream".split()),
 }
 
 _CODE_TOKEN = re.compile(
@@ -85,7 +90,7 @@ def _code_spans(text, language):
                 continue
             if language == "lua" and not token.startswith("--"):
                 continue
-            if language in ("c", "rust") and not token.startswith(("//", "/*")):
+            if language in ("c", "rust", "java") and not token.startswith(("//", "/*")):
                 continue
             color = COLORS["comment"]
         elif kind == "string":
@@ -108,10 +113,30 @@ def _code_spans(text, language):
     return spans
 
 
+def _markdown_spans(text):
+    spans = []
+    rules = (
+        (r"(?m)^#{1,6}[^\n]*", "keyword"),
+        (r"`+[^`\n]+`+", "string"),
+        (r"!?\[[^\]\n]+\]\([^\)\n]+\)|!?\[[^\]\n]+\]\[[^\]\n]*\]", "function"),
+        (r"(?m)^\s*>[^\n]*", "comment"),
+        (r"(?m)^\s*(?:[-*+] |\d+\. )", "constant"),
+        (r"(?<!\*)\*\*[^*\n]+\*\*|(?<!_)__[^_\n]+__", "builtin"),
+        (r"(?<!\*)\*[^*\n]+\*|(?<!_)_[^_\n]+_", "keyword"),
+        (r"(?m)^\s*(?:---+|\*\*\*+|___+)\s*$", "muted"),
+    )
+    for pattern, color in rules:
+        spans.extend((match.start(), match.end(), COLORS.get(color, 0xFF9AA8B5))
+                     for match in re.finditer(pattern, text))
+    return spans
+
+
 def highlight(activity, view, path, text):
     language = _language(path)
     if language == "json":
         spans = _json_spans(text)
+    elif language == "markdown":
+        spans = _markdown_spans(text)
     elif language is not None:
         spans = _code_spans(text, language)
     else:

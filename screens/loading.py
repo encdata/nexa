@@ -5,7 +5,7 @@ from shell.geometry import place
 
 class LoadingScreen:
     panel_width = 320
-    panel_height = 176
+    panel_height = 128
 
     def __init__(self, activity, configuration):
         self.activity = activity
@@ -35,10 +35,6 @@ class LoadingScreen:
         self.status.setheight(48)
         self.status.setlinearlayoutparams(0)
 
-        self.progress = tg.ProgressBar(activity, self.panel)
-        self.progress.setheight(48)
-        self.progress.setlinearlayoutparams(0)
-
     def _place_panel(self):
         x = max(0, (self.screen_width - self.panel_width) // 2)
         y = max(0, (self.screen_height - self.panel_height) // 2)
@@ -62,7 +58,6 @@ class LoadingScreen:
 
     def update(self, status, progress):
         self.status.settext(status)
-        self.progress.setprogress(progress)
 
 
 def show(activity, configuration):

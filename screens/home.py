@@ -60,7 +60,9 @@ class DesktopShell:
         self.desktop.pointer = self.pointer
         self.windows.pointer = self.pointer
         self.preload_queue = [app_id for app_id, app in self.apps.items()
-                              if getattr(app, "preload_ui", False)]
+                              if getattr(app, "preload_ui", False) and app_id != "settings"]
+        if "settings" in self.apps and getattr(self.apps["settings"], "preload_ui", False):
+            self.windows.prewarm_app("settings")
 
     @property
     def preloads_ready(self):

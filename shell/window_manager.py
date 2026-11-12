@@ -231,6 +231,10 @@ class WindowManager:
             return False
         window["prewarming"] = True
         window["prewarm_position"] = True
+        if window["build_pending"]:
+            window["build_pending"] = False
+            window["build_future"] = self.build_executor.submit(
+                self._build_app, window["app"], window["content"], window["context"])
         if window_id in self.window_order:
             self.window_order.remove(window_id)
         window["frame"].setvisibility(tg.View.HIDDEN)
