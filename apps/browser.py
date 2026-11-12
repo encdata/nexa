@@ -17,7 +17,7 @@ class BrowserApp:
     app_id = "browser"
     name = "Nexa Browser"
     icon = "nexa"
-    preload_ui = False
+    preload_ui = True
     build_threaded = True
 
     def build(self, activity, parent, context=None):

@@ -7,6 +7,7 @@ import termuxgui as tg
 from shell import palette
 from shell.geometry import place
 from shell.icons import load
+from shell.reusable_object import ReusableObject
 from shell.surface import add as add_surface, add_rounded, set_color as set_surface_color
 from shell.surface import set_image_scale_type, set_rounded_color
 
@@ -45,6 +46,52 @@ class WindowManager:
         self.on_close = None
         self.on_open_app = None
         self.on_association_change = None
+        self.titlebar_template = ReusableObject(
+            activity, f"nexa.titlebar.{int(self.rtl)}", self._titlebar_specifications())
+
+    def _titlebar_specifications(self):
+        views = [{"key": "titlebar", "type": "linear", "vertical": False,
+                  "width": "MATCH_PARENT", "height": "MATCH_PARENT"}]
+
+        def add(specification, parent_index=0):
+            if parent_index is not None:
+                specification["parentIndex"] = parent_index
+            views.append(specification)
+            return len(views) - 1
+
+        def add_app_icon():
+            slot = add({"key": "app_icon_slot", "type": "linear", "vertical": False,
+                        "width": 48, "height": "MATCH_PARENT"})
+            add({"key": "app_icon", "type": "image", "width": 20, "height": 20,
+                 "margins": {"left": 14, "right": 14, "top": 16, "bottom": 16},
+                 "image": load("nexa")}, slot)
+
+        def add_control(action):
+            color = 0xFF8E3340 if action == "close" else palette.surface_light
+            button = add({"key": f"control_{action}", "type": "frame",
+                          "width": self.control_width, "height": self.titlebar_height,
+                          "background": color, "clickable": True})
+            content = add({"type": "linear", "vertical": False,
+                           "width": "MATCH_PARENT", "height": "MATCH_PARENT"}, button)
+            add({"type": "image", "width": 20, "height": 20,
+                 "margins": {"left": 14, "right": 14, "top": 16, "bottom": 16},
+                 "image": load(action)}, content)
+
+        order = ("close", "maximize", "minimize") if self.rtl else (
+            "minimize", "maximize", "close")
+        if not self.rtl:
+            add_app_icon()
+
+        add({"key": "title", "type": "text", "width": 0,
+             "height": self.titlebar_height, "weight": 1, "text": "",
+             "textSize": 15, "textColor": palette.text,
+             "gravity": "start_center_vertical"})
+
+        for action in order:
+            add_control(action)
+        if self.rtl:
+            add_app_icon()
+        return views
 
     def open_app(self, app_id, context=None, prewarm=False):
         app = self.apps[app_id]
@@ -136,33 +183,17 @@ class WindowManager:
         title_surface = add_surface(self.activity, title_frame, panel_width, self.titlebar_height,
                     palette.surface_light)
 
-        titlebar = tg.LinearLayout(self.activity, title_frame, vertical=False)
-        titlebar.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
-
-        if self.rtl:
-            controls = [
-                self._add_control(titlebar, window_id, "close", "close", 0xFF8E3340),
-                self._add_control(titlebar, window_id, "maximize", "maximize"),
-                self._add_control(titlebar, window_id, "minimize", "minimize"),
-            ]
-
-        if not self.rtl:
-            app_icon = self._add_title_icon(titlebar, app)
-
-        title_view = tg.TextView(self.activity, window_title, titlebar)
-        title_view.settextcolor(palette.text)
-        title_view.settextsize(15)
-        title_view.setheight(self.titlebar_height)
-        title_view.setlinearlayoutparams(1)
-        title_view.setgravity(0, 1)
-        if self.rtl:
-            app_icon = self._add_title_icon(titlebar, app)
-        else:
-            controls = [
-                self._add_control(titlebar, window_id, "minimize", "minimize"),
-                self._add_control(titlebar, window_id, "maximize", "maximize"),
-                self._add_control(titlebar, window_id, "close", "close", 0xFF8E3340),
-            ]
+        title_parts = self.titlebar_template.create(title_frame, {
+            "title": {"text": window_title},
+            "app_icon": {"image": load(app.icon)},
+        })
+        titlebar = title_parts["titlebar"]
+        title_view = title_parts["title"]
+        control_order = ("close", "maximize", "minimize") if self.rtl else (
+            "minimize", "maximize", "close")
+        controls = [title_parts[f"control_{action}"] for action in control_order]
+        for action, control in zip(control_order, controls):
+            self.button_events[control.id] = (window_id, action)
 
         content = tg.FrameLayout(self.activity, panel)
         content.setwidth(tg.View.MATCH_PARENT)
@@ -295,39 +326,6 @@ class WindowManager:
         for control_id in window["button_actions"]:
             self.button_events.pop(control_id, None)
         window["frame"].delete()
-
-    def _add_title_icon(self, parent, app):
-        slot = tg.LinearLayout(self.activity, parent, vertical=False)
-        slot.setdimensions(48, self.titlebar_height)
-        slot.setlinearlayoutparams(0)
-        icon = tg.ImageView(self.activity, slot)
-        icon.setdimensions(20, 20)
-        icon.setmargin(14, "left")
-        icon.setmargin(14, "right")
-        icon.setmargin(16, "top")
-        icon.setmargin(16, "bottom")
-        icon.setimage(load(app.icon))
-        icon.setlinearlayoutparams(0)
-        return slot
-
-    def _add_control(self, parent, window_id, action, icon, color=palette.surface_light):
-        button = tg.FrameLayout(self.activity, parent)
-        button.setdimensions(self.control_width, self.titlebar_height)
-        button.setlinearlayoutparams(0)
-        button.setbackgroundcolor(color)
-        button.sendclickevent(True)
-        content = tg.LinearLayout(self.activity, button, vertical=False)
-        content.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
-        image = tg.ImageView(self.activity, content)
-        image.setdimensions(20, 20)
-        image.setmargin(14, "left")
-        image.setmargin(14, "right")
-        image.setmargin(16, "top")
-        image.setmargin(16, "bottom")
-        image.setimage(load(icon))
-        image.setlinearlayoutparams(0)
-        self.button_events[button.id] = (window_id, action)
-        return button
 
     def handle_event(self, event):
         event_id = getattr(event, "id", None)

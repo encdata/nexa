@@ -60,7 +60,7 @@ def run_connection(connection):
     shell = show_home(activity, startup, loading.root, update_loading, loading.show)
     del startup
     try:
-        while not shell.desktop.ready or not shell.preloads_ready:
+        while not shell.desktop.ready:
             event = pending_events.popleft() if pending_events else connection.checkevent()
             if event is not None:
                 if event.type == tg.Event.destroy and event.value.get("finishing"):
