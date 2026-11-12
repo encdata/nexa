@@ -6,6 +6,7 @@ import termuxgui as tg
 
 from screens.loading import show as show_loading
 from shell import file_actions
+from shell.nexa_connection import NexaConnection
 from shell.startup import load as load_startup
 
 
@@ -63,7 +64,7 @@ def main():
             wait_for_launch(marker)
         while True:
             try:
-                connection = tg.Connection()
+                connection = NexaConnection()
                 break
             except RuntimeError:
                 if not background:
