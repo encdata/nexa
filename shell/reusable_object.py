@@ -19,6 +19,8 @@ class ReusableObject:
         self.name = name
         self.key_indices = [(view["key"], index, view["type"]) for index, view in enumerate(views)
                             if "key" in view]
+        self.initial_checked = {view["key"]: view.get("checked", False) for view in views
+                                if "key" in view and view["type"] in ("checkbox", "switch")}
         keys = [key for key, _, _ in self.key_indices]
         if len(keys) != len(set(keys)):
             raise ValueError("reusable object view keys must be unique")
@@ -39,9 +41,16 @@ class ReusableObject:
             },
         })
         classes = {
+            "checkbox": tg.Checkbox,
+            "edit": tg.EditText,
             "frame": tg.FrameLayout,
+            "horizontal_scroll": tg.HorizontalScrollView,
             "image": tg.ImageView,
             "linear": tg.LinearLayout,
+            "scroll": tg.NestedScrollView,
+            "slider": tg.View,
+            "spinner": tg.Spinner,
+            "switch": tg.Switch,
             "text": tg.TextView,
         }
         views = {}
@@ -51,5 +60,8 @@ class ReusableObject:
                 raise ValueError(f"unsupported reusable object view type: {view_type}")
             view = view_class.__new__(view_class)
             tg.View.__init__(view, self.activity, ids[index])
+            if view_type in ("checkbox", "switch"):
+                overrides = (properties or {}).get(key, {})
+                view.checked = overrides.get("checked", self.initial_checked[key])
             views[key] = view
         return views

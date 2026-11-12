@@ -8,9 +8,9 @@ from shell import file_actions, file_associations, palette
 from shell.context_menu import ContextMenu
 from shell.icons import load
 from shell.open_with import OpenWithChooser
-from shell.recycler_view import RecyclerListView
 from shell.text_prompt import TextPrompt
 from shell.text_direction import force_ltr, is_rtl
+from shell.ui_layout import create_layout, list_view
 
 
 def _format_size(size):
@@ -112,9 +112,9 @@ class FilesApp:
         content.setlinearlayoutparams(1)
         content.setbackgroundcolor(palette.window_content)
 
-        rows = RecyclerListView(activity, content)
-        rows.setdimensions(tg.View.MATCH_PARENT, 0)
-        rows.setlinearlayoutparams(1)
+        rows = create_layout(activity, content, list_view(
+            key="files.rows", width=tg.View.MATCH_PARENT, height=0, weight=1,
+            click=True, longclick=True))["files.rows"]
 
         status = tg.TextView(activity, "", content)
         status.setdimensions(tg.View.MATCH_PARENT, 24)

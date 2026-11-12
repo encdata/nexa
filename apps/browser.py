@@ -7,6 +7,7 @@ import termuxgui as tg
 
 from shell import palette
 from shell.text_direction import is_rtl
+from shell.ui_layout import LayoutTemplate, button, create_layout, row, text_input
 
 
 DATA_PATH = os.path.expanduser("~/.config/nexa/browser.json")
@@ -53,6 +54,13 @@ class BrowserSession:
         self.tab_scroll.setlinearlayoutparams(1)
         self.tab_list = tg.LinearLayout(activity, self.tab_scroll, vertical=False)
         self.tab_list.setdimensions(tg.View.WRAP_CONTENT, tg.View.MATCH_PARENT)
+        self.tab_template = LayoutTemplate(activity, "nexa.browser.tab", row(
+            button("new tab", key="button", width=104, height=40,
+                   textSize=12, textColor=palette.text),
+            button("×", key="close", width=36, height=40,
+                   textSize=18, textColor=palette.muted),
+            key="row", width=144, height=40,
+        ))
         self.new_tab_button = self._button(tab_bar, "+", "new_tab", 42)
         self.new_tab_button.settextsize(22)
 
@@ -87,26 +95,46 @@ class BrowserSession:
         ]
         if self.rtl:
             controls.reverse()
+        specifications = []
         for action, label, width in controls:
             if action == "address":
-                self.address = tg.EditText(self.activity, "", self.toolbar, singleline=True,
-                                           line=False, inputtype="text")
-                self.address.setdimensions(0, 40)
-                self.address.setlinearlayoutparams(1)
-                self.address.setmargin(3, "left")
-                self.address.setmargin(3, "right")
-                self.address.setbackgroundcolor(palette.surface)
-                self.address.settextcolor(palette.text)
-                self.address.settextsize(14)
-                self.address.setgravity(0, 1)
+                specifications.append(text_input(
+                    "", key="browser.address", width=0, height=40, weight=1,
+                    margins={"left": 3, "right": 3},
+                    background=palette.surface, textColor=palette.text,
+                    textSize=14, gravity="start_center_vertical"))
                 continue
-            button = self._button(self.toolbar, label, action, width)
-            if action in ("back", "forward", "reload", "home", "bookmark"):
-                button.settextsize(20)
+
+            view = button(label, key=f"browser.{action}", style="browser.control",
+                          width=width,
+                          textSize=20 if action in ("back", "forward", "reload", "home",
+                                                    "bookmark") else 14,
+                          enabled=action not in ("back", "forward"))
+            if action == "bookmark":
+                view["states"] = {
+                    "saved": {"text": "★", "textColor": palette.accent},
+                    "unsaved": {"text": "☆", "textColor": palette.text},
+                }
+                view["state"] = "unsaved"
+            specifications.append(view)
+
+        self.toolbar_layout = create_layout(self.activity, self.toolbar, specifications, {
+            "browser.control": {"height": 40, "margins": {"left": 2, "right": 2},
+                                "background": palette.surface_light,
+                                "textColor": palette.text},
+        })
+        for action, _label, _width in controls:
+            if action == "address":
+                continue
+            view = self.toolbar_layout[f"browser.{action}"]
+            self.buttons[view.id] = (action, None)
+            self.button_views[action] = view
             if action == "javascript":
-                self.javascript_button = button
+                self.javascript_button = view
             elif action == "bookmark":
-                self.bookmark_button = button
+                self.bookmark_button = view
+
+        self.address = self.toolbar_layout["browser.address"]
 
     def _button(self, parent, label, action, width):
         button = tg.TextView(self.activity, label, parent)
@@ -186,25 +214,13 @@ class BrowserSession:
     def _new_tab(self):
         self.next_tab_id += 1
         tab_id = self.next_tab_id
-        row = tg.LinearLayout(self.activity, self.tab_list, vertical=False)
-        row.setdimensions(144, 40)
-        row.setlinearlayoutparams(0)
-        tab_button = tg.TextView(self.activity, "new tab", row)
-        tab_button.setdimensions(104, 40)
-        tab_button.setlinearlayoutparams(0)
-        tab_button.settextsize(12)
-        tab_button.settextcolor(palette.text)
-        tab_button.setgravity(1, 1)
-        tab_button.sendclickevent(True)
-        close_button = tg.TextView(self.activity, "×", row)
-        close_button.setdimensions(36, 40)
-        close_button.setlinearlayoutparams(0)
-        close_button.settextsize(18)
-        close_button.settextcolor(palette.muted)
-        close_button.setgravity(1, 1)
-        close_button.sendclickevent(True)
+        tab_layout = self.tab_template.create(self.tab_list)
+        row_view = tab_layout["row"]
+        tab_button = tab_layout["button"]
+        close_button = tab_layout["close"]
 
-        tab = {"id": tab_id, "row": row, "button": tab_button, "close": close_button,
+        tab = {"id": tab_id, "layout": tab_layout, "row": row_view,
+               "button": tab_button, "close": close_button,
                "url": "", "stack": [], "index": -1, "javascript": False}
         self.tabs[tab_id] = tab
         self.buttons[tab_button.id] = ("select_tab", tab_id)
@@ -237,7 +253,7 @@ class BrowserSession:
                 palette.surface_light if current_id == tab_id else palette.surface)
         self.address.settext(tab["url"])
         self.javascript_button.settext("js on" if tab["javascript"] else "js")
-        self.bookmark_button.settext("★" if tab["url"] in self.bookmarks else "☆")
+        self._set_bookmark_state(tab["url"])
         self._update_navigation_buttons(tab)
         self.status.settext("ready" if tab["url"] else "new tab")
 
@@ -263,7 +279,9 @@ class BrowserSession:
         for action, enabled in (("back", can_go_back), ("forward", can_go_forward)):
             button = self.button_views.get(action)
             if button is not None:
-                button.settextcolor(palette.text if enabled else palette.muted)
+                self.toolbar_layout.set(
+                    f"browser.{action}", enabled=enabled,
+                    textColor=palette.text if enabled else palette.muted)
 
     def _push_url(self, tab, url):
         if tab["index"] >= 0 and tab["stack"][tab["index"]] == url:
@@ -292,7 +310,7 @@ class BrowserSession:
         tab["webview"].loaduri(url)
         if tab["id"] == self.active_tab:
             self.address.settext(url)
-            self.bookmark_button.settext("★" if url in self.bookmarks else "☆")
+            self._set_bookmark_state(url)
             self._update_tab_label(tab)
             self._update_navigation_buttons(tab)
             self.progress.setprogress(0)
@@ -327,7 +345,7 @@ class BrowserSession:
         tab["index"] = -1
         tab["webview"].setdata(self._home_page())
         self.address.settext("")
-        self.bookmark_button.settext("☆")
+        self._set_bookmark_state("")
         self._update_tab_label(tab)
         self._update_navigation_buttons(tab)
         self.status.settext("new tab")
@@ -344,8 +362,12 @@ class BrowserSession:
             self.bookmarks.insert(0, url)
             self.status.settext("bookmarked")
         self._save_data()
-        self.bookmark_button.settext("★" if url in self.bookmarks else "☆")
+        self._set_bookmark_state(url)
         self._refresh_home_page()
+
+    def _set_bookmark_state(self, url):
+        self.toolbar_layout.set_state(
+            "browser.bookmark", "saved" if url in self.bookmarks else "unsaved")
 
     def _refresh_home_page(self):
         for tab in self.tabs.values():
@@ -366,7 +388,7 @@ class BrowserSession:
     def _update_tab_label(self, tab):
         host = urlsplit(tab["url"]).hostname if tab["url"] else None
         label = host.removeprefix("www.") if host else "new tab"
-        tab["button"].settext(label[:14])
+        tab["layout"].set("button", text=label[:14])
 
     def _home_page(self):
         bookmarks = "".join(
