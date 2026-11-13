@@ -168,13 +168,13 @@ class TaskManagerApp:
             caption.setlinearlayoutparams(0)
             caption.settextsize(11)
             caption.settextcolor(palette.muted)
-            caption.setgravity(0, 1)
+            caption.setgravity(1, 1)
             value = tg.TextView(activity, detail, details)
             value.setdimensions(tg.View.MATCH_PARENT, 40)
             value.setlinearlayoutparams(0)
             value.settextsize(14)
             value.settextcolor(palette.text)
-            value.setgravity(0, 1)
+            value.setgravity(1, 1)
             return gauge, percent, value
 
         def set_gauge(gauge, percent_label, value):
