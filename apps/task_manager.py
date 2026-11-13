@@ -271,7 +271,7 @@ class TaskManagerApp:
             tab_entries = tuple(reversed(tab_entries))
         for label, page in tab_entries:
             button = tg.TextView(activity, label, tabs)
-            button.setheight(44)
+            button.setdimensions(0, 44)
             button.setlinearlayoutparams(1)
             button.setbackgroundcolor(palette.accent if label == "Processes" else palette.surface_light)
             button.settextcolor(palette.text)
