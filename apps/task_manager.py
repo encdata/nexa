@@ -202,16 +202,6 @@ class TaskManagerApp:
         performance_page.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
         performance_page.setvisibility(tg.View.GONE)
 
-        process_header = tg.LinearLayout(activity, process_page, vertical=False)
-        process_header.setdimensions(tg.View.MATCH_PARENT, 48)
-        process_header.setlinearlayoutparams(0)
-        status_label = tg.TextView(activity, "", process_header)
-        status_label.setdimensions(tg.View.MATCH_PARENT, 48)
-        status_label.setlinearlayoutparams(0)
-        status_label.setmargin(12, "right" if rtl else "left")
-        status_label.settextsize(12)
-        status_label.settextcolor(palette.muted)
-        status_label.setgravity(0, 1)
         columns = tg.LinearLayout(activity, process_page, vertical=False)
         columns.setdimensions(tg.View.MATCH_PARENT, 34)
         columns.setlinearlayoutparams(0)
@@ -426,18 +416,18 @@ class TaskManagerApp:
                 return
             pid = process["pid"]
             if process["protected"]:
-                status_label.settext("can't end nexa or its terminal session")
+                activity.c.toast("can't end nexa or its terminal session")
                 return
             current = _read_process(pid, 0)
             if (current is None or current["uid"] != os.getuid()
                     or current["start_time"] != process["start_time"]):
-                status_label.settext("process already exited")
+                activity.c.toast("process already exited")
                 return
             try:
                 os.kill(pid, signal.SIGTERM)
-                status_label.settext(f"sent end task to {process['name']}")
+                activity.c.toast(f"sent end task to {process['name']}")
             except (ProcessLookupError, PermissionError) as error:
-                status_label.settext(f"couldn't end task: {error}")
+                activity.c.toast(f"couldn't end task: {error}")
 
         def on_tick():
             try:
