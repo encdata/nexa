@@ -205,29 +205,13 @@ class TaskManagerApp:
         process_header = tg.LinearLayout(activity, process_page, vertical=False)
         process_header.setdimensions(tg.View.MATCH_PARENT, 48)
         process_header.setlinearlayoutparams(0)
-        count_label = tg.TextView(activity, "scanning termux processes…", process_header)
-        count_label.setdimensions(0, 48)
-        count_label.setlinearlayoutparams(1)
-        count_label.setmargin(12, "right" if rtl else "left")
-        count_label.settextsize(12)
-        count_label.settextcolor(palette.muted)
-        count_label.setgravity(0, 1)
-        filter_label = tg.TextView(activity, "filter", process_header)
-        filter_label.setdimensions(44, 48)
-        filter_label.setlinearlayoutparams(0)
-        filter_label.settextsize(11)
-        filter_label.settextcolor(palette.muted)
-        filter_label.setgravity(1, 1)
-        search = tg.EditText(activity, "", process_header, singleline=True, line=False,
-                             inputtype="text")
-        search.setdimensions(124, 38)
-        search.setlinearlayoutparams(0)
-        search.setmargin(8 if rtl else 4, "left")
-        search.setmargin(4 if rtl else 8, "right")
-        search.setbackgroundcolor(palette.surface)
-        search.settextsize(13)
-        search.settextcolor(palette.text)
-        search.sendtextevent(True)
+        status_label = tg.TextView(activity, "", process_header)
+        status_label.setdimensions(tg.View.MATCH_PARENT, 48)
+        status_label.setlinearlayoutparams(0)
+        status_label.setmargin(12, "right" if rtl else "left")
+        status_label.settextsize(12)
+        status_label.settextcolor(palette.muted)
+        status_label.setgravity(0, 1)
         columns = tg.LinearLayout(activity, process_page, vertical=False)
         columns.setdimensions(tg.View.MATCH_PARENT, 34)
         columns.setlinearlayoutparams(0)
@@ -344,9 +328,7 @@ class TaskManagerApp:
             for sort_key, header in sort_headers.items():
                 arrow = (" ↓" if state["sort_descending"] else " ↑") if sort_key == key else ""
                 header.settext(sort_key + arrow)
-            query = state.get("query", "")
-            visible = [process for process in processes
-                       if query in process["name"].casefold() or query in str(process["pid"])]
+            visible = processes
             display_processes = {}
             items = []
             for process in visible:
@@ -364,7 +346,6 @@ class TaskManagerApp:
                 })
             state["display_processes"] = display_processes
             process_rows.setitems(items, keep_scroll=keep_scroll)
-            count_label.settext(f"{len(visible)} of {len(processes)} processes")
             cpu = sum(process["cpu"] for process in processes)
             total = snapshot["total_memory"]
             used = snapshot["used_memory"]
@@ -398,11 +379,6 @@ class TaskManagerApp:
                 return True
             if event.type == tg.Event.back and menu.visible:
                 menu.hide()
-                return True
-            if event.type == tg.Event.text and event.id == search.id:
-                state["query"] = search.gettext().strip().casefold()
-                if state["snapshot"] is not None:
-                    render(state["snapshot"], keep_scroll=False)
                 return True
             if event.type == tg.Event.click:
                 if event.id == process_rows.id:
@@ -450,18 +426,18 @@ class TaskManagerApp:
                 return
             pid = process["pid"]
             if process["protected"]:
-                count_label.settext("can't end nexa or its terminal session")
+                status_label.settext("can't end nexa or its terminal session")
                 return
             current = _read_process(pid, 0)
             if (current is None or current["uid"] != os.getuid()
                     or current["start_time"] != process["start_time"]):
-                count_label.settext("process already exited")
+                status_label.settext("process already exited")
                 return
             try:
                 os.kill(pid, signal.SIGTERM)
-                count_label.settext(f"sent end task to {process['name']}")
+                status_label.settext(f"sent end task to {process['name']}")
             except (ProcessLookupError, PermissionError) as error:
-                count_label.settext(f"couldn't end task: {error}")
+                status_label.settext(f"couldn't end task: {error}")
 
         def on_tick():
             try:
