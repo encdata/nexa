@@ -701,7 +701,7 @@ class LayoutTemplate:
             tg.View(self.activity, ids[index]).sendlongclickevent(True)
         for index, callback in self._text_events:
             text_handlers[ids[index]] = callback
-            tg.View(self.activity, ids[index]).sendtextevent(True)
+            all_views[index].sendtextevent(True)
         for index, callback in self._selection_events:
             selection_handlers[ids[index]] = callback
         for index, callback in self._progress_events:
@@ -785,7 +785,7 @@ def create_layout(activity, parent, layout, styles=None):
             tg.View(activity, ids[index]).sendlongclickevent(True)
     text_handlers = {ids[index]: callback for index, callback in text_events}
     for index, _callback in text_events:
-        tg.View(activity, ids[index]).sendtextevent(True)
+        all_views[index].sendtextevent(True)
     selection_handlers = {ids[index]: callback for index, callback in selection_events}
     progress_handlers = {ids[index]: callback for index, callback in progress_events}
     for index, value in padding:
