@@ -67,10 +67,9 @@ class WindowManager:
                  "image": load("nexa")}, slot)
 
         def add_control(action):
-            color = 0xFF8E3340 if action == "close" else palette.surface_light
             button = add({"key": f"control_{action}", "type": "frame",
                           "width": self.control_width, "height": self.titlebar_height,
-                          "background": color, "clickable": True})
+                          "background": palette.surface_light, "clickable": True})
             content = add({"type": "linear", "vertical": False,
                            "width": "MATCH_PARENT", "height": "MATCH_PARENT"}, button)
             add({"type": "image", "width": 20, "height": 20,
