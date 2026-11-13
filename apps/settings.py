@@ -34,9 +34,13 @@ class SettingsApp:
         self.category_layout = None
         self.category_keys = {}
         self.page_handlers = []
+        self.wallpaper_path = None
         if not hasattr(self, "services"):
             self.services = {}
         self.personalization_actions = {}
+        self.theme_buttons = []
+        self.personalization_buttons = []
+        self.category_text_keys = {}
 
         self.root = tg.LinearLayout(activity, parent)
         self.root.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
@@ -91,6 +95,10 @@ class SettingsApp:
 
     def _show_home(self):
         self.current_page = None
+        self.personalization_actions = {}
+        self.theme_buttons = []
+        self.personalization_buttons = []
+        self.wallpaper_path = None
         self.header_button.settext("")
         self.header_button.setbackgroundcolor(0x00000000)
         self.heading.settext("Settings")
@@ -110,7 +118,8 @@ class SettingsApp:
                     "image": load(page["icon"]),
                 })
             children.append({
-                "type": "text", "width": 0, "height": 56, "weight": 1,
+                "type": "text", "key": f"{key}.title",
+                "width": 0, "height": 56, "weight": 1,
                 "margins": {"left": 8 if page["icon"] is not None else 64},
                 "text": page["title"], "textSize": 14,
                 "textColor": palette.text, "gravity": "start_center_vertical",
@@ -121,6 +130,7 @@ class SettingsApp:
                 "children": children,
             })
             self.category_keys[page["id"]] = key + ".button"
+            self.category_text_keys[page["id"]] = key + ".title"
 
         self.category_layout = create_layout(self.activity, self.content, categories, {
             "category": {"width": "MATCH_PARENT", "height": 56,
@@ -145,6 +155,10 @@ class SettingsApp:
         self.activity.hidesoftkeyboard()
         self.current_page = page_id
         self.category_layout = None
+        self.personalization_actions = {}
+        self.theme_buttons = []
+        self.personalization_buttons = []
+        self.wallpaper_path = None
         self.search.settext("")
         self.header_button.settext("←")
         self.header_button.setbackgroundcolor(palette.surface)
@@ -173,6 +187,7 @@ class SettingsApp:
 
         theme_row = tg.LinearLayout(self.activity, self.content, vertical=False)
         theme_row.setdimensions(tg.View.MATCH_PARENT, 48)
+        self.theme_buttons = []
         for theme, label in (("dark", "dark"), ("light", "light")):
             button = tg.TextView(self.activity, label, theme_row)
             button.setdimensions(0, 44)
@@ -186,6 +201,7 @@ class SettingsApp:
             button.setgravity(1, 1)
             button.sendclickevent(True)
             actions[button.id] = ("theme", theme)
+            self.theme_buttons.append((button, theme))
 
         wallpaper_title = tg.TextView(self.activity, "wallpaper image path", self.content)
         wallpaper_title.setdimensions(tg.View.MATCH_PARENT, 40)
@@ -241,6 +257,38 @@ class SettingsApp:
 
         self.wallpaper_path = wallpaper_path
         self.wallpaper_preview = preview
+        self.personalization_buttons = [apply_button, preview_button, default_button]
+
+    def refresh_theme(self):
+        self.root.setbackgroundcolor(palette.window_content)
+        self.header.setbackgroundcolor(palette.window_content)
+        self.content.setbackgroundcolor(palette.window_content)
+        self.header_button.setbackgroundcolor(
+            palette.surface if self.current_page is not None else 0x00000000)
+        self.header_button.settextcolor(palette.text)
+        self.heading.settextcolor(palette.text)
+        self.search.setbackgroundcolor(palette.surface)
+        self.search.settextcolor(palette.text)
+
+        if self.category_layout is not None:
+            for page in self.pages:
+                self.category_layout[self.category_keys[page["id"]]].setbackgroundcolor(
+                    palette.surface)
+                self.category_layout[self.category_text_keys[page["id"]]].settextcolor(
+                    palette.text)
+
+        settings = self.services.get("personalization", {})
+        selected_theme = settings.get("theme", palette.current_theme)
+        for button, theme in self.theme_buttons:
+            button.setbackgroundcolor(
+                palette.accent if selected_theme == theme else palette.surface)
+            button.settextcolor(palette.text)
+        for button in self.personalization_buttons:
+            button.setbackgroundcolor(palette.surface)
+            button.settextcolor(palette.text)
+        if self.wallpaper_path is not None:
+            self.wallpaper_path.setbackgroundcolor(palette.surface)
+            self.wallpaper_path.settextcolor(palette.text)
 
     def handle_event(self, event):
         if event.type == tg.Event.click and event.id in self.personalization_actions:
