@@ -106,6 +106,7 @@ class FilesApp:
         body.setlinearlayoutparams(1)
         navigation = tg.LinearLayout(activity, body)
         navigation.setdimensions(48, tg.View.MATCH_PARENT)
+        navigation.setlinearlayoutparams(0)
         navigation.setbackgroundcolor(palette.surface)
         content = tg.LinearLayout(activity, body)
         content.setdimensions(0, tg.View.MATCH_PARENT)
