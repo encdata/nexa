@@ -32,6 +32,7 @@ class Taskbar:
         self.window_views = {}
         self.window_spacer = None
         self.menu_visible = False
+        self.active_window = None
 
         self.frame = tg.FrameLayout(activity, root)
         self.frame.setdimensions(tg.View.MATCH_PARENT, self.height)
@@ -68,6 +69,7 @@ class Taskbar:
         header.setdimensions(tg.View.MATCH_PARENT, 72)
         header.setlinearlayoutparams(0)
         heading = tg.TextView(activity, "\u2003All apps", header)
+        self.heading = heading
         heading.setdimensions(tg.View.MATCH_PARENT, 72)
         heading.setlinearlayoutparams(0)
         heading.settextsize(20)
@@ -77,6 +79,8 @@ class Taskbar:
         divider.setdimensions(tg.View.MATCH_PARENT, 1)
         divider.setlinearlayoutparams(0)
         divider.setbackgroundcolor(palette.accent)
+        self.divider = divider
+        self.menu_entries = []
         scroll = tg.NestedScrollView(activity, self.menu, fillviewport=True, nobar=True)
         scroll.setheight(0)
         scroll.setlinearlayoutparams(1)
@@ -100,6 +104,26 @@ class Taskbar:
                     "open_settings": "settings",
                     "close_window": "close window"})
         self.context_window = None
+
+    def refresh_theme(self):
+        set_rounded_color(self.surface, max(1, self.screen_width - 16),
+                          self.content_height, palette.surface, 14)
+        set_rounded_color(self.menu_surface, self.app_menu_width, self.menu_height,
+                          palette.surface, 14)
+        self.clock.settextcolor(palette.text)
+        self.context_menu.refresh_theme()
+        self.menu.setbackgroundcolor(palette.surface)
+        self.heading.settextcolor(palette.text)
+        self.divider.setbackgroundcolor(palette.accent)
+        for view, kind in self.menu_entries:
+            if kind == "heading":
+                view.settextcolor(palette.muted)
+            else:
+                view.setbackgroundcolor(palette.window_content)
+                view.settextcolor(palette.text)
+        for window_id, button in self.window_views.items():
+            button.setbackgroundcolor(palette.surface_light if window_id == self.active_window
+                                      else palette.surface)
 
     def resize(self, screen_width, screen_height):
         self.screen_width = max(1, screen_width)
@@ -174,6 +198,7 @@ class Taskbar:
         heading.settextsize(14)
         heading.settextcolor(palette.muted)
         heading.setgravity(0, 1)
+        self.menu_entries.append((heading, "heading"))
 
     def _add_app_entry(self, parent, app):
         button = tg.LinearLayout(self.activity, parent, vertical=False)
@@ -184,6 +209,7 @@ class Taskbar:
         button.setmargin(3, "top")
         button.setmargin(3, "bottom")
         button.setbackgroundcolor(palette.window_content)
+        self.menu_entries.append((button, "entry"))
         button.sendclickevent(True)
         self.buttons[button.id] = ("app", app.app_id)
 
@@ -205,6 +231,7 @@ class Taskbar:
             label.settextsize(15)
             label.settextcolor(palette.text)
             label.setgravity(0, 1)
+            self.menu_entries.append((label, "label"))
 
         if self.rtl:
             add_label()
@@ -232,6 +259,7 @@ class Taskbar:
         self._layout_window_buttons()
 
     def set_active_window(self, window_id):
+        self.active_window = window_id
         for current_id, button in self.window_views.items():
             button.setbackgroundcolor(palette.surface_light if current_id == window_id else palette.surface)
 

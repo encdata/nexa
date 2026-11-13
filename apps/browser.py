@@ -82,6 +82,22 @@ class BrowserSession:
 
         self._new_tab()
 
+    def refresh_theme(self):
+        self.root.setbackgroundcolor(palette.window_content)
+        self.toolbar.setbackgroundcolor(palette.surface_light)
+        self.address.setbackgroundcolor(palette.surface)
+        self.address.settextcolor(palette.text)
+        self.status.settextcolor(palette.muted)
+        for action, button in self.button_views.items():
+            button.setbackgroundcolor(palette.surface_light)
+            button.settextcolor(palette.text)
+        for tab_id, tab in self.tabs.items():
+            tab["row"].setbackgroundcolor(
+                palette.surface_light if tab_id == self.active_tab else palette.surface)
+            tab["button"].settextcolor(palette.text)
+            tab["close"].settextcolor(palette.muted)
+        self._refresh_home_page()
+
     def _build_toolbar(self):
         controls = [
             ("back", "‹", 38),
@@ -400,11 +416,11 @@ class BrowserSession:
         return f"""<!doctype html>
 <html><head><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-body {{ background:#171c24; color:#e8edf2; font:16px sans-serif; margin:24px; }}
-h1 {{ color:#45d6c5; font-size:26px; }} h2 {{ font-size:17px; margin-top:28px; }}
+body {{ background:#{palette.window_content & 0xFFFFFF:06x}; color:#{palette.text & 0xFFFFFF:06x}; font:16px sans-serif; margin:24px; }}
+h1 {{ color:#{palette.accent & 0xFFFFFF:06x}; font-size:26px; }} h2 {{ font-size:17px; margin-top:28px; }}
 form {{ display:flex; gap:8px; }} input {{ box-sizing:border-box; padding:12px; font-size:16px; }}
 input[name=q] {{ flex:1; min-width:0; }} button {{ padding:10px 16px; }}
-a {{ color:#45d6c5; overflow-wrap:anywhere; }} li {{ margin:10px 0; }}
+a {{ color:#{palette.accent & 0xFFFFFF:06x}; overflow-wrap:anywhere; }} li {{ margin:10px 0; }}
 </style></head><body><h1>Nexa Browser</h1>
 <form action="https://duckduckgo.com/"><input name="q" placeholder="search the web" autocomplete="off"><button>search</button></form>
 <h2>bookmarks</h2><ul>{bookmarks}</ul>

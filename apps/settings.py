@@ -4,6 +4,7 @@ from shell import palette
 from shell.icons import load
 from shell.settings_registry import get_pages, register_page
 from shell.ui_layout import column, create_layout, icon, row, scroll, text_input
+from shell.wallpaper import load as load_wallpaper
 
 
 register_page("system", "System", "window")
@@ -20,7 +21,12 @@ class SettingsApp:
     preload_ui = True
     build_threaded = True
 
+    def build_with_services(self, activity, parent, context, services):
+        self.services = services
+        return self.build(activity, parent, context)
+
     def build(self, activity, parent, context=None):
+        page_to_restore = getattr(self, "current_page", None)
         self.activity = activity
         self.pages = get_pages()
         self.page_by_id = {page["id"]: page for page in self.pages}
@@ -28,6 +34,9 @@ class SettingsApp:
         self.category_layout = None
         self.category_keys = {}
         self.page_handlers = []
+        if not hasattr(self, "services"):
+            self.services = {}
+        self.personalization_actions = {}
 
         self.root = tg.LinearLayout(activity, parent)
         self.root.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
@@ -76,6 +85,8 @@ class SettingsApp:
         self.content = self.body_layout["settings.content"]
         self.category_keys = {}
         self._show_home()
+        if page_to_restore in self.page_by_id:
+            self._show_page(page_to_restore)
         return self
 
     def _show_home(self):
@@ -140,12 +151,129 @@ class SettingsApp:
         self.heading.settext(page["title"])
         self.content.clearchildren()
         self.page_handlers = []
+        if page_id == "personalization":
+            self._build_personalization()
+            return
         for builder in page["content"]:
             handler = builder(self.activity, self.content)
             if handler is not None:
                 self.page_handlers.append(handler)
 
+
+    def _build_personalization(self):
+        settings = self.services.get("personalization", {"theme": palette.current_theme,
+                                                          "wallpaper": None})
+        actions = {}
+        self.personalization_actions = actions
+        title = tg.TextView(self.activity, "theme", self.content)
+        title.setdimensions(tg.View.MATCH_PARENT, 40)
+        title.settextsize(13)
+        title.settextcolor(palette.muted)
+        title.setgravity(0, 1)
+
+        theme_row = tg.LinearLayout(self.activity, self.content, vertical=False)
+        theme_row.setdimensions(tg.View.MATCH_PARENT, 48)
+        for theme, label in (("dark", "dark"), ("light", "light")):
+            button = tg.TextView(self.activity, label, theme_row)
+            button.setdimensions(0, 44)
+            button.setlinearlayoutparams(1)
+            button.setmargin(3, "left")
+            button.setmargin(3, "right")
+            button.setbackgroundcolor(palette.accent if settings["theme"] == theme
+                                     else palette.surface)
+            button.settextcolor(palette.text)
+            button.settextsize(14)
+            button.setgravity(1, 1)
+            button.sendclickevent(True)
+            actions[button.id] = ("theme", theme)
+
+        wallpaper_title = tg.TextView(self.activity, "wallpaper image path", self.content)
+        wallpaper_title.setdimensions(tg.View.MATCH_PARENT, 40)
+        wallpaper_title.setmargin(0, "top")
+        wallpaper_title.settextsize(13)
+        wallpaper_title.settextcolor(palette.muted)
+        wallpaper_title.setgravity(0, 1)
+
+        path = settings.get("wallpaper") or ""
+        wallpaper_path = tg.EditText(self.activity, path, self.content,
+                                     singleline=True, line=False, inputtype="text")
+        wallpaper_path.setdimensions(tg.View.MATCH_PARENT, 44)
+        wallpaper_path.setbackgroundcolor(palette.surface)
+        wallpaper_path.settextcolor(palette.text)
+        wallpaper_path.settextsize(13)
+        wallpaper_path.setmargin(4, "top")
+
+        preview = tg.ImageView(self.activity, self.content)
+        preview.setdimensions(144, 86)
+        preview.setvisibility(tg.View.GONE)
+        preview.setmargin(4, "top")
+
+        wallpaper_row = tg.LinearLayout(self.activity, self.content, vertical=False)
+        wallpaper_row.setdimensions(tg.View.MATCH_PARENT, 48)
+        apply_button = tg.TextView(self.activity, "apply wallpaper", wallpaper_row)
+        apply_button.setdimensions(0, 44)
+        apply_button.setlinearlayoutparams(1)
+        apply_button.setmargin(3, "right")
+        apply_button.setbackgroundcolor(palette.surface)
+        apply_button.settextcolor(palette.text)
+        apply_button.settextsize(13)
+        apply_button.setgravity(1, 1)
+        apply_button.sendclickevent(True)
+        actions[apply_button.id] = ("wallpaper", None)
+        preview_button = tg.TextView(self.activity, "preview", wallpaper_row)
+        preview_button.setdimensions(78, 44)
+        preview_button.setmargin(3, "left")
+        preview_button.setbackgroundcolor(palette.surface)
+        preview_button.settextcolor(palette.text)
+        preview_button.settextsize(13)
+        preview_button.setgravity(1, 1)
+        preview_button.sendclickevent(True)
+        actions[preview_button.id] = ("preview", None)
+        default_button = tg.TextView(self.activity, "default", wallpaper_row)
+        default_button.setdimensions(72, 44)
+        default_button.setmargin(3, "left")
+        default_button.setbackgroundcolor(palette.surface)
+        default_button.settextcolor(palette.text)
+        default_button.settextsize(13)
+        default_button.setgravity(1, 1)
+        default_button.sendclickevent(True)
+        actions[default_button.id] = ("wallpaper", "default")
+
+        self.wallpaper_path = wallpaper_path
+        self.wallpaper_preview = preview
+
     def handle_event(self, event):
+        if event.type == tg.Event.click and event.id in self.personalization_actions:
+            action, value = self.personalization_actions[event.id]
+            if action == "theme":
+                callback = self.services.get("set_theme")
+                if callback is not None:
+                    callback(value)
+                return True
+            path = self.wallpaper_path.gettext().strip()
+            if action == "preview":
+                if not path:
+                    self.activity.c.toast("enter an image path first")
+                    return True
+                configuration = self.activity.getconfiguration()
+                try:
+                    image = load_wallpaper(144, 86, configuration["density"], path)
+                    self.wallpaper_preview.setimage(image["image"])
+                    self.wallpaper_preview.setvisibility(tg.View.VISIBLE)
+                except (OSError, ValueError) as error:
+                    self.activity.c.toast(f"couldn't load wallpaper: {error}")
+                return True
+            callback = self.services.get("set_wallpaper")
+            if value is None and not path:
+                self.activity.c.toast("enter an image path first")
+                return True
+            try:
+                callback(None if value == "default" else path)
+                if value == "default":
+                    self.wallpaper_path.settext("")
+            except (OSError, ValueError) as error:
+                self.activity.c.toast(f"couldn't load wallpaper: {error}")
+            return True
         if self.search_layout.handle_event(event):
             return True
         if event.type == tg.Event.click:

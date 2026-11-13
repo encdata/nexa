@@ -1,3 +1,5 @@
+import os
+
 import termuxgui as tg
 from time import monotonic, sleep
 
@@ -6,7 +8,9 @@ from shell.taskbar import Taskbar
 from shell.window_manager import WindowManager
 from shell.pointer import Pointer
 from shell.text_direction import force_ltr
-from shell.wallpaper import add as add_wallpaper
+from shell.wallpaper import add as add_wallpaper, load as load_wallpaper
+from shell.personalization import save as save_personalization, store_wallpaper
+from shell import palette
 
 
 class DesktopShell:
@@ -18,12 +22,13 @@ class DesktopShell:
         self.screen_height = config["screenheight"]
         self.density = config["density"]
         self.keyboard_hidden = config.get("keyboardHidden", True)
+        self.personalization = startup["personalization"]
         self.next_wallpaper_resize_check = 0
         self.rtl = False
         self.root = tg.FrameLayout(activity, parent)
         force_ltr(self.root)
         self.root.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
-        self.root.setbackgroundcolor(0xFF10131A)
+        self.root.setbackgroundcolor(palette.background)
         self.root.sendtouchevent(True)
         show_progress()
         previous_size = None
@@ -45,6 +50,9 @@ class DesktopShell:
         self.windows = WindowManager(activity, self.root, self.apps, self.screen_width, self.screen_height,
                                      self.density, rtl=self.rtl)
         self.windows.on_open_app = self.open_app
+        self.windows.personalization = self.personalization
+        self.windows.on_set_theme = self.set_theme
+        self.windows.on_set_wallpaper = self.set_wallpaper
         self.desktop = Desktop(activity, self.root, self.apps, self.open_app,
                                self.screen_width, self.screen_height, self.density,
                                startup["positions"], startup["home_items"], progress)
@@ -74,6 +82,26 @@ class DesktopShell:
         if window_id is not None:
             self.taskbar.add_window(window_id, self.apps[app_id], self.windows.windows[window_id]["title"])
             self.taskbar.set_active_window(self.windows.active_window)
+
+    def set_theme(self, theme):
+        if theme not in ("dark", "light") or theme == self.personalization["theme"]:
+            return
+        self.personalization["theme"] = palette.set_theme(theme)
+        save_personalization(self.personalization)
+        self.root.setbackgroundcolor(palette.background)
+        self.windows.refresh_theme()
+        self.taskbar.refresh_theme()
+        self.desktop.refresh_theme()
+
+    def set_wallpaper(self, path):
+        if path:
+            path = os.path.abspath(os.path.expanduser(path))
+        prepared = load_wallpaper(self.screen_width, self.screen_height, self.density, path)
+        stored_path = store_wallpaper(path)
+        self.wallpaper.set_prepared(prepared)
+        self.personalization["wallpaper"] = stored_path
+        save_personalization(self.personalization)
+        self.activity.c.toast("wallpaper updated")
 
     def _taskbar_context_action(self, window_id, action):
         if window_id is not None:

@@ -299,6 +299,14 @@ class ClockApp:
             def handle_event(self, event):
                 return handle_event(event)
 
+            def theme_refresh_state(self):
+                return current_page.id
+
+            def restore_theme_state(self, page_id):
+                page = next((item for item in (clock_page, watch_page, timer_page)
+                             if item.id == page_id), clock_page)
+                show_page(page)
+
             def on_tick(self):
                 nonlocal next_clock_update, next_watch_update, next_timer_update
                 now = time.monotonic()

@@ -301,9 +301,36 @@ class CalculatorApp:
                 return False
             return True
 
+        def snapshot_theme_state():
+            return {"expression": expression, "just_evaluated": just_evaluated,
+                    "inverse_mode": inverse_mode, "degree_mode": degree_mode,
+                    "history": list(history), "result": result_view.gettext(),
+                    "shown": expression_view.gettext()}
+
+        def restore_theme_state(saved):
+            nonlocal expression, just_evaluated, inverse_mode, degree_mode
+            expression = saved["expression"]
+            just_evaluated = saved["just_evaluated"]
+            inverse_mode = saved["inverse_mode"]
+            degree_mode = saved["degree_mode"]
+            history[:] = saved["history"]
+            expression_view.settext(saved["shown"])
+            result_view.settext(saved["result"])
+            mode_button.settext("DEG" if degree_mode else "RAD")
+            inverse_button.settext("2nd on" if inverse_mode else "2nd")
+            for name, view in function_buttons.items():
+                view.settext({"sin": "asin", "cos": "acos", "tan": "atan"}[name]
+                             if inverse_mode else name)
+
         class CalculatorSession:
             def handle_event(self, event):
                 return handle_event(event)
+
+            def theme_refresh_state(self):
+                return snapshot_theme_state()
+
+            def restore_theme_state(self, saved):
+                restore_theme_state(saved)
 
         return CalculatorSession()
 

@@ -71,6 +71,11 @@ class ContextMenu:
         self.view.setvisibility(tg.View.VISIBLE)
         self.visible = True
 
+    def refresh_theme(self):
+        set_rounded_color(self.background, self.width, self.height, palette.surface, 12)
+        for action, row in self.rows.items():
+            row.settextcolor(palette.muted if action in self.disabled_actions else palette.text)
+
     def reposition(self):
         if self.visible:
             self.show(self.visible_actions, *self.anchor, self.on_action,

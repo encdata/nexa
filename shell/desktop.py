@@ -273,6 +273,13 @@ class Desktop:
                                    if grid_index is None else grid_index}
             self.icon_order.append(cell.id)
 
+    def refresh_theme(self):
+        for icon in self.icons.values():
+            icon["caption"].settextcolor(palette.text)
+        self.context_menu.refresh_theme()
+        self.name_prompt.refresh_theme()
+        self.open_with.refresh_theme()
+
     def refresh_associated_icons(self, _path=None, _app_id=None):
         for icon in self.icons.values():
             if icon["context"] is None or icon["is_folder"]:

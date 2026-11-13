@@ -440,6 +440,24 @@ class TaskManagerApp:
             stop.set()
             process_rows.close()
 
+        def theme_refresh_state():
+            return {"sort_by": state["sort_by"],
+                    "sort_descending": state["sort_descending"],
+                    "active_page": state["active_page"] == performance_page}
+
+        def restore_theme_state(saved):
+            state["sort_by"] = saved["sort_by"]
+            state["sort_descending"] = saved["sort_descending"]
+            page = performance_page if saved["active_page"] else process_page
+            state["active_page"] = page
+            process_page.setvisibility(tg.View.VISIBLE if page == process_page else tg.View.GONE)
+            performance_page.setvisibility(tg.View.VISIBLE if page == performance_page else tg.View.GONE)
+            for button_id, (label, tab_page) in tab_actions.items():
+                tab_buttons[button_id].setbackgroundcolor(
+                    palette.accent if tab_page == page else palette.surface_light)
+
+        handle_event.theme_refresh_state = theme_refresh_state
+        handle_event.restore_theme_state = restore_theme_state
         handle_event.on_tick = on_tick
         handle_event.on_window_open = start_sampler
         handle_event.close = close

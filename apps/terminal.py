@@ -17,7 +17,9 @@ class TerminalApp:
     app_id = "terminal"
     name = "Nexa Terminal"
     icon = "terminal"
-    content_background = 0xFF000000
+    @property
+    def content_background(self):
+        return 0xFF000000 if palette.current_theme == "dark" else palette.window_content
     preload_ui = True
     build_threaded = True
     file_token = re.compile(r'''"[^\"]+"|'[^']+'|[^\s]+''')
@@ -43,6 +45,7 @@ class TerminalApp:
         toolbar.setdimensions(tg.View.MATCH_PARENT, 44)
         toolbar.setlinearlayoutparams(0)
         toolbar.setbackgroundcolor(palette.surface_light)
+        self.toolbar = toolbar
         title = tg.TextView(activity, "terminal", toolbar)
         title.setdimensions(120, 44)
         title.settextsize(13)
@@ -69,6 +72,7 @@ class TerminalApp:
         input_panel.setdimensions(tg.View.MATCH_PARENT, 92)
         input_panel.setlinearlayoutparams(0)
         input_panel.setbackgroundcolor(palette.surface)
+        self.input_panel = input_panel
 
         self.actions = tg.FrameLayout(activity, input_panel)
         self.actions.setdimensions(tg.View.MATCH_PARENT, 44)
@@ -481,6 +485,24 @@ class TerminalApp:
                 "params": {"aid": self.activity.aid, "id": row.id, "send": enabled},
             })
         self.mouse_touch_enabled = enabled
+
+    def refresh_theme(self):
+        self.toolbar.setbackgroundcolor(palette.surface_light)
+        self.title_view.settextcolor(palette.muted)
+        self.input_panel.setbackgroundcolor(palette.surface)
+        for button, _alignment, _gap in self.controls:
+            is_enter = button.gettext() == "enter"
+            button.setbackgroundcolor(palette.accent if is_enter else palette.surface_light)
+            button.settextcolor(palette.background if is_enter else palette.text)
+        for button, _sequence, _index in self.key_controls:
+            button.setbackgroundcolor(palette.surface_light)
+            button.settextcolor(palette.text)
+        self.screen.default_fg = palette.text
+        self.root.setbackgroundcolor(self.content_background)
+        self.scroll.setbackgroundcolor(self.content_background)
+        self.output_rows.setbackgroundcolor(self.content_background)
+        self.screen.default_bg = self.content_background
+        self._render(force=True)
 
     def close(self):
         if self.session is not None:

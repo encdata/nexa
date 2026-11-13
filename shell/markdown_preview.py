@@ -117,25 +117,30 @@ def render(text):
 
     body = "\n".join(blocks) or '<p class="empty">nothing to preview</p>'
     background = f"#{palette.window_content & 0xFFFFFF:06x}"
+    text = f"#{palette.text & 0xFFFFFF:06x}"
+    accent = f"#{palette.accent & 0xFFFFFF:06x}"
+    muted = f"#{palette.muted & 0xFFFFFF:06x}"
+    surface = f"#{palette.surface & 0xFFFFFF:06x}"
+    surface_light = f"#{palette.surface_light & 0xFFFFFF:06x}"
     return f'''<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 * {{ box-sizing: border-box; }}
 html, body {{ background: {background}; }}
-body {{ margin: 0; padding: 20px 22px 36px; color: #d4d4d4;
+body {{ margin: 0; padding: 20px 22px 36px; color: {text};
   font: 15px/1.65 sans-serif; overflow-wrap: anywhere; }}
-h1,h2,h3,h4,h5,h6 {{ color: #e8edf2; line-height: 1.3; margin: 1.2em 0 .55em; }}
-h1 {{ font-size: 2em; border-bottom: 1px solid #3b424c; padding-bottom: .3em; }}
-h2 {{ font-size: 1.55em; border-bottom: 1px solid #333a44; padding-bottom: .25em; }}
+h1,h2,h3,h4,h5,h6 {{ color: {text}; line-height: 1.3; margin: 1.2em 0 .55em; }}
+h1 {{ font-size: 2em; border-bottom: 1px solid {surface_light}; padding-bottom: .3em; }}
+h2 {{ font-size: 1.55em; border-bottom: 1px solid {surface_light}; padding-bottom: .25em; }}
 p {{ margin: .75em 0; }}
-.link-label {{ color: #4fc1ff; text-decoration: underline; }}
-code {{ font: .92em monospace; color: #ce9178; background: #292d34; padding: .12em .35em; border-radius: 4px; }}
-pre {{ overflow-x: auto; background: #15171b; border: 1px solid #303640; border-radius: 6px;
+.link-label {{ color: {accent}; text-decoration: underline; }}
+code {{ font: .92em monospace; color: {accent}; background: {surface}; padding: .12em .35em; border-radius: 4px; }}
+pre {{ overflow-x: auto; background: {surface}; border: 1px solid {surface_light}; border-radius: 6px;
   padding: 14px; line-height: 1.5; }}
-pre code {{ padding: 0; background: transparent; color: #d4d4d4; white-space: pre; }}
-blockquote {{ margin: 1em 0; padding: .15em 1em; color: #aab5c1; border-left: 3px solid #45d6c5; }}
+pre code {{ padding: 0; background: transparent; color: {text}; white-space: pre; }}
+blockquote {{ margin: 1em 0; padding: .15em 1em; color: {muted}; border-left: 3px solid {accent}; }}
 ul,ol {{ padding-left: 1.6em; }} li {{ padding-left: .2em; margin: .25em 0; }}
-hr {{ border: 0; border-top: 1px solid #414852; margin: 1.5em 0; }}
-img {{ max-width: 100%; }} .image-label {{ color: #9aa8b5; font-style: italic; }}
-.empty {{ color: #9aa8b5; }}
+hr {{ border: 0; border-top: 1px solid {surface_light}; margin: 1.5em 0; }}
+img {{ max-width: 100%; }} .image-label {{ color: {muted}; font-style: italic; }}
+.empty {{ color: {muted}; }}
 </style></head><body>{body}</body></html>'''

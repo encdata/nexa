@@ -280,9 +280,24 @@ class EditorApp:
         if context:
             open_file()
 
+        def refresh_theme():
+            root.setbackgroundcolor(palette.window_content)
+            toolbar.setbackgroundcolor(palette.surface_light)
+            path_field.setbackgroundcolor(palette.window_content)
+            path_field.settextcolor(palette.text)
+            editor.setbackgroundcolor(palette.window_content)
+            editor.settextcolor(palette.text)
+            status.settextcolor(palette.muted)
+            for button in button_views.values():
+                button.setbackgroundcolor(palette.surface)
+                button.settextcolor(palette.text)
+            if state["preview_view"] is not None:
+                state["preview_view"].setbackgroundcolor(palette.window_content)
+
         def close():
             state["closed"] = True
 
+        handle_event.refresh_theme = refresh_theme
         handle_event.close = close
         return handle_event
 

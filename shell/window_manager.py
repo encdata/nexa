@@ -46,6 +46,11 @@ class WindowManager:
         self.on_close = None
         self.on_open_app = None
         self.on_association_change = None
+        self.on_set_theme = None
+        self.on_set_wallpaper = None
+        self.personalization = None
+        self.theme_revision = 0
+        self.theme_refresh_pending = False
         self.titlebar_template = ReusableObject(
             activity, f"nexa.titlebar.{int(self.rtl)}", self._titlebar_specifications())
 
@@ -161,7 +166,7 @@ class WindowManager:
         frame.setdimensions(width, height)
         place(frame, x, y, top=True)
         border_surface = add_rounded(self.activity, frame, width, height,
-                                     palette.surface_light, 14)
+                                     palette.window_border, 14)
         set_image_scale_type(border_surface, "fit_xy")
         place(border_surface, 0, 0)
         panel_width = width - self.border_width * 2
@@ -283,7 +288,10 @@ class WindowManager:
         return build_with_services(
             self.activity, content, context,
             {"apps": self.apps, "open_app": self.on_open_app or self.open_app,
-             "association_changed": self.on_association_change})
+             "association_changed": self.on_association_change,
+             "personalization": self.personalization,
+             "set_theme": self.on_set_theme,
+             "set_wallpaper": self.on_set_wallpaper})
 
     def _finish_build(self, window):
         future = window["build_future"]
@@ -302,6 +310,10 @@ class WindowManager:
             window["build_error"] = True
             return
         window["event_handler"] = handler
+        refresh_state = window.pop("theme_refresh_state", None)
+        restore_theme_state = getattr(handler, "restore_theme_state", None)
+        if refresh_state is not None and restore_theme_state is not None:
+            restore_theme_state(refresh_state)
         self._notify_window_resize(
             handler, max(1, window["width"] - self.border_width * 2),
             max(1, window["height"] - self.border_width * 2 - self.titlebar_height))
@@ -375,6 +387,11 @@ class WindowManager:
             on_tick = getattr(handler, "on_tick", None)
             if on_tick is not None:
                 on_tick()
+
+        if self.theme_refresh_pending and not any(
+                window["build_pending"] or window["build_future"] is not None
+                for window in self.windows.values()):
+            self._refresh_theme_windows()
 
         for window in tuple(self.windows.values()):
             if not window["build_pending"]:
@@ -690,6 +707,58 @@ class WindowManager:
         window["title_surface"].setdimensions(panel_width, self.titlebar_height)
         if move:
             self._place_window(window, top=False)
+
+
+    def refresh_theme(self):
+        self.theme_revision += 1
+        self.titlebar_template = ReusableObject(
+            self.activity, f"nexa.titlebar.{int(self.rtl)}.{self.theme_revision}",
+            self._titlebar_specifications())
+        for window in self.windows.values():
+            self._apply_window_theme(window)
+        self.theme_refresh_pending = True
+
+    def _refresh_theme_windows(self):
+        self.theme_refresh_pending = False
+        for window in self.windows.values():
+            self._apply_window_theme(window)
+            handler = window["event_handler"]
+            refresh = getattr(handler, "refresh_theme", None)
+            if refresh is not None:
+                refresh()
+                continue
+            snapshot = getattr(handler, "theme_refresh_state", None)
+            window["theme_refresh_state"] = snapshot() if snapshot is not None else None
+            close = getattr(handler, "close", None)
+            if close is not None:
+                close()
+            window["content"].clearchildren()
+            window["event_handler"] = None
+            window["handler_activated"] = False
+            window["build_error"] = False
+            window["build_pending"] = True
+            window["build_future"] = self.build_executor.submit(
+                self._build_app, window["app"], window["content"], window["context"])
+            window["build_pending"] = False
+        for window in tuple(self.preloaded.values()):
+            self._discard_window(window)
+        self.preloaded.clear()
+
+    def _apply_window_theme(self, window):
+        panel_width = max(1, window["width"] - self.border_width * 2)
+        panel_height = max(1, window["height"] - self.border_width * 2)
+        content_background = getattr(window["app"], "content_background", palette.window_content)
+        set_rounded_color(window["border_surface"], window["width"], window["height"],
+                          palette.window_border, 14)
+        set_rounded_color(window["content_surface"], panel_width, panel_height,
+                          content_background, 10)
+        window["panel"].setbackgroundcolor(content_background)
+        window["content"].setbackgroundcolor(content_background)
+        set_surface_color(window["title_surface"], panel_width, self.titlebar_height,
+                          palette.surface_light)
+        window["title_view"].settextcolor(palette.text)
+        for control in window["controls"]:
+            control.setbackgroundcolor(palette.surface_light)
 
     def close(self, window_id):
         window = self.windows.pop(window_id, None)

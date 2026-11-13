@@ -56,6 +56,9 @@ class OpenWithChooser:
             self.on_association_change(path, app_id)
         self.open_app(app_id, path)
 
+    def refresh_theme(self):
+        self.menu.refresh_theme()
+
     def handle_event(self, event):
         return self.menu.handle_event(event)
 

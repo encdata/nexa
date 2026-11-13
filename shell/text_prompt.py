@@ -72,6 +72,16 @@ class TextPrompt:
         button.sendclickevent(True)
         return button
 
+    def refresh_theme(self):
+        set_rounded_color(self.background, self.width, self.height, palette.surface, 14)
+        self.title.settextcolor(palette.text)
+        self.input.setbackgroundcolor(palette.window_content)
+        self.input.settextcolor(palette.text)
+        self.cancel.setbackgroundcolor(palette.surface_light)
+        self.cancel.settextcolor(palette.text)
+        self.confirm.setbackgroundcolor(palette.surface_light)
+        self.confirm.settextcolor(palette.text)
+
     def show(self, title, value, on_submit):
         width, height = self.bounds()
         self.width = min(320, max(1, width - 32))

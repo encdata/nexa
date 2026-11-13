@@ -149,6 +149,7 @@ class FilesApp:
                  "loading": False, "error": None, "closed": False, "nav_paths": {},
                  "render_id": 0, "prompt": prompt}
 
+        nav_labels = []
         shared = os.path.expanduser("~/storage/shared")
         locations = [("home", os.path.expanduser("~"))]
         for label, folder in (("desktop", "Desktop"), ("documents", "Documents"),
@@ -170,6 +171,7 @@ class FilesApp:
             button.settextsize(12)
             button.settextcolor(palette.text)
             button.setgravity(0, 1)
+            nav_labels.append(button)
             state["nav_paths"][row.id] = target
 
         path_label.sendlongclickevent(True)
@@ -427,12 +429,33 @@ class FilesApp:
                     print(f"nexa files: {error}")
             return True
 
+        def refresh_theme():
+            root.setbackgroundcolor(palette.window_content)
+            toolbar.setbackgroundcolor(palette.surface_light)
+            search_bar.setbackgroundcolor(palette.surface_light)
+            search.setbackgroundcolor(palette.window_content)
+            search.settextcolor(palette.text)
+            navigation.setbackgroundcolor(palette.surface)
+            content.setbackgroundcolor(palette.window_content)
+            path_label.settextcolor(palette.text)
+            status.settextcolor(palette.muted)
+            for button in (back, forward, up, refresh):
+                button.setbackgroundcolor(palette.surface)
+                button.settextcolor(palette.text)
+            for label in nav_labels:
+                label.settextcolor(palette.text)
+            state["menu"].refresh_theme()
+            state["prompt"].refresh_theme()
+            state["open_with"].refresh_theme()
+            render()
+
         def close():
             state["closed"] = True
             state["scan_id"] += 1
             state["prompt"].hide()
             rows.close()
 
+        handle_event.refresh_theme = refresh_theme
         handle_event.close = close
         handle_event.set_context = lambda directory: load_directory(directory)
         handle_event.on_window_resize = lambda _width, _height: state["prompt"].reposition()

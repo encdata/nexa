@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from io import BytesIO
 from pathlib import Path
@@ -25,6 +26,11 @@ class Wallpaper:
         self.view.setdimensions(self.width, self.height)
         self._queue_image(prepared["image"])
 
+    def set_prepared(self, prepared):
+        self.source = prepared["source"]
+        self.size = prepared["size"]
+        self._queue_image(prepared["image"])
+
     def resize(self, width, height):
         width, height = max(1, round(width)), max(1, round(height))
         if (width, height) != (self.width, self.height):
@@ -47,6 +53,8 @@ class Wallpaper:
         with self._state_lock:
             self._generation += 1
             generation = self._generation
+            if self._image_future is not None:
+                self._image_future.cancel()
             self._image_future = self._executor.submit(self._send_image, generation, image)
 
     def _render_and_send(self, generation, size):
@@ -98,8 +106,11 @@ def _render(source, size):
     return encoded.getvalue()
 
 
-def load(width, height, density):
-    path = Path(__file__).parent.parent / "assets" / "wallpapers" / "windows-11-bloom.jpg"
+def load(width, height, density, path=None):
+    if path is None:
+        path = Path(__file__).parent.parent / "assets" / "wallpapers" / "windows-11-bloom.jpg"
+    else:
+        path = Path(os.path.expanduser(path))
     with Image.open(path) as source:
         image = source.convert("RGB")
     size = (max(1, round(width * density)), max(1, round(height * density)))
