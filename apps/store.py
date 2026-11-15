@@ -36,19 +36,6 @@ class AppStoreApp:
         force_ltr(self.root)
         self.root.setbackgroundcolor(palette.window_content)
 
-        header = tg.LinearLayout(activity, self.root, vertical=False)
-        header.setdimensions(tg.View.MATCH_PARENT, 52)
-        header.setlinearlayoutparams(0)
-        logo = tg.ImageView(activity, header)
-        logo.setdimensions(28, 28)
-        logo.setimage(load("apps"))
-        logo.setmargin(10, "left")
-        logo.setmargin(8, "right")
-        logo.setmargin(12, "top")
-        logo.setlinearlayoutparams(0)
-        self.title = self._text(header, "Nexa Store", 0, 52, 20, weight=1)
-        self._button(header, "refresh", "refresh", 76)
-
         tabs = tg.LinearLayout(activity, self.root, vertical=False)
         tabs.setdimensions(tg.View.MATCH_PARENT, 44)
         tabs.setlinearlayoutparams(0)
@@ -57,24 +44,35 @@ class AppStoreApp:
             for name, label in (("discover", "discover"),
                                 ("installed", "installed"), ("sources", "sources"))
         }
+        self._button(tabs, "refresh", "refresh", 68)
 
-        self.search = tg.EditText(activity, "", self.root, singleline=True,
+        self.search_frame = tg.LinearLayout(activity, self.root, vertical=False)
+        self.search_frame.setdimensions(tg.View.MATCH_PARENT, 42)
+        self.search_frame.setlinearlayoutparams(0)
+        self.search_frame.setmargin(8, "left")
+        self.search_frame.setmargin(8, "right")
+        self.search_frame.setmargin(4, "top")
+        self.search_frame.setmargin(4, "bottom")
+        self.search_frame.setbackgroundcolor(palette.surface)
+        search_icon = tg.ImageView(activity, self.search_frame)
+        search_icon.setdimensions(20, 20)
+        search_icon.setimage(load("search"))
+        search_icon.setmargin(10, "left")
+        search_icon.setmargin(8, "right")
+        search_icon.setmargin(11, "top")
+        self.search = tg.EditText(activity, "", self.search_frame, singleline=True,
                                   line=False, inputtype="text")
-        self.search.setdimensions(tg.View.MATCH_PARENT, 42)
-        self.search.setlinearlayoutparams(0)
-        self.search.setmargin(8, "left")
-        self.search.setmargin(8, "right")
-        self.search.setmargin(3, "top")
-        self.search.setmargin(3, "bottom")
-        self.search.setbackgroundcolor(palette.surface)
+        self.search.setdimensions(0, 42)
+        self.search.setlinearlayoutparams(1)
         self.search.settextcolor(palette.text)
         self.search.settextsize(14)
         self.search.sendtextevent(True)
 
-        self.status = self._text(self.root, "loading repositories…", tg.View.MATCH_PARENT, 34, 11)
-        self.status.setmargin(8, "left")
-        self.status.setmargin(8, "right")
+        self.status = self._text(self.root, "", tg.View.MATCH_PARENT, 30, 11)
+        self.status.setmargin(12, "left")
+        self.status.setmargin(12, "right")
         self.status.settextcolor(palette.muted)
+        self.status.setvisibility(tg.View.GONE)
         self.rows_scroll = tg.NestedScrollView(activity, self.root, fillviewport=True, nobar=True)
         self.rows_scroll.setheight(0)
         self.rows_scroll.setlinearlayoutparams(1)
@@ -119,6 +117,7 @@ class AppStoreApp:
 
     def _set_status(self, message):
         self.status.settext(message)
+        self.status.setvisibility(tg.View.VISIBLE if message else tg.View.GONE)
 
     def _run_background(self, message, operation, complete):
         if self.busy:
@@ -144,7 +143,7 @@ class AppStoreApp:
         else:
             self.catalogs = result["catalogs"]
             self.errors = result["errors"]
-        self._set_status("catalogs loaded" if not self.errors else "some catalogs could not load")
+        self._set_status("some repositories could not load" if self.errors else "")
         self._render()
 
     def _render(self):
@@ -155,83 +154,73 @@ class AppStoreApp:
         self.catalog_cards.clear()
         for name, button in self.tab_buttons.items():
             button.setbackgroundcolor(palette.accent if name == self.tab else palette.surface)
-        self.search.setvisibility(tg.View.VISIBLE if self.tab == "discover" else tg.View.GONE)
+        self.search_frame.setvisibility(tg.View.VISIBLE if self.tab == "discover" else tg.View.GONE)
         if self.tab == "sources":
-            self._add_intro("repositories", "choose where Nexa gets Python apps")
             self._render_sources()
             return
         if self.tab == "installed":
             self.installed = app_store.installed_apps()
-            self._add_intro("installed apps", f"{len(self.installed)} apps added to this Nexa desktop")
             self._render_installed()
             return
-        self._add_intro("discover apps", "small Python apps built for Nexa")
         self._render_discover()
 
-    def _add_intro(self, title, detail):
-        heading = self._text(self.rows, title, tg.View.MATCH_PARENT, 40, 20)
-        heading.setmargin(8, "left")
-        heading.setmargin(4, "top")
-        subheading = self._text(self.rows, detail, tg.View.MATCH_PARENT, 32, 12)
-        subheading.setmargin(8, "left")
-        subheading.setmargin(3, "bottom")
-        subheading.settextcolor(palette.muted)
-
     def _add_section(self, title):
-        label = self._text(self.rows, title, tg.View.MATCH_PARENT, 38, 14)
-        label.setmargin(8, "left")
+        label = self._text(self.rows, title, tg.View.MATCH_PARENT, 34, 13)
+        label.setmargin(10, "left")
+        label.setmargin(4, "top")
         label.settextcolor(palette.muted)
 
     def _add_card(self, name, version, description, source, action, action_label,
                   icon_name=None):
         card = tg.LinearLayout(self.activity, self.rows, vertical=True)
         card.setdimensions(tg.View.MATCH_PARENT, tg.View.WRAP_CONTENT)
-        card.setmargin(7, "left")
-        card.setmargin(7, "right")
-        card.setmargin(4, "top")
-        card.setmargin(4, "bottom")
+        card.setmargin(8, "left")
+        card.setmargin(8, "right")
+        card.setmargin(3, "top")
+        card.setmargin(3, "bottom")
         card.setbackgroundcolor(palette.surface)
         summary = tg.LinearLayout(self.activity, card, vertical=False)
-        summary.setdimensions(tg.View.MATCH_PARENT, 66)
+        summary.setdimensions(tg.View.MATCH_PARENT, 58)
         summary.setlinearlayoutparams(0)
         icon_view = tg.ImageView(self.activity, summary)
-        icon_view.setdimensions(42, 42)
+        icon_view.setdimensions(40, 40)
         icon_view.setimage(load(icon_name or "apps"))
-        icon_view.setmargin(12, "left")
-        icon_view.setmargin(10, "right")
-        icon_view.setmargin(12, "top")
+        icon_view.setmargin(10, "left")
+        icon_view.setmargin(9, "right")
+        icon_view.setmargin(9, "top")
         icon_view.setlinearlayoutparams(0)
         labels = tg.LinearLayout(self.activity, summary, vertical=True)
-        labels.setdimensions(0, 58)
+        labels.setdimensions(0, 54)
         labels.setlinearlayoutparams(1)
         labels.setmargin(2, "left")
-        heading = self._text(labels, name, tg.View.MATCH_PARENT, 34, 15)
-        version_label = self._text(labels, version, tg.View.MATCH_PARENT, 22, 11)
+        self._text(labels, name, tg.View.MATCH_PARENT, 31, 15)
+        version_label = self._text(labels, version, tg.View.MATCH_PARENT, 21, 11)
         version_label.settextcolor(palette.muted)
         if action:
-            button = self._button(summary, action_label, action, 104)
+            button = self._button(summary, action_label, action, 92)
             button.setbackgroundcolor(palette.accent)
         elif action_label:
-            state = self._text(summary, action_label, 112, 44, 11)
+            state = self._text(summary, action_label, 92, 44, 11)
             state.setgravity(1, 1)
             state.settextcolor(palette.muted)
         details = self._text(card, description or "Nexa app", tg.View.MATCH_PARENT,
                              tg.View.WRAP_CONTENT, 13)
-        details.setmargin(12, "left")
-        details.setmargin(5, "right")
+        details.setmargin(59, "left")
+        details.setmargin(8, "right")
         details.setmargin(3, "bottom")
         details.settextcolor(palette.muted)
-        origin = self._text(card, source, tg.View.MATCH_PARENT, 30, 11)
-        origin.setmargin(12, "left")
-        origin.setmargin(3, "bottom")
+        origin = self._text(card, source, tg.View.MATCH_PARENT, 22, 11)
+        origin.setmargin(59, "left")
+        origin.setmargin(2, "bottom")
         origin.settextcolor(palette.muted)
         return card
 
     def _render_discover(self):
         if self.errors:
-            self._add_section("repository errors")
+            self._add_section("repository issues")
             for error in self.errors:
-                self._add_card("catalog unavailable", "", error, "check repository settings", "", "")
+                self._add_card("catalog unavailable", "", error, "check repository settings",
+                               "refresh", "retry")
         found = set()
         for catalog in self.catalogs:
             self._add_section(catalog["repository"]["name"])
@@ -259,13 +248,13 @@ class AppStoreApp:
                 self.catalog_cards[(listing["repository"]["url"], listing["id"])] = card
         self._filter_catalog(self.search.gettext())
         if not found and not self.errors:
-            self._add_section("no apps in these repositories yet")
+            self._add_section("no apps available yet")
 
     def _render_installed(self):
         if not self.installed:
-            self._add_section("no store apps installed")
+            self._add_section("no store apps installed yet")
             return
-        self._add_section("installed apps")
+        self._add_section(f"{len(self.installed)} installed apps")
         for app_id, manifest in sorted(self.installed.items(), key=lambda item: item[1]["name"].casefold()):
             source = manifest.get("repository", {}).get("name", "local package")
             if self.services.get("app_is_running", lambda _app_id: False)(app_id):
@@ -283,7 +272,9 @@ class AppStoreApp:
             label = "Nexa official" if repo["official"] else repo["name"]
             action = None if repo["official"] else ("remove_repo", repo["url"])
             action_label = "official" if repo["official"] else "remove"
-            self._add_card(label, "", repo["url"], "HTTPS repository", action, action_label)
+            self._add_card(label, "", repo["url"],
+                           "official repository" if repo["official"] else "custom repository",
+                           action, action_label)
         controls = tg.LinearLayout(self.activity, self.rows, vertical=False)
         controls.setdimensions(tg.View.MATCH_PARENT, 48)
         self._button(controls, "add repository", "add_repo", 156)
