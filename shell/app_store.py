@@ -1,5 +1,4 @@
 import hashlib
-import io
 import json
 import os
 import re
@@ -7,7 +6,6 @@ import shutil
 import tempfile
 import urllib.parse
 import urllib.request
-import zipfile
 from pathlib import Path, PurePosixPath
 from nexapip import APP_API_VERSION
 
@@ -18,8 +16,9 @@ OFFICIAL_REPOSITORY = {
     "official": True,
 }
 API_VERSION = APP_API_VERSION
-MAX_BUNDLE_SIZE = 32 * 1024 * 1024
-MAX_UNPACKED_SIZE = 96 * 1024 * 1024
+MAX_FILE_SIZE = 16 * 1024 * 1024
+MAX_PACKAGE_SIZE = 96 * 1024 * 1024
+MAX_PACKAGE_FILES = 512
 APP_ID = re.compile(r"^[a-z][a-z0-9_.-]{1,63}$")
 DATA_ROOT = Path(os.path.expanduser("~/.local/share/nexa"))
 APP_ROOT = DATA_ROOT / "apps"
@@ -146,14 +145,26 @@ def _validate_catalog(catalog):
 def _validate_listing(app):
     if not isinstance(app, dict):
         raise ValueError("invalid app listing")
-    for key in ("id", "name", "version", "description", "download_url", "sha256"):
+    for key in ("id", "name", "version", "description", "package_url"):
         if not isinstance(app.get(key), str) or not app[key].strip():
             raise ValueError(f"app listing is missing {key}")
     if not APP_ID.fullmatch(app["id"]):
         raise ValueError("app id has invalid characters")
-    if not re.fullmatch(r"[0-9a-fA-F]{64}", app["sha256"]):
-        raise ValueError("app package has an invalid sha256")
-    _https_url(app["download_url"])
+    package_url = _https_url(app["package_url"])
+    parsed_url = urllib.parse.urlsplit(package_url)
+    if not parsed_url.path.endswith("/") or parsed_url.query or parsed_url.fragment:
+        raise ValueError("app package URL must point to an HTTPS folder")
+    files = app.get("files")
+    if not isinstance(files, dict) or not 1 <= len(files) <= MAX_PACKAGE_FILES:
+        raise ValueError("app listing has an invalid package file list")
+    for name, digest in files.items():
+        if (not isinstance(name, str) or not name or "\\" in name or "%" in name
+                or name.startswith("/") or any(part in ("", ".", "..") for part in name.split("/"))):
+            raise ValueError("app package contains an unsafe file path")
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", digest):
+            raise ValueError("app package has an invalid file checksum")
+    if "manifest.json" not in files or "LICENSE" not in files:
+        raise ValueError("app package listing must include its manifest and license")
     if type(app.get("api_version")) is not int or app["api_version"] != API_VERSION:
         raise ValueError(f"{app['name']} needs an unsupported Nexa app API")
 
@@ -209,43 +220,36 @@ def install_app(listing, reserved_ids=()):
     if previous and previous.get("repository", {}).get("url") != repo.get("url"):
         raise ValueError("remove this app before installing the same id from another repository")
 
-    request = urllib.request.Request(listing["download_url"], headers={"User-Agent": "Nexa-App-Store/1"})
-    with urllib.request.urlopen(request, timeout=30) as response:
-        _https_url(response.geturl())
-        archive = response.read(MAX_BUNDLE_SIZE + 1)
-    if not archive or len(archive) > MAX_BUNDLE_SIZE:
-        raise ValueError("app package is too large")
-    if hashlib.sha256(archive).hexdigest().lower() != listing["sha256"].lower():
-        raise ValueError("app package checksum doesn't match the catalog")
-
     APP_ROOT.mkdir(parents=True, exist_ok=True)
     stage = Path(tempfile.mkdtemp(prefix=f".{app_id}-", dir=APP_ROOT))
     destination = APP_ROOT / app_id
     backup = APP_ROOT / f".{app_id}-previous"
     try:
-        unpacked = 0
-        members = set()
-        with zipfile.ZipFile(io.BytesIO(archive)) as package:
-            for member in package.infolist():
-                path = PurePosixPath(member.filename)
-                mode = member.external_attr >> 16
-                if path.is_absolute() or ".." in path.parts or not path.parts:
-                    raise ValueError("app package contains an unsafe path")
-                if member.filename in members:
-                    raise ValueError("app package contains duplicate paths")
-                members.add(member.filename)
-                if (mode & 0o170000) == 0o120000:
-                    raise ValueError("app packages can't contain symbolic links")
-                unpacked += member.file_size
-                if unpacked > MAX_UNPACKED_SIZE:
-                    raise ValueError("unpacked app package is too large")
-                output = stage.joinpath(*path.parts)
-                if member.is_dir():
-                    output.mkdir(parents=True, exist_ok=True)
-                else:
-                    output.parent.mkdir(parents=True, exist_ok=True)
-                    with package.open(member) as source, output.open("wb") as target:
-                        shutil.copyfileobj(source, target)
+        total_size = 0
+        package_url = listing["package_url"]
+        for filename, expected_hash in listing["files"].items():
+            path = PurePosixPath(filename)
+            output = stage.joinpath(*path.parts)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            encoded_path = "/".join(urllib.parse.quote(part, safe="") for part in path.parts)
+            file_url = urllib.parse.urljoin(package_url, encoded_path)
+            request = urllib.request.Request(file_url, headers={"User-Agent": "Nexa-App-Store/1"})
+            digest = hashlib.sha256()
+            file_size = 0
+            with urllib.request.urlopen(request, timeout=30) as response, output.open("wb") as target:
+                _https_url(response.geturl())
+                while True:
+                    chunk = response.read(64 * 1024)
+                    if not chunk:
+                        break
+                    file_size += len(chunk)
+                    total_size += len(chunk)
+                    if file_size > MAX_FILE_SIZE or total_size > MAX_PACKAGE_SIZE:
+                        raise ValueError("app package is too large")
+                    digest.update(chunk)
+                    target.write(chunk)
+            if digest.hexdigest().lower() != expected_hash.lower():
+                raise ValueError(f"app package checksum doesn't match for {filename}")
 
         manifest_path = stage / "manifest.json"
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -274,10 +278,13 @@ def install_app(listing, reserved_ids=()):
         icon_path = (stage / icon).resolve()
         if not icon_path.is_relative_to(stage.resolve()) or not icon_path.is_file():
             raise ValueError("app icon is missing or unsafe")
+        package_hash = hashlib.sha256("".join(
+            f"{name}:{digest.lower()}\n" for name, digest in sorted(listing["files"].items())
+        ).encode("utf-8")).hexdigest()
         _atomic_json(stage / "source.json", {"name": repo.get("name", "repository"),
                                               "url": repo["url"],
                                               "official": bool(repo.get("official")),
-                                              "sha256": listing["sha256"].lower()})
+                                              "sha256": package_hash})
         if backup.exists():
             shutil.rmtree(backup)
         if destination.exists():
