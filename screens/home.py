@@ -1,0 +1,163 @@
+import os
+
+import nexapip as tg
+from time import monotonic, sleep
+
+from shell.desktop import Desktop
+from shell.taskbar import Taskbar
+from shell.window_manager import WindowManager
+from shell.pointer import Pointer
+from shell.text_direction import force_ltr
+from shell.wallpaper import add as add_wallpaper, load as load_wallpaper
+from shell.personalization import save as save_personalization, store_wallpaper
+from shell import palette
+
+
+class DesktopShell:
+    def __init__(self, activity, startup, parent, progress, show_progress):
+        self.activity = activity
+        self.apps = startup["apps"]
+        config = startup["configuration"]
+        self.screen_width = config["screenwidth"]
+        self.screen_height = config["screenheight"]
+        self.density = config["density"]
+        self.keyboard_hidden = config.get("keyboardHidden", True)
+        self.personalization = startup["personalization"]
+        self.next_wallpaper_resize_check = 0
+        self.rtl = False
+        self.root = tg.FrameLayout(activity, parent)
+        force_ltr(self.root)
+        self.root.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
+        self.root.setbackgroundcolor(palette.background)
+        self.root.sendtouchevent(True)
+        show_progress()
+        previous_size = None
+        root_size = (0, 0)
+        for _ in range(5):
+            measured_size = tuple(self.root.getdimensions())
+            if measured_size[0] > 0 and measured_size[1] > 0:
+                root_size = measured_size
+                if measured_size == previous_size:
+                    break
+            previous_size = measured_size
+            sleep(0.04)
+        root_width, root_height = root_size
+        if root_width > 0 and root_height > 0:
+            self.screen_width = round(root_width / self.density)
+            self.screen_height = round(root_height / self.density)
+        self.wallpaper = add_wallpaper(activity, self.root, startup["wallpaper"], self.density)
+        self.wallpaper.resize(self.screen_width, self.screen_height)
+        self.windows = WindowManager(activity, self.root, self.apps, self.screen_width, self.screen_height,
+                                     self.density, rtl=self.rtl)
+        self.windows.on_open_app = self.open_app
+        self.windows.personalization = self.personalization
+        self.windows.on_set_theme = self.set_theme
+        self.windows.on_set_wallpaper = self.set_wallpaper
+        self.desktop = Desktop(activity, self.root, self.apps, self.open_app,
+                               self.screen_width, self.screen_height, self.density,
+                               startup["positions"], startup["home_items"], progress)
+        self.windows.on_association_change = self.desktop.refresh_associated_icons
+        self.taskbar = Taskbar(activity, self.root, self.apps, self.open_app,
+                               self.windows.activate_from_taskbar,
+                               self.screen_width, self.screen_height, rtl=self.rtl,
+                               context_action=self._taskbar_context_action,
+                               window_context_actions=self.windows.taskbar_context_actions)
+        self.windows.on_active_change = self.taskbar.set_active_window
+        self.windows.on_close = self.taskbar.remove_window
+        self.pointer = Pointer(activity, self.root, self.density)
+        self.desktop.pointer = self.pointer
+        self.windows.pointer = self.pointer
+        self.preload_queue = [app_id for app_id, app in self.apps.items()
+                              if getattr(app, "preload_ui", False) and app_id != "settings"]
+        if "settings" in self.apps and getattr(self.apps["settings"], "preload_ui", False):
+            self.windows.prewarm_app("settings")
+
+    @property
+    def preloads_ready(self):
+        return not self.preload_queue and not any(
+            window.get("prewarming") for window in self.windows.windows.values())
+
+    def open_app(self, app_id, context=None):
+        window_id = self.windows.open_app(app_id, context)
+        if window_id is not None:
+            self.taskbar.add_window(window_id, self.apps[app_id], self.windows.windows[window_id]["title"])
+            self.taskbar.set_active_window(self.windows.active_window)
+
+    def set_theme(self, theme):
+        if theme not in ("dark", "light") or theme == self.personalization["theme"]:
+            return
+        self.personalization["theme"] = palette.set_theme(theme)
+        save_personalization(self.personalization)
+        self.root.setbackgroundcolor(palette.background)
+        self.windows.refresh_theme()
+        self.taskbar.refresh_theme()
+        self.desktop.refresh_theme()
+
+    def set_wallpaper(self, path):
+        if path:
+            path = os.path.abspath(os.path.expanduser(path))
+        prepared = load_wallpaper(self.screen_width, self.screen_height, self.density, path)
+        stored_path = store_wallpaper(path)
+        self.wallpaper.set_prepared(prepared)
+        self.personalization["wallpaper"] = stored_path
+        save_personalization(self.personalization)
+        self.activity.c.toast("wallpaper updated")
+
+    def _taskbar_context_action(self, window_id, action):
+        if window_id is not None:
+            self.windows.taskbar_window_action(window_id, action)
+        elif action == "show_desktop":
+            self.windows.toggle_show_desktop()
+        elif action == "open_task_manager" and "task_manager" in self.apps:
+            self.open_app("task_manager")
+        elif action == "open_settings" and "settings" in self.apps:
+            self.open_app("settings")
+
+    def handle_event(self, event):
+        if event.type == tg.Event.config:
+            width = event.value.get("screenwidth", self.screen_width)
+            height = event.value.get("screenheight", self.screen_height)
+            self._resize_screen(width, height)
+            return True
+        if (event.type == tg.Event.touch
+                and event.id == self.root.id
+                and event.value.get("action") == tg.Event.touch_down):
+            self.taskbar.dismiss_menu()
+            self.taskbar.dismiss_context_menu()
+        return (self.windows.handle_event(event)
+                or self.desktop.handle_event(event)
+                or self.taskbar.handle_event(event))
+
+    def tick(self):
+        self.wallpaper.tick()
+        self.desktop.tick()
+        now = monotonic()
+        if now >= self.next_wallpaper_resize_check:
+            self.next_wallpaper_resize_check = now + 0.3
+            config = self.activity.getconfiguration()
+            self.keyboard_hidden = config.get("keyboardHidden", self.keyboard_hidden)
+            self._resize_screen(config.get("screenwidth", self.screen_width),
+                                config.get("screenheight", self.screen_height))
+        self.windows.tick()
+        if (self.preload_queue and self.windows.active_window is None
+                and not any(window.get("prewarming")
+                            for window in self.windows.windows.values())):
+            self.windows.prewarm_app(self.preload_queue.pop(0))
+
+    def _resize_screen(self, width, height):
+        if (width, height) == (self.screen_width, self.screen_height):
+            return
+        self.screen_width, self.screen_height = width, height
+        self.wallpaper.resize(width, height)
+        self.windows.resize(width, height)
+        self.desktop.resize(width, height)
+        self.taskbar.resize(width, height)
+
+    def close(self):
+        self.desktop.close()
+        self.windows.shutdown()
+        self.wallpaper.close()
+
+
+def show(activity, startup, parent, progress, show_progress):
+    return DesktopShell(activity, startup, parent, progress, show_progress)

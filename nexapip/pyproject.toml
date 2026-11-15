@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nexapip"
+version = "0.1.6.post1"
+description = "Python bindings for Nexa Launcher"
+requires-python = ">=3.10"
+license = "LicenseRef-PolyForm-Shield-1.0.0"
+license-files = ["LICENSE"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["nexapip*"]
