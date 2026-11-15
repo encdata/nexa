@@ -48,6 +48,8 @@ class WindowManager:
         self.on_association_change = None
         self.on_set_theme = None
         self.on_set_wallpaper = None
+        self.on_refresh_apps = None
+        self.on_app_is_running = None
         self.personalization = None
         self.theme_revision = 0
         self.theme_refresh_pending = False
@@ -290,8 +292,13 @@ class WindowManager:
             {"apps": self.apps, "open_app": self.on_open_app or self.open_app,
              "association_changed": self.on_association_change,
              "personalization": self.personalization,
+             "theme": {name: getattr(palette, name) for name in (
+                 "background", "surface", "surface_light", "window_border",
+                 "window_content", "accent", "text", "muted", "current_theme")},
              "set_theme": self.on_set_theme,
-             "set_wallpaper": self.on_set_wallpaper})
+             "set_wallpaper": self.on_set_wallpaper,
+             "refresh_apps": self.on_refresh_apps,
+             "app_is_running": self.on_app_is_running})
 
     def _finish_build(self, window):
         future = window["build_future"]

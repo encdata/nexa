@@ -289,6 +289,41 @@ class Desktop:
                 icon["symbol"] = symbol
                 set_image(self.activity, icon["image"].id, load(symbol))
 
+    def sync_apps(self):
+        self.open_with.set_apps(self.apps)
+        current = {icon["key"]: icon_id for icon_id, icon in self.icons.items()
+                   if icon["context"] is None}
+        for app_id, icon_id in current.items():
+            app = self.apps.get(app_id)
+            icon = self.icons.get(icon_id)
+            if app is None:
+                self.icons.pop(icon_id, None)
+                self.icon_order.remove(icon_id)
+                self.positions.pop(app_id, None)
+                icon["view"].delete()
+                continue
+            if icon["label"] != app.name:
+                icon["label"] = app.name
+                set_text(self.activity, icon["caption"].id, app.name)
+            icon["symbol"] = app.icon
+            set_image(self.activity, icon["image"].id, load(app.icon))
+
+        additions = []
+        positions = []
+        occupied = [(icon["x"], icon["y"]) for icon in self.icons.values()]
+        for app_id, app in self.apps.items():
+            if app_id in current:
+                continue
+            grid_index = self.positions.get(app_id)
+            if not isinstance(grid_index, int) or isinstance(grid_index, bool):
+                grid_index = self._grid_index_for(*self._next_icon_position(occupied))
+            position = self._initial_position(grid_index, set(occupied))
+            occupied.append(position)
+            additions.append((app_id, app.icon, app.name, app_id, None, None, grid_index))
+            positions.append(position)
+        self._add_icons(additions, positions)
+        self._resize(self.screen_width, self.screen_height, force=True)
+
     def _hide_context_menu(self):
         self.context_menu.hide()
         self.context_icon = None

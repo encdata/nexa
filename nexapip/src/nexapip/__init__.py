@@ -3,15 +3,16 @@
 You don't need to include all the submodules, all needed classes are automatically included in the package scope upon
 importing the package. """
 
-__version__ = "0.1.6.post1"
+__version__ = "0.2.0"
 
-__all__ = ['Activity', 'Buffer', 'Button', 'Checkbox', 'CompoundButton', 'Connection', 'EditText', 'Event',
+__all__ = ['APP_API_VERSION', 'Activity', 'App', 'Buffer', 'Button', 'Checkbox', 'CompoundButton', 'Connection', 'EditText', 'Event',
            'FrameLayout', "GridLayout", 'HorizontalScrollView', 'ImageView', 'LinearLayout', 'NestedScrollView',
-           'Notification', 'ProgressBar', 'RadioButton', 'RadioGroup', 'RemoteViews', 'Space', 'Spinner',
+           'NexaApp', 'Notification', 'ProgressBar', 'RadioButton', 'RadioGroup', 'RemoteViews', 'Space', 'Spinner',
            'SwipeRefreshLayout', 'Switch', 'TabLayout', 'Task', 'TextView', 'ToggleButton', 'View', 'ViewGroup',
            'WebView']
 
 from nexapip.activity import Activity
+from nexapip.application import APP_API_VERSION, NexaApp
 from nexapip.buffer import Buffer
 from nexapip.button import Button
 from nexapip.checkbox import Checkbox
@@ -41,3 +42,5 @@ from nexapip.togglebutton import ToggleButton
 from nexapip.view import View
 from nexapip.viewgroup import ViewGroup
 from nexapip.webview import WebView
+
+App = NexaApp

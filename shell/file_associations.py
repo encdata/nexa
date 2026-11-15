@@ -45,6 +45,21 @@ def icon_for(path, apps, fallback=None):
 def set(path, app_id):
     associations = _load()
     associations[_key(path)] = app_id
+    _save(associations)
+
+
+def remove_app(app_id):
+    associations = _load()
+    updated = {extension: target for extension, target in associations.items()
+               if target != app_id}
+    if updated == associations:
+        return
+    associations.clear()
+    associations.update(updated)
+    _save(associations)
+
+
+def _save(associations):
     directory = os.path.dirname(ASSOCIATIONS_PATH)
     temporary_path = None
     try:

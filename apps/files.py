@@ -458,6 +458,7 @@ class FilesApp:
         handle_event.refresh_theme = refresh_theme
         handle_event.close = close
         handle_event.set_context = lambda directory: load_directory(directory)
+        handle_event.refresh_apps = lambda installed_apps: state["open_with"].set_apps(installed_apps)
         handle_event.on_window_resize = lambda _width, _height: state["prompt"].reposition()
         return handle_event
 

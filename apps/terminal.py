@@ -33,6 +33,10 @@ class TerminalApp:
             return f"{directory} - {self.name}"
         return self.name
 
+    def refresh_apps(self, apps):
+        if self.open_with is not None:
+            self.open_with.set_apps(apps)
+
     def build_with_services(self, activity, parent, context, services):
         return self.build(activity, parent, context, services)
 

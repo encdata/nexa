@@ -6,14 +6,20 @@ from shell.context_menu import ContextMenu
 
 class OpenWithChooser:
     def __init__(self, activity, parent, bounds, apps, open_app, on_association_change=None):
+        self.activity = activity
         self.apps = apps
         self.open_app = open_app
         self.on_association_change = on_association_change
-        self.actions = [app_id for app_id, app in apps.items()
+        self.parent = parent
+        self.bounds = bounds
+        self._create_menu()
+
+    def _create_menu(self):
+        self.actions = [app_id for app_id, app in self.apps.items()
                         if callable(getattr(app, "supports_file", None))]
-        labels = {app_id: apps[app_id].name for app_id in self.actions}
+        labels = {app_id: self.apps[app_id].name for app_id in self.actions}
         self.script_handlers = {}
-        if "terminal" in apps:
+        if "terminal" in self.apps:
             self.script_handlers = {
                 "run_sh": ("sh", lambda path: path.lower().endswith(".sh")),
                 "run_python": ("python", lambda path: path.lower().endswith(".py")),
@@ -21,7 +27,14 @@ class OpenWithChooser:
             labels.update({key: interpreter for key, (interpreter, _supports) in self.script_handlers.items()})
             self.actions.extend(self.script_handlers)
         self.actions.append("cancel")
-        self.menu = ContextMenu(activity, parent, bounds, actions=self.actions, labels=labels)
+        self.menu = ContextMenu(self.activity, self.parent, self.bounds,
+                                actions=self.actions, labels=labels)
+
+    def set_apps(self, apps):
+        self.menu.hide()
+        self.menu.view.delete()
+        self.apps = apps
+        self._create_menu()
 
     @property
     def visible(self):

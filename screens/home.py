@@ -1,4 +1,5 @@
 import os
+from apps import discover
 
 import nexapip as tg
 from time import monotonic, sleep
@@ -10,7 +11,9 @@ from shell.pointer import Pointer
 from shell.text_direction import force_ltr
 from shell.wallpaper import add as add_wallpaper, load as load_wallpaper
 from shell.personalization import save as save_personalization, store_wallpaper
+from shell.icons import load as load_icon
 from shell import palette
+from shell import file_actions
 
 
 class DesktopShell:
@@ -53,6 +56,8 @@ class DesktopShell:
         self.windows.personalization = self.personalization
         self.windows.on_set_theme = self.set_theme
         self.windows.on_set_wallpaper = self.set_wallpaper
+        self.windows.on_refresh_apps = self.refresh_apps
+        self.windows.on_app_is_running = self.app_is_running
         self.desktop = Desktop(activity, self.root, self.apps, self.open_app,
                                self.screen_width, self.screen_height, self.density,
                                startup["positions"], startup["home_items"], progress)
@@ -82,6 +87,31 @@ class DesktopShell:
         if window_id is not None:
             self.taskbar.add_window(window_id, self.apps[app_id], self.windows.windows[window_id]["title"])
             self.taskbar.set_active_window(self.windows.active_window)
+
+    def app_is_running(self, app_id):
+        return any(window["app"].app_id == app_id
+                   for window in (*self.windows.windows.values(), *self.windows.preloaded.values()))
+
+    def refresh_apps(self, callback=None):
+        def refreshed(apps, error):
+            if error is None:
+                load_icon.cache_clear()
+                self.apps.clear()
+                self.apps.update(apps)
+                self.windows.apps = self.apps
+                self.desktop.apps = self.apps
+                self.taskbar.set_apps(self.apps)
+                self.desktop.sync_apps()
+                self.desktop.refresh_associated_icons()
+                for window in (*self.windows.windows.values(), *self.windows.preloaded.values()):
+                    handler = window.get("event_handler")
+                    refresh_apps = getattr(handler, "refresh_apps", None)
+                    if refresh_apps is not None:
+                        refresh_apps(self.apps)
+            if callback is not None:
+                callback(error)
+
+        file_actions.run_background(discover, refreshed)
 
     def set_theme(self, theme):
         if theme not in ("dark", "light") or theme == self.personalization["theme"]:

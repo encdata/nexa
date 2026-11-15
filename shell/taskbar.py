@@ -86,14 +86,9 @@ class Taskbar:
         scroll.setlinearlayoutparams(1)
         entries = tg.LinearLayout(activity, scroll)
         entries.setdimensions(tg.View.MATCH_PARENT, tg.View.WRAP_CONTENT)
-        sorted_apps = sorted(apps.values(), key=lambda app: app.name.casefold())
-        previous_letter = None
-        for app in sorted_apps:
-            letter = app.name[:1].upper()
-            if letter != previous_letter:
-                self._add_app_heading(entries, letter)
-                previous_letter = letter
-            self._add_app_entry(entries, app)
+        self.apps_container = entries
+        self.app_menu_roots = []
+        self._populate_apps(apps)
         self.context_menu = ContextMenu(
             activity, root,
             lambda: (self.screen_width, self.screen_height),
@@ -199,6 +194,7 @@ class Taskbar:
         heading.settextcolor(palette.muted)
         heading.setgravity(0, 1)
         self.menu_entries.append((heading, "heading"))
+        self.app_menu_roots.append(heading)
 
     def _add_app_entry(self, parent, app):
         button = tg.LinearLayout(self.activity, parent, vertical=False)
@@ -212,6 +208,7 @@ class Taskbar:
         self.menu_entries.append((button, "entry"))
         button.sendclickevent(True)
         self.buttons[button.id] = ("app", app.app_id)
+        self.app_menu_roots.append(button)
 
         def add_icon():
             image = tg.ImageView(self.activity, button)
@@ -239,6 +236,23 @@ class Taskbar:
         else:
             add_icon()
             add_label()
+
+    def _populate_apps(self, apps):
+        previous_letter = None
+        for app in sorted(apps.values(), key=lambda item: item.name.casefold()):
+            letter = app.name[:1].upper()
+            if letter != previous_letter:
+                self._add_app_heading(self.apps_container, letter)
+                previous_letter = letter
+            self._add_app_entry(self.apps_container, app)
+
+    def set_apps(self, apps):
+        for view in self.app_menu_roots:
+            self.buttons.pop(view.id, None)
+            view.delete()
+        self.app_menu_roots.clear()
+        self.menu_entries.clear()
+        self._populate_apps(apps)
 
     def add_window(self, window_id, app, title=None):
         button = tg.LinearLayout(self.activity, self.window_list, vertical=False)
