@@ -284,7 +284,8 @@ class AppStoreApp:
             self.pending_install = listing
             self._set_status("custom Python apps run as you, with access to Termux files and commands")
             width, height = (round(size / self.density) for size in self.root.getdimensions())
-            self.confirm_menu.show(("install", "cancel"), (width - self.confirm_menu.width) // 2,
+            self.confirm_menu.show(("install", "cancel"),
+                                   (width - self.confirm_menu.width) // 2,
                                    height // 2, self._confirm_install)
             return
         self._install_confirmed(listing)
@@ -342,7 +343,8 @@ class AppStoreApp:
         width, height = (round(size / self.density) for size in self.root.getdimensions())
         self.confirm_menu.show(
             ("remove", "cancel"),
-            ((width - self.confirm_menu.width) // 2, height // 2),
+            (width - self.confirm_menu.width) // 2,
+            height // 2,
             self._confirm_remove)
 
     def _confirm_remove(self, action):
