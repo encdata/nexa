@@ -17,6 +17,7 @@ class NexaConnection(Connection):
         self._Connection__main_lock = RLock()
         self._Connection__event_lock = RLock()
         self._Connection__request_executor = None
+        self._Connection__closed = False
         self._events = Queue()
         self._event_error = None
         self._event_finished = False

@@ -44,6 +44,7 @@ class Connection:
         self.__main_lock = RLock()
         self.__event_lock = RLock()
         self._Connection__request_executor = None
+        self._Connection__closed = False
 
         adrMain = ''.join(choice(ascii_letters + digits) for i in range(50))
         adrEvent = ''.join(choice(ascii_letters + digits) for i in range(50))
@@ -145,6 +146,7 @@ class Connection:
 
         The connection is automatically closed when the program exits, but it's good practice to close the connection
         yourself when you don't need it anymore or use a "with" statement."""
+        self._Connection__closed = True
         executor = self._Connection__request_executor
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -158,9 +160,11 @@ class Connection:
         self.close()
         return False
 
-    def send_msg(self, msg: Union[str, dict]):
-        """Send a message to the main socket.
-        You should only need to call this yourself if you want to use methods not yet implemented in the library."""
+    def send_msg(self, msg: Union[str, dict]) -> Future:
+        """queue a no-reply message without waiting for the loader to receive it."""
+        return self.send_msg_async(msg)
+
+    def _send_msg(self, msg: Union[str, dict]):
         with self.__main_lock:
             if type(msg) is dict:
                 msg = dumps(msg)
@@ -174,25 +178,39 @@ class Connection:
     def send_read_msg(self, msg: Union[str, dict]):
         """Send a message to the main socket and read a message afterwards.
         You should only need to call this yourself if you want to use methods not yet implemented in the library."""
+        return self.send_read_msg_async(msg).result()
+
+    def _send_read_msg(self, msg: Union[str, dict]):
         with self.__main_lock:
-            self.send_msg(msg)
+            self._send_msg(msg)
             return self.__read_msg()
 
     def send_msg_async(self, msg: Union[str, dict]) -> Future:
-        """send a no-reply message on the connection worker and return its future."""
-        return self._submit_request(self.send_msg, msg)
+        """queue a no-reply message and return its future."""
+        future = self._submit_request(self._send_msg, msg)
+        future.add_done_callback(self._report_async_error)
+        return future
 
     def send_read_msg_async(self, msg: Union[str, dict]) -> Future:
-        """send a request and read its reply without blocking the caller."""
-        return self._submit_request(self.send_read_msg, msg)
+        """queue a request and read its reply without blocking the caller."""
+        return self._submit_request(self._send_read_msg, msg)
 
     def _submit_request(self, method, msg) -> Future:
         with self.__main_lock:
+            if self._Connection__closed:
+                raise RuntimeError("Nexa connection is closed")
             executor = self._Connection__request_executor
             if executor is None:
                 executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nexapip-rpc")
                 self._Connection__request_executor = executor
             return executor.submit(method, msg)
+
+    def _report_async_error(self, future):
+        if future.cancelled() or self._Connection__closed:
+            return
+        error = future.exception()
+        if error is not None:
+            print(f"nexapip: queued message failed: {error}")
 
     def turnscreenon(self):
         """Turns the screen on."""
