@@ -44,6 +44,8 @@ class ReusableObject:
             "checkbox": tg.Checkbox,
             "edit": tg.EditText,
             "frame": tg.FrameLayout,
+            "flow": tg.View,
+            "grid": tg.GridLayout,
             "horizontal_scroll": tg.HorizontalScrollView,
             "image": tg.ImageView,
             "linear": tg.LinearLayout,

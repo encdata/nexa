@@ -14,6 +14,8 @@ _VIEW_CLASSES = {
     "slider": tg.View,
     "scroll": tg.NestedScrollView,
     "horizontal_scroll": tg.HorizontalScrollView,
+    "flow": tg.View,
+    "grid": tg.GridLayout,
     "text": tg.TextView,
 }
 _TEXT_GRAVITY = {
@@ -29,6 +31,11 @@ _TEXT_GRAVITY = {
 }
 _LAYOUT_ALIGNMENTS = {"center", "start", "end", "top", "bottom",
                       "center_vertical", "center_horizontal", "fill"}
+_FLEX_ALIGNMENT = {"start", "center", "end", "stretch"}
+_FLEX_JUSTIFY = {"start", "center", "end", "space_between", "space_around",
+                 "space_evenly"}
+_VIEW_STYLE_PROPERTIES = {"background", "gradient", "radius", "border", "shadow",
+                         "shadowColor", "clipToOutline"}
 _INPUT_TYPES = {"text", "textMultiLine", "phone", "date", "time", "datetime", "number",
                 "numberDecimal", "numberPassword", "numberSigned", "numberDecimalSigned",
                 "textEmailAddress", "textPassword"}
@@ -113,25 +120,45 @@ def list_view(items=(), **properties):
     return _node("list", items=list(items), **properties)
 
 
-def grid(children, columns, gap=0, **properties):
+def flow(*children, gap=0, row_gap=None, justify="start", align_items="start",
+         **properties):
+    return _node("flow", children, gap=gap,
+                 row_gap=gap if row_gap is None else row_gap,
+                 justify=justify, align_items=align_items, **properties)
+
+
+def grid(children, columns, gap=0, row_gap=None, **properties):
     children = list(children)
     if columns < 1:
         raise ValueError("grid columns must be positive")
-    rows = []
-    for offset in range(0, len(children), columns):
-        cells = children[offset:offset + columns]
-        cells = [dict(cell, width=0, weight=1) if isinstance(cell, dict) else cell
-                 for cell in cells]
-        cells.extend({"type": "frame", "width": 0, "weight": 1}
-                     for _ in range(columns - len(cells)))
-        rows.append(row(*cells, width="MATCH_PARENT", height="WRAP_CONTENT",
-                        weight=0, gap=gap))
-    return column(*rows, **properties)
+    row_gap = gap if row_gap is None else row_gap
+    cells = []
+    for index, child in enumerate(children):
+        if not isinstance(child, dict):
+            raise TypeError("grid items must be layout nodes")
+        child = dict(child)
+        child.setdefault("row", index // columns)
+        child.setdefault("column", index % columns)
+        child["rowSpan"] = child.pop("row_span", child.get("rowSpan", 1))
+        child["columnSpan"] = child.pop("column_span", child.get("columnSpan", 1))
+        child.setdefault("width", 0)
+        child.setdefault("height", "WRAP_CONTENT")
+        child.setdefault("columnWeight", 1)
+        margins = dict(child.get("margins", {}))
+        for side, amount in (("left", gap / 2), ("right", gap / 2),
+                             ("top", row_gap / 2), ("bottom", row_gap / 2)):
+            margins[side] = margins.get(side, 0) + amount
+        child["margins"] = margins
+        cells.append(child)
+    properties.setdefault("width", "MATCH_PARENT")
+    properties.setdefault("height", "WRAP_CONTENT")
+    return _node("grid", cells, columns=columns, **properties)
 
 
 class Layout(dict):
     def __init__(self, activity, views, callbacks, long_clicks, text_events,
-                 selection_events, progress_events, states, all_views=None):
+                 selection_events, progress_events, states, all_views=None,
+                 view_styles=None):
         super().__init__(views)
         self.activity = activity
         self._keys_by_id = {view.id: key for key, view in views.items()}
@@ -143,6 +170,7 @@ class Layout(dict):
         self._selection_events = selection_events
         self._progress_events = progress_events
         self._states = states
+        self._view_styles = view_styles or {}
 
     def key_for(self, event_or_id):
         view_id = getattr(event_or_id, "id", event_or_id)
@@ -241,8 +269,11 @@ class Layout(dict):
                 view.settextsize(value)
             elif name == "textColor":
                 view.settextcolor(value)
-            elif name == "background":
-                view.setbackgroundcolor(value)
+            elif name in _VIEW_STYLE_PROPERTIES:
+                style = self._view_styles.setdefault(key, {})
+                _merge_style(style, name, value)
+                _validate_view_style(style)
+                _send_view_style(self.activity, view.id, style)
             elif name == "image":
                 view.setimage(value)
             elif name == "visibility":
@@ -290,6 +321,29 @@ class Layout(dict):
             else:
                 raise ValueError(f"unsupported layout update property: {name}")
 
+    def animate(self, key, properties, duration=220, delay=0, easing="ease",
+                repeat=0, reverse=False):
+        if key not in self:
+            raise KeyError(f"unknown layout key: {key}")
+        if not isinstance(properties, dict) or not properties:
+            raise ValueError("animation properties must be a non-empty dictionary")
+        allowed = {"alpha", "x", "y", "translationX", "translationY", "scaleX",
+                   "scaleY", "rotation", "rotationX", "rotationY", "elevation",
+                   "radius", "background"}
+        unknown = set(properties) - allowed
+        if unknown:
+            raise ValueError(f"unsupported animation properties: {', '.join(sorted(unknown))}")
+        easing = {"ease-in": "ease_in", "ease-out": "ease_out",
+                  "ease-in-out": "ease_in_out"}.get(easing, easing)
+        options = {"properties": properties, "duration": duration, "delay": delay,
+                   "easing": easing, "repeat": repeat, "reverse": reverse}
+        self.activity.c.send_msg({"method": "animateView", "params": {
+            "aid": self.activity.aid, "id": self[key].id, "options": options,
+        }})
+
+    def transition(self, key, duration=220, easing="ease", **properties):
+        self.animate(key, properties, duration=duration, easing=easing)
+
     def set_state(self, key, state):
         try:
             properties = self._states[key][state]
@@ -329,6 +383,7 @@ def _set_padding(activity, view, padding):
 
 
 def _set_control_properties(view, properties):
+    style = {}
     for name, value in properties.items():
         if name in ("width", "height"):
             getattr(view, f"set{name}")(_dimension(value))
@@ -343,8 +398,8 @@ def _set_control_properties(view, properties):
             if not isinstance(value, (int, dict)):
                 raise TypeError("padding must be an integer or direction map")
             _set_padding(view.a, view, value)
-        elif name == "background":
-            view.setbackgroundcolor(value)
+        elif name in _VIEW_STYLE_PROPERTIES:
+            style[name] = value
         elif name == "text":
             view.settext(value)
         elif name == "textSize":
@@ -378,6 +433,45 @@ def _set_control_properties(view, properties):
             }})
         else:
             raise ValueError(f"unsupported control property: {name}")
+    if style:
+        _validate_view_style(style)
+        _send_view_style(view.a, view.id, style)
+
+
+def _validate_view_style(node):
+    for name in ("radius", "shadow"):
+        if name in node and (not isinstance(node[name], (int, float)) or node[name] < 0):
+            raise ValueError(f"{name} must be a non-negative number")
+    if "border" in node:
+        border = node["border"]
+        if not isinstance(border, dict) or not isinstance(border.get("color"), int):
+            raise TypeError("border must be a map with an integer color")
+        width = border.get("width", 1)
+        if not isinstance(width, (int, float)) or width < 0:
+            raise ValueError("border width must be a non-negative number")
+    if "gradient" in node:
+        gradient = node["gradient"]
+        if not isinstance(gradient, dict):
+            raise TypeError("gradient must be a map")
+        colors = gradient.get("colors")
+        if not isinstance(colors, (list, tuple)) or len(colors) < 2 or any(
+                not isinstance(color, int) for color in colors):
+            raise ValueError("gradient colors must contain at least two integer colors")
+        orientation = gradient.get("orientation", "top_bottom")
+        if orientation not in {"top_bottom", "top_right_bottom_left", "right_left",
+                               "bottom_right_top_left", "bottom_top", "bottom_left_top_right",
+                               "left_right", "top_left_bottom_right"}:
+            raise ValueError(f"unsupported gradient orientation: {orientation}")
+    if "shadowColor" in node and not isinstance(node["shadowColor"], int):
+        raise TypeError("shadowColor must be an integer color")
+    if "clipToOutline" in node and not isinstance(node["clipToOutline"], bool):
+        raise TypeError("clipToOutline must be a boolean")
+
+
+def _send_view_style(activity, view_id, style):
+    activity.c.send_msg({"method": "setViewStyle", "params": {
+        "aid": activity.aid, "id": view_id, "style": style,
+    }})
 
 
 def _with_spacing(children, gap, vertical, justify):
@@ -516,6 +610,27 @@ def _flatten(node, parent_index, parent_id, styles, specifications, keys, paddin
                         if isinstance(child, dict) else child for child in children]
         if gap or justify != "start":
             children = _with_spacing(children, gap, vertical, justify)
+    elif view_type == "flow":
+        justify = node.pop("justify", "start").replace("-", "_")
+        justify = {"flex_start": "start", "flex_end": "end"}.get(justify, justify)
+        align_items = node.pop("align_items", "start").replace("flex-", "")
+        gap = node.pop("gap", 0)
+        row_gap = node.pop("row_gap", gap)
+        if justify not in _FLEX_JUSTIFY:
+            raise ValueError(f"unsupported flow justification: {justify}")
+        if align_items not in _FLEX_ALIGNMENT:
+            raise ValueError(f"unsupported flow alignment: {align_items}")
+        if not isinstance(gap, (int, float)) or gap < 0:
+            raise ValueError("flow gap must be a non-negative number")
+        if not isinstance(row_gap, (int, float)) or row_gap < 0:
+            raise ValueError("flow row gap must be a non-negative number")
+        node.update(type="flow", gap=gap, rowGap=row_gap,
+                    justify=justify, alignItems=align_items)
+    elif view_type == "grid":
+        columns = node.get("columns")
+        if not isinstance(columns, int) or columns < 1:
+            raise ValueError("grid columns must be a positive integer")
+        node["type"] = "grid"
     elif view_type == "stack":
         node["type"] = "frame"
     elif view_type == "button":
@@ -532,7 +647,8 @@ def _flatten(node, parent_index, parent_id, styles, specifications, keys, paddin
         raise ValueError("fill and wrap are dimensions; use them for width or height")
     elif view_type not in _VIEW_CLASSES:
         raise ValueError(f"unsupported layout view type: {view_type}")
-    if children and node["type"] not in ("frame", "linear", "scroll", "horizontal_scroll"):
+    if children and node["type"] not in (
+            "frame", "linear", "scroll", "horizontal_scroll", "flow", "grid"):
         raise ValueError(f"{view_type} views cannot contain layout children")
 
     if "align" in node and node["align"] not in _LAYOUT_ALIGNMENTS:
@@ -544,6 +660,19 @@ def _flatten(node, parent_index, parent_id, styles, specifications, keys, paddin
 
     if "flex" in node:
         node["weight"] = node.pop("flex")
+    if parent_index is not None and specifications[parent_index]["type"] == "grid":
+        for name, default in (("row", 0), ("column", 0), ("rowSpan", 1),
+                              ("columnSpan", 1)):
+            value = node.setdefault(name, default)
+            if not isinstance(value, int) or value < 0 or (name.endswith("Span") and value < 1):
+                raise ValueError(f"grid {name} must be a non-negative position or positive span")
+        weight = node.get("columnWeight", 1)
+        if not isinstance(weight, (int, float)) or weight < 0:
+            raise ValueError("grid columnWeight must be non-negative")
+    if parent_index is not None and specifications[parent_index]["type"] == "flow":
+        grow = node.get("weight", 0)
+        if not isinstance(grow, (int, float)) or grow < 0:
+            raise ValueError("flow flex weight must be non-negative")
     for dimension in ("width", "height"):
         if node.get(dimension) == "fill":
             node[dimension] = "MATCH_PARENT"
@@ -555,6 +684,7 @@ def _flatten(node, parent_index, parent_id, styles, specifications, keys, paddin
         if not isinstance(value, (int, dict)):
             raise TypeError("padding must be an integer or direction map")
         padding.append((len(specifications), value))
+    _validate_view_style(node)
     scale_type = node.pop("scaleType", None)
     node.pop("style", None)
     node.pop("children", None)
@@ -615,6 +745,7 @@ def _apply_padding(activity, view_id, padding):
 
 
 def _apply_view_properties(activity, view_id, properties):
+    style = {}
     for name, value in properties.items():
         if name == "padding":
             _set_padding(activity, tg.View(activity, view_id), value)
@@ -622,6 +753,25 @@ def _apply_view_properties(activity, view_id, properties):
             activity.c.send_msg({"method": "setImageScaleType", "params": {
                 "aid": activity.aid, "id": view_id, "scaleType": value,
             }})
+        elif name in _VIEW_STYLE_PROPERTIES:
+            style[name] = value
+    if style:
+        _validate_view_style(style)
+        _send_view_style(activity, view_id, style)
+
+
+def _merge_style(target, name, value):
+    if name == "background":
+        target.pop("gradient", None)
+    elif name == "gradient":
+        target.pop("background", None)
+    target[name] = value
+
+
+def _styles_by_key(specifications, keys):
+    return {key: {name: specifications[index][name]
+                  for name in _VIEW_STYLE_PROPERTIES if name in specifications[index]}
+            for key, index in keys.items()}
 
 
 def _compile_layout(layout, styles, parent_id):
@@ -659,6 +809,7 @@ class LayoutTemplate:
         self._selection_events = selection_events
         self._progress_events = progress_events
         self._view_names = []
+        self._view_styles = _styles_by_key(specifications, self._keys)
         reserved = set(self._keys)
         for index, specification in enumerate(specifications):
             key = f"__nexa_view_{index}"
@@ -681,7 +832,7 @@ class LayoutTemplate:
             if dimensions is not None:
                 values["width"], values["height"] = dimensions
             local = {name: values.pop(name) for name in tuple(values)
-                     if name in ("padding", "scaleType")}
+                     if name in ("padding", "scaleType", *_VIEW_STYLE_PROPERTIES)}
             translated[self._view_names[index]] = values
             if local:
                 instance_properties[index] = local
@@ -714,7 +865,15 @@ class LayoutTemplate:
                   if key is not None}
         result = Layout(self.activity, views, click_handlers, long_click_handlers,
                         text_handlers, selection_handlers, progress_handlers, states,
-                        all_views)
+                        all_views, {key: dict(self._view_styles.get(key, {}))
+                                    for key in views})
+        for index, name in enumerate(self._view_names):
+            key = next((key for key, view_index in self._keys.items()
+                        if view_index == index), None)
+            if key is not None and index in instance_properties:
+                for name, value in instance_properties[index].items():
+                    if name in _VIEW_STYLE_PROPERTIES:
+                        _merge_style(result._view_styles[key], name, value)
         for _index, key, _values, initial in self._states:
             if key is not None and initial is not None:
                 result.set_state(key, initial)
@@ -794,7 +953,7 @@ def create_layout(activity, parent, layout, styles=None):
                      if key is not None}
     result = Layout(activity, views, click_handlers, long_click_handlers,
                     text_handlers, selection_handlers, progress_handlers, states_by_key,
-                    all_views)
+                    all_views, _styles_by_key(specifications, keys))
     for _index, key, _state_values, initial_state in states:
         if key is not None and initial_state is not None:
             result.set_state(key, initial_state)
