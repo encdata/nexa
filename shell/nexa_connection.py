@@ -3,10 +3,13 @@ from socket import AF_UNIX, SOCK_STREAM, SO_PEERCRED, SOL_SOCKET, socket, timeou
 from string import ascii_letters, digits
 from struct import unpack
 from subprocess import DEVNULL, run
-from threading import RLock
+from queue import Empty, Queue
+from threading import RLock, Thread
 from os import getuid
 
 from nexapip.connection import Connection
+from nexapip.event import Event
+from nexapip import msg as tgmsg
 
 
 class NexaConnection(Connection):
@@ -14,6 +17,10 @@ class NexaConnection(Connection):
         self._Connection__main_lock = RLock()
         self._Connection__event_lock = RLock()
         self._Connection__request_executor = None
+        self._events = Queue()
+        self._event_error = None
+        self._event_finished = False
+        self._closed = False
 
         main_name = "nexa" + "".join(choice(ascii_letters + digits) for _ in range(46))
         event_name = "nexa" + "".join(choice(ascii_letters + digits) for _ in range(46))
@@ -55,6 +62,9 @@ class NexaConnection(Connection):
 
                 self._main = main
                 self._event = event
+                self._event_reader = Thread(target=self._read_events, daemon=True,
+                                            name="nexa-event-reader")
+                self._event_reader.start()
             except Exception as error:
                 if main is not None:
                     main.close()
@@ -63,3 +73,48 @@ class NexaConnection(Connection):
                 if isinstance(error, timeout):
                     raise RuntimeError("could not connect to Nexa Launcher") from error
                 raise
+
+    def _read_events(self):
+        try:
+            while not self._closed:
+                self._events.put(Event(tgmsg.read_msg(self._event)))
+        except (EOFError, OSError) as error:
+            if not self._closed:
+                self._event_error = error
+        except Exception as error:
+            self._event_error = error
+        finally:
+            self._event_finished = True
+            self._events.put(None)
+
+    def checkevent(self):
+        try:
+            event = self._events.get_nowait()
+        except Empty:
+            if self._event_finished:
+                self._raise_event_error()
+            return None
+        if event is None:
+            self._raise_event_error()
+        return event
+
+    def wait_event(self, timeout=None):
+        try:
+            event = self._events.get(timeout=timeout)
+        except Empty:
+            if self._event_finished:
+                self._raise_event_error()
+            return None
+        if event is None:
+            self._raise_event_error()
+        return event
+
+    def _raise_event_error(self):
+        if self._event_error is not None:
+            raise RuntimeError("Nexa event connection stopped") from self._event_error
+        raise EOFError("Nexa event connection closed")
+
+    def close(self):
+        self._closed = True
+        super().close()
+        self._event_reader.join(timeout=0.2)

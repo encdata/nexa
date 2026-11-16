@@ -4,20 +4,21 @@ import socket
 from typing import Any, Tuple, Optional
 
 
+def _read_exact(s: socket.socket, size: int) -> bytes:
+    data = bytearray(size)
+    view = memoryview(data)
+    offset = 0
+    while offset < size:
+        count = s.recv_into(view[offset:])
+        if count == 0:
+            raise EOFError("socket closed during message")
+        offset += count
+    return data
+
+
 def read_msg(s: socket.socket) -> Any:
-    b = b''
-    togo = 4
-    while togo > 0:
-        read = s.recv(togo)
-        b = b + read
-        togo = togo - len(read)
-    togo = int.from_bytes(b, "big")
-    b = b''
-    while togo > 0:
-        read = s.recv(togo)
-        b = b + read
-        togo = togo - len(read)
-    return loads(b.decode("utf-8"))
+    size = int.from_bytes(_read_exact(s, 4), "big")
+    return loads(_read_exact(s, size).decode("utf-8"))
 
 
 def send_msg(c: socket.socket, msg: str):

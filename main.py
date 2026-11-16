@@ -37,7 +37,7 @@ def run_connection(connection):
     worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nexa-startup")
     startup_future = worker.submit(load_startup, update_loading, configuration)
     while not startup_future.done():
-        event = connection.checkevent()
+        event = connection.wait_event(0.01)
         if event is not None:
             pending_events.append(event)
             if event.type == tg.Event.config:
@@ -46,7 +46,6 @@ def run_connection(connection):
                 loading_active = False
                 closing = True
                 break
-        sleep(0.01)
 
     if closing:
         worker.shutdown(wait=False, cancel_futures=True)
@@ -63,7 +62,7 @@ def run_connection(connection):
     del startup
     try:
         while not shell.desktop.ready:
-            event = pending_events.popleft() if pending_events else connection.checkevent()
+            event = pending_events.popleft() if pending_events else connection.wait_event(0.01)
             if event is not None:
                 if event.type == tg.Event.destroy and event.value.get("finishing"):
                     loading_active = False
@@ -71,19 +70,16 @@ def run_connection(connection):
                 shell.handle_event(event)
             file_actions.process_completions()
             shell.tick()
-            if event is None:
-                sleep(0.01)
 
         loading.update("ready", 100)
         loading.hide()
         loading_active = False
 
         while True:
-            event = pending_events.popleft() if pending_events else connection.checkevent()
+            event = pending_events.popleft() if pending_events else connection.wait_event(0.025)
             file_actions.process_completions()
             shell.tick()
             if event is None:
-                sleep(0.025)
                 continue
             if event.type == tg.Event.destroy and event.value.get("finishing"):
                 break
