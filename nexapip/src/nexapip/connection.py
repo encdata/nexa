@@ -7,6 +7,7 @@ from struct import unpack
 from json import dumps
 from select import select
 from typing import TypedDict, Literal, Optional, Any, Union, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from threading import RLock
 
 from nexapip.event import Event
@@ -42,6 +43,7 @@ class Connection:
 
         self.__main_lock = RLock()
         self.__event_lock = RLock()
+        self._Connection__request_executor = None
 
         adrMain = ''.join(choice(ascii_letters + digits) for i in range(50))
         adrEvent = ''.join(choice(ascii_letters + digits) for i in range(50))
@@ -143,6 +145,9 @@ class Connection:
 
         The connection is automatically closed when the program exits, but it's good practice to close the connection
         yourself when you don't need it anymore or use a "with" statement."""
+        executor = self._Connection__request_executor
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
         self._main.close()
         self._event.close()
 
@@ -172,6 +177,22 @@ class Connection:
         with self.__main_lock:
             self.send_msg(msg)
             return self.__read_msg()
+
+    def send_msg_async(self, msg: Union[str, dict]) -> Future:
+        """send a no-reply message on the connection worker and return its future."""
+        return self._submit_request(self.send_msg, msg)
+
+    def send_read_msg_async(self, msg: Union[str, dict]) -> Future:
+        """send a request and read its reply without blocking the caller."""
+        return self._submit_request(self.send_read_msg, msg)
+
+    def _submit_request(self, method, msg) -> Future:
+        with self.__main_lock:
+            executor = self._Connection__request_executor
+            if executor is None:
+                executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nexapip-rpc")
+                self._Connection__request_executor = executor
+            return executor.submit(method, msg)
 
     def turnscreenon(self):
         """Turns the screen on."""

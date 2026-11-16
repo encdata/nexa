@@ -13,6 +13,7 @@ class NexaConnection(Connection):
     def __init__(self):
         self._Connection__main_lock = RLock()
         self._Connection__event_lock = RLock()
+        self._Connection__request_executor = None
 
         main_name = "nexa" + "".join(choice(ascii_letters + digits) for _ in range(46))
         event_name = "nexa" + "".join(choice(ascii_letters + digits) for _ in range(46))
