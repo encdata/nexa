@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from xml.sax.saxutils import escape
 from urllib.parse import urljoin
 from urllib.request import urlopen
 
@@ -97,14 +98,115 @@ def _package_roots():
             and (path / ".nexa-package").is_file()]
 
 
-def _read_package_index():
+def _schema_directory():
+    sources = []
+    digest = hashlib.sha256()
+    for package in _package_roots():
+        schema_root = package / "usr/share/glib-2.0/schemas"
+        if not schema_root.is_dir():
+            continue
+        for source in sorted((*schema_root.glob("*.gschema.xml"),
+                              *schema_root.glob("*.gschema.override"))):
+            stat = source.stat()
+            digest.update(package.name.encode())
+            digest.update(source.name.encode())
+            digest.update(f"{stat.st_size}:{stat.st_mtime_ns}".encode())
+            sources.append((package, source))
+    if not sources:
+        return None
+
+    cache_root = Path.home() / ".cache" / "nexa" / "gsettings"
+    cache_root.mkdir(parents=True, exist_ok=True)
+    target = cache_root / digest.hexdigest()
+    if (target / "gschemas.compiled").is_file():
+        return target
+    compiler = shutil.which("glib-compile-schemas")
+    if compiler is None:
+        raise RuntimeError("glib-compile-schemas is required for Debian GSettings schemas")
+
+    staging = Path(tempfile.mkdtemp(prefix="build-", dir=cache_root))
+    try:
+        for package, source in sources:
+            (staging / f"{package.name}-{source.name}").symlink_to(source)
+        result = subprocess.run([compiler, str(staging)], capture_output=True, text=True)
+        if result.returncode:
+            details = result.stderr.strip() or result.stdout.strip()
+            raise RuntimeError(details or "glib-compile-schemas failed")
+        try:
+            staging.rename(target)
+        except FileExistsError:
+            shutil.rmtree(staging)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return target
+
+
+def _fontconfig_file():
+    packages = _package_roots()
+    config = next((package / "etc/fonts/fonts.conf" for package in packages
+                   if (package / "etc/fonts/fonts.conf").is_file()), None)
+    font_dirs = sorted(package / "usr/share/fonts" for package in packages
+                       if (package / "usr/share/fonts").is_dir())
+    if config is None or not font_dirs:
+        return None
+
+    stat = config.stat()
+    digest = hashlib.sha256(
+        f"{config}:{stat.st_size}:{stat.st_mtime_ns}".encode())
+    for font_dir in font_dirs:
+        digest.update(str(font_dir).encode())
+        dir_stat = font_dir.stat()
+        digest.update(f"{dir_stat.st_mtime_ns}:{dir_stat.st_size}".encode())
+    cache_root = Path.home() / ".cache" / "nexa" / "fontconfig"
+    target = cache_root / digest.hexdigest()
+    target_file = target / "fonts.conf"
+    if target_file.is_file():
+        return target_file
+
+    cache_root.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix="build-", dir=cache_root))
+    try:
+        conf_dir = config.parent / "conf.d"
+        if conf_dir.is_dir():
+            (staging / "conf.d").symlink_to(conf_dir, target_is_directory=True)
+        font_xml = "".join(f"\t<dir>{escape(str(path))}</dir>\n" for path in font_dirs)
+        contents = config.read_text(encoding="utf-8").replace(
+            "\t<dir>/usr/share/fonts</dir>", font_xml.rstrip())
+        cache_dir = Path.home() / ".cache" / "nexa" / "fontconfig-cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        contents = contents.replace(
+            "<cachedir>/var/cache/fontconfig</cachedir>",
+            f"<cachedir>{escape(str(cache_dir))}</cachedir>")
+        (staging / "fonts.conf").write_text(contents, encoding="utf-8")
+        try:
+            staging.rename(target)
+        except FileExistsError:
+            shutil.rmtree(staging)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return target_file
+
+
+def _read_package_index(on_progress=None):
     DEBIAN_CACHE.mkdir(parents=True, exist_ok=True)
     index = DEBIAN_CACHE / f"{DEBIAN_SUITE}-amd64-Packages.xz"
     if not index.is_file() or time.time() - index.stat().st_mtime > 86400:
         fd, temporary = tempfile.mkstemp(prefix="Packages-", dir=DEBIAN_CACHE)
         try:
             with os.fdopen(fd, "wb") as output, urlopen(DEBIAN_INDEX_URL, timeout=45) as response:
-                shutil.copyfileobj(response, output)
+                total = int(response.headers.get("Content-Length", 0) or 0)
+                copied = 0
+                while True:
+                    chunk = response.read(256 * 1024)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+                    copied += len(chunk)
+                    if on_progress is not None and total:
+                        on_progress("downloading Debian package index",
+                                    min(12, 4 + int(copied * 8 / total)))
             os.replace(temporary, index)
         except Exception:
             Path(temporary).unlink(missing_ok=True)
@@ -211,10 +313,12 @@ def _installed_versions():
     return installed
 
 
-def _resolve_dependencies(dependencies):
+def _resolve_dependencies(dependencies, on_progress=None):
     if not any(item.get("Depends") or item.get("Pre-Depends") for item in dependencies):
         return []
-    packages = _read_package_index()
+    if on_progress is not None:
+        on_progress("reading Debian package catalog", 14)
+    packages = _read_package_index(on_progress)
     providers = {}
     for package, fields in packages.items():
         for provided in _split_dependencies(fields.get("Provides", ""), ","):
@@ -264,7 +368,7 @@ def _resolve_dependencies(dependencies):
     return list(resolved.values())
 
 
-def _download_debian_package(fields):
+def _download_debian_package(fields, on_progress=None):
     name = fields["Package"]
     version = fields["Version"]
     digest = fields.get("SHA256", "")
@@ -285,7 +389,16 @@ def _download_debian_package(fields):
     try:
         with os.fdopen(fd, "wb") as output, urlopen(
                 urljoin(DEBIAN_BASE_URL, filename), timeout=60) as response:
-            shutil.copyfileobj(response, output)
+            total = int(response.headers.get("Content-Length", 0) or 0)
+            copied = 0
+            while True:
+                chunk = response.read(256 * 1024)
+                if not chunk:
+                    break
+                output.write(chunk)
+                copied += len(chunk)
+                if on_progress is not None and total:
+                    on_progress(copied, total)
         hasher = hashlib.sha256()
         with open(temporary, "rb") as source:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
@@ -346,7 +459,7 @@ def _package_path_environment(root):
     return os.pathsep.join(path for path in paths if path)
 
 
-def _desktop_app(package, desktop_file, root):
+def _desktop_app(package, desktop_file, root, schema_directory=None, fontconfig_file=None):
     parser = configparser.ConfigParser(interpolation=None, strict=False)
     parser.read(desktop_file, encoding="utf-8")
     entry = parser["Desktop Entry"] if parser.has_section("Desktop Entry") else None
@@ -376,7 +489,12 @@ def _desktop_app(package, desktop_file, root):
     if not command:
         return None
     launch_env = {"BOX64_LD_LIBRARY_PATH": _library_path(),
+                  "BOX64_PREFER_EMULATED": "1",
                   "PATH": _package_path_environment(root)}
+    if schema_directory is not None:
+        launch_env["GSETTINGS_SCHEMA_DIR"] = str(schema_directory)
+    if fontconfig_file is not None:
+        launch_env["FONTCONFIG_FILE"] = str(fontconfig_file)
     if Path(command[0]).name == "env":
         command.pop(0)
     while len(command) > 1 and re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*=.*", command[0]):
@@ -430,6 +548,16 @@ def discover():
     apps = {}
     if not PACKAGE_ROOT.is_dir():
         return apps
+    try:
+        schema_directory = _schema_directory()
+    except (OSError, RuntimeError) as error:
+        print(f"nexa: couldn't compile Debian GSettings schemas: {error}")
+        schema_directory = None
+    try:
+        fontconfig_file = _fontconfig_file()
+    except OSError as error:
+        print(f"nexa: couldn't prepare Debian font configuration: {error}")
+        fontconfig_file = None
     for root in sorted(PACKAGE_ROOT.iterdir()):
         if not root.is_dir():
             continue
@@ -443,7 +571,8 @@ def discover():
         package_apps = []
         for desktop_file in _desktop_files(root):
             try:
-                app = _desktop_app(package, desktop_file, root)
+                app = _desktop_app(package, desktop_file, root,
+                                   schema_directory, fontconfig_file)
             except (configparser.Error, OSError, ValueError) as error:
                 print(f"nexa: couldn't read Debian launcher {desktop_file}: {error}")
                 continue
@@ -472,15 +601,26 @@ def discover():
                 shortcut.write_text(
                     f"[Desktop Entry]\nType=Application\nName={name}\nX-Nexa-App={app_id}\n",
                     encoding="utf-8")
+                launch_env = {"BOX64_LD_LIBRARY_PATH": _library_path(),
+                              "BOX64_PREFER_EMULATED": "1",
+                              "PATH": _package_path_environment(root)}
+                if schema_directory is not None:
+                    launch_env["GSETTINGS_SCHEMA_DIR"] = str(schema_directory)
+                if fontconfig_file is not None:
+                    launch_env["FONTCONFIG_FILE"] = str(fontconfig_file)
                 package_apps.append(DebApp(
                     app_id, name, "window", shortcut, [str(candidate)], str(root),
-                    {"BOX64_LD_LIBRARY_PATH": _library_path(),
-                     "PATH": _package_path_environment(root)}))
+                    launch_env))
         apps.update((app.app_id, app) for app in package_apps)
     return apps
 
 
-def install(path):
+def install(path, on_progress=None):
+    def report(message, percent=None):
+        if on_progress is not None:
+            on_progress(message, percent)
+
+    report("checking Debian package", 2)
     deb = Path(path).expanduser().resolve(strict=True)
     dpkg_deb = shutil.which("dpkg-deb")
     if dpkg_deb is None:
@@ -497,13 +637,30 @@ def install(path):
               "Architecture": architecture,
               "Pre-Depends": _run(dpkg_deb, "-f", str(deb), "Pre-Depends"),
               "Depends": _run(dpkg_deb, "-f", str(deb), "Depends")}
-    dependencies = _resolve_dependencies([fields])
-    downloaded = [(item, _download_debian_package(item)) for item in dependencies]
-    for item, dependency_deb in downloaded:
+    report(f"resolving dependencies for {package}", 10)
+    dependencies = _resolve_dependencies([fields], report)
+    downloaded = []
+    total = max(1, len(dependencies))
+    for index, item in enumerate(dependencies):
+        start = 18 + int(index * 52 / total)
+        end = 18 + int((index + 1) * 52 / total)
+        report(f"downloading {item['Package']} ({index + 1}/{len(dependencies)})", start)
+
+        def download_progress(copied, size):
+            report(f"downloading {item['Package']} ({index + 1}/{len(dependencies)})",
+                   start + int((end - start) * copied / size))
+
+        downloaded.append((item, _download_debian_package(item, download_progress)))
+    for index, (item, dependency_deb) in enumerate(downloaded):
+        report(f"installing dependency {item['Package']} ({index + 1}/{total})",
+               72 + int(index * 14 / total))
         _extract_package(dependency_deb, item["Package"],
                          PACKAGE_ROOT / f"{DEPENDENCY_PREFIX}{item['Package']}",
                          item["Version"], dependency=True)
 
+    report(f"installing {package}", 88)
     _extract_package(deb, package, PACKAGE_ROOT / package, version)
+    report("registering desktop apps", 96)
     apps = [app for app in discover().values() if app.app_id.startswith(f"deb.{package}.")]
+    report(f"installed {package}", 100)
     return package, len(apps)

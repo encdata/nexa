@@ -8,6 +8,7 @@ from shell import file_actions, file_associations, palette
 from shell import deb_packages
 from shell.context_menu import ContextMenu
 from shell.desktop_state import load_home_items, save_positions
+from shell.deb_install_progress import DebInstallProgress
 from shell.geometry import place
 from shell.icons import load
 from shell.open_with import OpenWithChooser
@@ -87,6 +88,8 @@ class Desktop:
         self.open_with = OpenWithChooser(
             activity, root, lambda: (self.screen_width, self.screen_height), apps, open_app,
             self.refresh_associated_icons, self._install_deb)
+        self.deb_progress = DebInstallProgress(
+            activity, root, lambda: (self.screen_width, self.screen_height))
         self.home_item_snapshot = {path: (name, is_folder)
                                    for path, name, is_folder in home_items[:home_capacity]}
         self._schedule_home_scan()
@@ -492,9 +495,11 @@ class Desktop:
         if target in self.pending_file_actions:
             return
         self.pending_file_actions.add(target)
+        self.deb_progress.show(target)
 
         def installed(result, error):
             self.pending_file_actions.discard(target)
+            self.deb_progress.finish(result, error)
             if self.closed:
                 return
             if error is not None:
@@ -505,7 +510,9 @@ class Desktop:
             if self.on_apps_changed is not None:
                 self.on_apps_changed()
 
-        file_actions.run_async(lambda: deb_packages.install(target), installed)
+        file_actions.run_async_progress(
+            lambda report: deb_packages.install(target, report), installed,
+            self.deb_progress.update)
 
     def _arrange_icons(self):
         x_positions, y_positions = self._grid_axes(self.screen_width, self.screen_height)
@@ -684,6 +691,8 @@ class Desktop:
             self.drag = None
 
     def _handle_event(self, event):
+        if self.deb_progress.handle_event(event):
+            return True
         if self.name_prompt.handle_event(event):
             return True
         if self.open_with.handle_event(event):

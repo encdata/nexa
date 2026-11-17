@@ -16,7 +16,9 @@
 
 enum nx_event_type { NX_TOPLEVEL = 1, NX_TITLE = 2, NX_FRAME = 3, NX_UNMAP = 4,
                      NX_DESTROY = 5, NX_POPUP = 6, NX_TEXT_INPUT = 7 };
-enum nx_surface_role { NX_ROLE_NONE, NX_ROLE_TOPLEVEL, NX_ROLE_POPUP, NX_ROLE_CURSOR };
+enum nx_surface_role {
+    NX_ROLE_NONE, NX_ROLE_TOPLEVEL, NX_ROLE_POPUP, NX_ROLE_CURSOR, NX_ROLE_SUBSURFACE
+};
 
 struct nx_event {
     int type;
@@ -31,6 +33,7 @@ struct nx_event {
 };
 
 struct nx_server;
+static void subsurface_resource_destroy(struct wl_resource *resource);
 static void xdg_surface_resource_destroy(struct wl_resource *resource);
 static void xdg_toplevel_resource_destroy(struct wl_resource *resource);
 static void xdg_popup_resource_destroy(struct wl_resource *resource);
@@ -48,6 +51,8 @@ struct nx_surface {
     struct wl_resource *popup;
     struct wl_resource *decoration;
     struct nx_surface *popup_parent;
+    struct nx_surface *subsurface_parent;
+    struct wl_resource *subsurface;
     int popup_x, popup_y;
     int popup_width, popup_height;
     struct wl_resource *pending_buffer;
@@ -108,6 +113,11 @@ struct nx_text_input {
     int pending_enabled;
 };
 
+struct nx_subsurface {
+    struct nx_surface *surface;
+    struct wl_resource *resource;
+};
+
 struct nx_server {
     struct wl_display *display;
     struct wl_global *compositor;
@@ -115,6 +125,8 @@ struct nx_server {
     struct wl_global *decoration_manager;
     struct wl_global *output;
     struct wl_global *seat;
+    struct wl_global *subcompositor;
+    struct wl_global *data_device_manager;
     struct wl_global *text_input_manager;
     struct wl_list surfaces;
     struct wl_list pointers;
@@ -199,11 +211,106 @@ static void queue_event(struct nx_surface *surface, int type, const void *pixels
     pthread_mutex_unlock(&surface->server->event_lock);
 }
 
+static void subsurface_destroy(struct wl_client *client, struct wl_resource *resource) {
+    (void)client;
+    wl_resource_destroy(resource);
+}
+
+static void subsurface_set_position(struct wl_client *client, struct wl_resource *resource,
+                                    int32_t x, int32_t y) {
+    (void)client; (void)resource; (void)x; (void)y;
+}
+
+static void subsurface_place(struct wl_client *client, struct wl_resource *resource,
+                             struct wl_resource *sibling) {
+    (void)client; (void)resource; (void)sibling;
+}
+
+static void subsurface_sync(struct wl_client *client, struct wl_resource *resource) {
+    (void)client; (void)resource;
+}
+
+static const struct wl_subsurface_interface subsurface_impl = {
+    .destroy = subsurface_destroy,
+    .set_position = subsurface_set_position,
+    .place_above = subsurface_place,
+    .place_below = subsurface_place,
+    .set_sync = subsurface_sync,
+    .set_desync = subsurface_sync,
+};
+
+static void subsurface_resource_destroy(struct wl_resource *resource) {
+    struct nx_subsurface *subsurface = wl_resource_get_user_data(resource);
+    if (!subsurface) return;
+    struct nx_surface *surface = subsurface->surface;
+    if (surface && surface->subsurface == resource) {
+        surface->subsurface = NULL;
+        surface->subsurface_parent = NULL;
+        if (surface->role == NX_ROLE_SUBSURFACE) surface->role = NX_ROLE_NONE;
+    }
+    free(subsurface);
+}
+
+static void subcompositor_destroy(struct wl_client *client, struct wl_resource *resource) {
+    (void)client;
+    wl_resource_destroy(resource);
+}
+
+static void subcompositor_get_subsurface(struct wl_client *client,
+        struct wl_resource *resource, uint32_t id,
+        struct wl_resource *surface_resource, struct wl_resource *parent_resource) {
+    struct nx_surface *surface = wl_resource_get_user_data(surface_resource);
+    struct nx_surface *parent = wl_resource_get_user_data(parent_resource);
+    if (!surface || !parent || surface == parent || surface->role != NX_ROLE_NONE
+        || surface->subsurface || wl_resource_get_client(surface_resource) != client
+        || wl_resource_get_client(parent_resource) != client) {
+        wl_resource_post_error(resource, WL_SUBCOMPOSITOR_ERROR_BAD_SURFACE,
+                               "invalid or already-role-assigned subsurface");
+        return;
+    }
+    for (struct nx_surface *ancestor = parent; ancestor;
+         ancestor = ancestor->subsurface_parent) {
+        if (ancestor == surface) {
+            wl_resource_post_error(resource, WL_SUBCOMPOSITOR_ERROR_BAD_PARENT,
+                                   "subsurface parent would create a cycle");
+            return;
+        }
+    }
+    struct nx_subsurface *subsurface = calloc(1, sizeof(*subsurface));
+    if (!subsurface) return;
+    subsurface->surface = surface;
+    subsurface->resource = wl_resource_create(client, &wl_subsurface_interface, 1, id);
+    if (!subsurface->resource) {
+        free(subsurface);
+        return;
+    }
+    surface->role = NX_ROLE_SUBSURFACE;
+    surface->subsurface_parent = parent;
+    surface->subsurface = subsurface->resource;
+    wl_resource_set_implementation(subsurface->resource, &subsurface_impl, subsurface,
+                                   subsurface_resource_destroy);
+}
+
+static const struct wl_subcompositor_interface subcompositor_impl = {
+    .destroy = subcompositor_destroy,
+    .get_subsurface = subcompositor_get_subsurface,
+};
+
+static void bind_subcompositor(struct wl_client *client, void *data,
+                               uint32_t version, uint32_t id) {
+    struct wl_resource *resource = wl_resource_create(
+        client, &wl_subcompositor_interface, version > 1 ? 1 : version, id);
+    if (resource)
+        wl_resource_set_implementation(resource, &subcompositor_impl, data, NULL);
+}
+
 static void surface_resource_destroy(struct wl_resource *resource) {
     struct nx_surface *surface = wl_resource_get_user_data(resource);
     if (!surface) return;
-    struct nx_surface *child;
-    wl_list_for_each(child, &surface->server->surfaces, link) {
+    struct nx_surface *child, *next_surface;
+    wl_list_for_each_safe(child, next_surface, &surface->server->surfaces, link) {
+        if (child->subsurface_parent == surface && child->subsurface)
+            wl_resource_destroy(child->subsurface);
         if (child->popup_parent != surface) continue;
         if (child->popup) xdg_popup_send_popup_done(child->popup);
         child->popup_parent = NULL;
@@ -212,6 +319,7 @@ static void surface_resource_destroy(struct wl_resource *resource) {
             queue_event(child, NX_UNMAP, NULL, 0, 0, 0, 0);
         }
     }
+    if (surface->subsurface) wl_resource_destroy(surface->subsurface);
     struct nx_pointer *pointer;
     uint32_t serial = wl_display_next_serial(surface->server->display);
     wl_list_for_each(pointer, &surface->server->pointers, link) {
@@ -236,8 +344,8 @@ static void surface_resource_destroy(struct wl_resource *resource) {
         input->surface = NULL;
         input->enabled = 0;
     }
-    struct nx_callback *callback, *next;
-    wl_list_for_each_safe(callback, next, &surface->callbacks, link) {
+    struct nx_callback *callback, *next_callback;
+    wl_list_for_each_safe(callback, next_callback, &surface->callbacks, link) {
         wl_resource_destroy(callback->resource);
         wl_list_remove(&callback->link);
         free(callback);
@@ -279,6 +387,14 @@ static void surface_frame(struct wl_client *client, struct wl_resource *resource
 static void surface_region(struct wl_client *client, struct wl_resource *resource,
                            struct wl_resource *region) {
     (void)client; (void)resource; (void)region;
+}
+static void region_add(struct wl_client *client, struct wl_resource *resource,
+                       int32_t x, int32_t y, int32_t width, int32_t height) {
+    (void)client; (void)resource; (void)x; (void)y; (void)width; (void)height;
+}
+static void region_subtract(struct wl_client *client, struct wl_resource *resource,
+                            int32_t x, int32_t y, int32_t width, int32_t height) {
+    (void)client; (void)resource; (void)x; (void)y; (void)width; (void)height;
 }
 static void surface_damage(struct wl_client *client, struct wl_resource *resource,
                            int32_t x, int32_t y, int32_t width, int32_t height) {
@@ -344,7 +460,7 @@ static void surface_commit(struct wl_client *client, struct wl_resource *resourc
     int stride = wl_shm_buffer_get_stride(buffer);
     int format = wl_shm_buffer_get_format(buffer);
     void *pixels = wl_shm_buffer_get_data(buffer);
-    if (surface->role != NX_ROLE_NONE && surface->role != NX_ROLE_CURSOR
+    if ((surface->role == NX_ROLE_TOPLEVEL || surface->role == NX_ROLE_POPUP)
         && width > 0 && height > 0 && stride > 0
         && (size_t)width <= (size_t)stride / 4
         && (size_t)stride * (size_t)height <= 64u * 1024u * 1024u) {
@@ -376,8 +492,8 @@ static const struct wl_surface_interface surface_impl = {
 
 static const struct wl_region_interface region_impl = {
     .destroy = surface_destroy,
-    .add = NULL,
-    .subtract = NULL,
+    .add = region_add,
+    .subtract = region_subtract,
 };
 
 static void compositor_create_surface(struct wl_client *client, struct wl_resource *resource,
@@ -550,6 +666,89 @@ static void bind_seat(struct wl_client *client, void *data, uint32_t version, ui
     wl_resource_set_implementation(resource, &seat_impl, data, NULL);
     wl_seat_send_capabilities(resource, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
     if (wl_resource_get_version(resource) >= 2) wl_seat_send_name(resource, "nexa-seat");
+}
+
+static void data_source_offer(struct wl_client *client, struct wl_resource *resource,
+                              const char *mime_type) {
+    (void)client; (void)resource; (void)mime_type;
+}
+
+static void data_source_destroy(struct wl_client *client, struct wl_resource *resource) {
+    (void)client;
+    wl_resource_destroy(resource);
+}
+
+static void data_source_set_actions(struct wl_client *client, struct wl_resource *resource,
+                                    uint32_t actions) {
+    (void)client; (void)resource; (void)actions;
+}
+
+static const struct wl_data_source_interface data_source_impl = {
+    .offer = data_source_offer,
+    .destroy = data_source_destroy,
+    .set_actions = data_source_set_actions,
+};
+
+static void data_device_start_drag(struct wl_client *client, struct wl_resource *resource,
+        struct wl_resource *source, struct wl_resource *origin,
+        struct wl_resource *icon, uint32_t serial) {
+    (void)client; (void)resource; (void)source; (void)origin; (void)icon; (void)serial;
+}
+
+static void data_device_set_selection(struct wl_client *client, struct wl_resource *resource,
+        struct wl_resource *source, uint32_t serial) {
+    (void)client; (void)resource; (void)source; (void)serial;
+}
+
+static void data_device_release(struct wl_client *client, struct wl_resource *resource) {
+    (void)client;
+    wl_resource_destroy(resource);
+}
+
+static const struct wl_data_device_interface data_device_impl = {
+    .start_drag = data_device_start_drag,
+    .set_selection = data_device_set_selection,
+    .release = data_device_release,
+};
+
+static void data_manager_destroy(struct wl_client *client, struct wl_resource *resource) {
+    (void)client;
+    wl_resource_destroy(resource);
+}
+
+static void data_manager_create_source(struct wl_client *client,
+        struct wl_resource *manager, uint32_t id) {
+    struct wl_resource *source = wl_resource_create(
+        client, &wl_data_source_interface, wl_resource_get_version(manager), id);
+    if (source)
+        wl_resource_set_implementation(source, &data_source_impl, NULL, NULL);
+}
+
+static void data_manager_get_device(struct wl_client *client,
+        struct wl_resource *manager, uint32_t id, struct wl_resource *seat) {
+    if (!seat || strcmp(wl_resource_get_class(seat), wl_seat_interface.name) != 0
+        || wl_resource_get_client(seat) != client) {
+        wl_resource_post_error(manager, 0, "data device seat is not owned by this client");
+        return;
+    }
+    struct wl_resource *device = wl_resource_create(
+        client, &wl_data_device_interface, wl_resource_get_version(manager), id);
+    if (device)
+        wl_resource_set_implementation(device, &data_device_impl, NULL, NULL);
+}
+
+static const struct wl_data_device_manager_interface data_manager_impl = {
+    .create_data_source = data_manager_create_source,
+    .get_data_device = data_manager_get_device,
+    .release = data_manager_destroy,
+};
+
+static void bind_data_device_manager(struct wl_client *client, void *data,
+                                     uint32_t version, uint32_t id) {
+    struct wl_resource *resource = wl_resource_create(
+        client, &wl_data_device_manager_interface, version > 3 ? 3 : version, id);
+    if (resource)
+        wl_resource_set_implementation(resource, &data_manager_impl, data, NULL);
 }
 
 static void text_input_resource_destroy(struct wl_resource *resource) {
@@ -888,7 +1087,8 @@ static void xdg_wm_positioner(struct wl_client *client, struct wl_resource *reso
 static void xdg_wm_get_surface(struct wl_client *client, struct wl_resource *resource,
                                uint32_t id, struct wl_resource *surface_resource) {
     struct nx_surface *surface = wl_resource_get_user_data(surface_resource);
-    if (!surface || surface->xdg_surface) {
+    if (!surface || surface->role != NX_ROLE_NONE || surface->subsurface
+        || surface->xdg_surface) {
         wl_resource_post_error(resource, XDG_WM_BASE_ERROR_ROLE,
                                "surface already has an xdg role");
         return;
@@ -1185,12 +1385,17 @@ struct nx_server *nexa_wl_create(const char *runtime_dir, const char *socket_nam
                                        server, bind_output);
     server->seat = wl_global_create(server->display, &wl_seat_interface, 7,
                                      server, bind_seat);
+    server->subcompositor = wl_global_create(server->display,
+        &wl_subcompositor_interface, 1, server, bind_subcompositor);
+    server->data_device_manager = wl_global_create(server->display,
+        &wl_data_device_manager_interface, 3, server, bind_data_device_manager);
     server->text_input_manager = wl_global_create(server->display,
         &zwp_text_input_manager_v3_interface, 1, server, bind_text_input_manager);
     server->wake_source = wl_event_loop_add_fd(wl_display_get_event_loop(server->display),
         server->wake_read, WL_EVENT_READABLE, wake_dispatch, server);
     if (!server->compositor || !server->shell || !server->decoration_manager
-        || !server->output || !server->seat || !server->text_input_manager
+        || !server->output || !server->seat || !server->subcompositor
+        || !server->data_device_manager || !server->text_input_manager
         || !server->wake_source) {
         wl_display_destroy(server->display);
         close(server->wake_read);

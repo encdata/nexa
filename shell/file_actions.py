@@ -23,8 +23,28 @@ def _submit(worker, operation, callback):
     future.add_done_callback(finish)
 
 
+def _submit_progress(worker, operation, callback, on_progress):
+    def report(message, percent=None):
+        _completed.put(("progress", on_progress, message, percent))
+
+    future = worker.submit(operation, report)
+
+    def finish(future):
+        try:
+            result, error = future.result(), None
+        except Exception as caught:
+            result, error = None, caught
+        _completed.put(("complete", callback, result, error))
+
+    future.add_done_callback(finish)
+
+
 def run_async(operation, callback):
     _submit(_worker, operation, callback)
+
+
+def run_async_progress(operation, callback, on_progress):
+    _submit_progress(_worker, operation, callback, on_progress)
 
 
 def run_background(operation, callback):
@@ -34,10 +54,18 @@ def run_background(operation, callback):
 def process_completions():
     while True:
         try:
-            callback, result, error = _completed.get_nowait()
+            item = _completed.get_nowait()
         except Empty:
             return
-        callback(result, error)
+        if item[0] == "progress":
+            _, callback, message, percent = item
+            callback(message, percent)
+        elif len(item) == 3:
+            callback, result, error = item
+            callback(result, error)
+        else:
+            _, callback, result, error = item
+            callback(result, error)
 
 
 def copy(path):

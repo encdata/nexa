@@ -7,6 +7,7 @@ import nexapip as tg
 from shell import file_actions, file_associations, palette
 from shell import deb_packages
 from shell.context_menu import ContextMenu
+from shell.deb_install_progress import DebInstallProgress
 from shell.icons import load
 from shell.open_with import OpenWithChooser
 from shell.text_prompt import TextPrompt
@@ -132,6 +133,8 @@ class FilesApp:
             round(value / density) for value in parent.getdimensions()))
         prompt = TextPrompt(activity, parent, lambda: tuple(
             round(value / density) for value in parent.getdimensions()))
+        deb_progress = DebInstallProgress(activity, parent, lambda: tuple(
+            round(value / density) for value in parent.getdimensions()))
         def on_association_change(path_value, app_id):
             if association_changed is not None:
                 association_changed(path_value, app_id)
@@ -150,6 +153,7 @@ class FilesApp:
                  "history": [path], "history_index": 0, "scan_id": 0,
                  "loading": False, "error": None, "closed": False, "nav_paths": {},
                  "render_id": 0, "prompt": prompt}
+        state["deb_progress"] = deb_progress
 
         nav_labels = []
         shared = os.path.expanduser("~/storage/shared")
@@ -298,9 +302,10 @@ class FilesApp:
                 status.settext("wait for the current file operation")
                 return
             state["busy"] = True
-            status.settext("installing Debian package…")
+            deb_progress.show(path_value)
 
             def installed(result, error):
+                deb_progress.finish(result, error)
                 if state["closed"]:
                     return
                 state["busy"] = False
@@ -314,7 +319,9 @@ class FilesApp:
                 else:
                     load_directory()
 
-            file_actions.run_async(lambda: deb_packages.install(path_value), installed)
+            file_actions.run_async_progress(
+                lambda report: deb_packages.install(path_value, report), installed,
+                deb_progress.update)
 
         def run_file_action(operation):
             if state["busy"]:
@@ -390,6 +397,8 @@ class FilesApp:
         load_directory()
 
         def handle_event(event):
+            if deb_progress.handle_event(event):
+                return True
             if state["prompt"].handle_event(event):
                 return True
             if state["open_with"].handle_event(event):
