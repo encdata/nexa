@@ -14,19 +14,31 @@ def installed():
             and (glibc / "lib" / "libwayland-client.so.0").is_file())
 
 
-def ready():
+def _box64_check():
     if not installed():
-        return False
+        return False, "runtime packages or Wayland libraries are missing"
     runner = shutil.which("glibc-runner")
     if runner is None:
-        return False
+        return False, "glibc-runner is missing"
     try:
         result = subprocess.run([runner, "--shell", "box64 --version"],
-                                stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, timeout=10)
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-    return result.returncode == 0
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, timeout=60)
+    except subprocess.TimeoutExpired as error:
+        output = error.stdout or ""
+        if isinstance(output, bytes):
+            output = output.decode("utf-8", "replace")
+        return False, f"Box64 check timed out after 60 seconds: {output.strip()}"
+    except OSError as error:
+        return False, str(error)
+    output = result.stdout.strip()
+    if result.returncode:
+        return False, output or f"glibc-runner exited with status {result.returncode}"
+    return True, output
+
+
+def ready():
+    return _box64_check()[0]
 
 
 def ensure_installed(on_status=None):
@@ -64,5 +76,6 @@ def ensure_installed(on_status=None):
     for package in ("glibc", "glibc-runner", "box64-glibc", "libwayland-glibc",
                     "libwayland-protocols-glibc", "libxkbcommon-glibc"):
         install(package)
-    if not ready():
-        raise RuntimeError("x86_64 Wayland runtime installation did not pass its Box64 check")
+    passed, details = _box64_check()
+    if not passed:
+        raise RuntimeError(f"x86_64 Wayland runtime installation failed its Box64 check: {details}")
