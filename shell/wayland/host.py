@@ -311,9 +311,6 @@ class WaylandHost:
                 if state and state["view"] is not None:
                     state["view"].setvisibility(tg.View.HIDDEN)
             elif kind == self.DESTROY:
-                state = self._surfaces.get(surface_id)
-                if state and state["window"] is not None and not state["window"]._closed:
-                    state["window"].close()
                 self._close_surface(surface_id, send_close=False)
             elif kind == self.TEXT_INPUT:
                 state = self._surfaces.get(surface_id)
@@ -365,7 +362,18 @@ class WaylandHost:
             return _SurfaceHandler(self, surface_id, state)
 
         def closed():
-            self._library.nexa_wl_close_toplevel(self._server, surface_id)
+            if not state["closed"]:
+                state["closed"] = True
+                view = state.get("view")
+                if view is not None:
+                    self._views.pop(view.id, None)
+                    with state["frame_lock"]:
+                        state["frame"] = None
+                        release_buffer = getattr(view, "release_buffer", None)
+                        if release_buffer is not None:
+                            release_buffer()
+                    state["view"] = None
+                self._library.nexa_wl_close_toplevel(self._server, surface_id)
 
         state["window"] = self.window_host.open_toplevel(
             surface_id, app_id, title, build, on_close=closed,
@@ -616,20 +624,20 @@ class WaylandHost:
         for child_id, child in tuple(self._surfaces.items()):
             if child.get("parent") == surface_id:
                 self._close_surface(child_id, send_close=False)
-        if send_close:
-            self._library.nexa_wl_close_toplevel(self._server, surface_id)
         window = state.get("window")
-        if window is not None and not window._closed:
-            window.close()
         view = state.get("view")
         if view is not None:
             self._views.pop(view.id, None)
             with state["frame_lock"]:
-                close = getattr(view, "close", None)
-                if close is not None:
-                    close()
-                else:
-                    view.delete()
+                release_buffer = getattr(view, "release_buffer", None)
+                if release_buffer is not None:
+                    release_buffer()
+        if window is not None and not window._closed:
+            window.close()
+        elif view is not None and state["popup"]:
+            view.delete()
+        if send_close:
+            self._library.nexa_wl_close_toplevel(self._server, surface_id)
 
     def handle_event(self, event):
         surface_id = self._views.get(getattr(event, "id", None))
@@ -701,6 +709,8 @@ class WaylandHost:
                         os.killpg(process.pid, 9)
                     except ProcessLookupError:
                         pass
+        for surface_id in tuple(self._surfaces):
+            self._close_surface(surface_id, send_close=False)
         self._library.nexa_wl_destroy(self._server)
         self._server = None
         self._surfaces.clear()

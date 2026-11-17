@@ -5,6 +5,7 @@ from threading import Lock, Timer
 import nexapip as tg
 
 from shell import file_actions, file_associations, palette
+from shell import deb_packages
 from shell.context_menu import ContextMenu
 from shell.desktop_state import load_home_items, save_positions
 from shell.geometry import place
@@ -28,6 +29,7 @@ class Desktop:
         self.root = root
         self.apps = apps
         self.open_app = open_app
+        self.on_apps_changed = None
         self.screen_width = screen_width
         self.screen_height = screen_height
         self.density = density
@@ -84,7 +86,7 @@ class Desktop:
                                       lambda: (self.screen_width, self.screen_height))
         self.open_with = OpenWithChooser(
             activity, root, lambda: (self.screen_width, self.screen_height), apps, open_app,
-            self.refresh_associated_icons)
+            self.refresh_associated_icons, self._install_deb)
         self.home_item_snapshot = {path: (name, is_folder)
                                    for path, name, is_folder in home_items[:home_capacity]}
         self._schedule_home_scan()
@@ -386,6 +388,8 @@ class Desktop:
                        "properties", "paste"]
             if not icon["is_folder"]:
                 actions.insert(1, "open_with")
+            if icon["context"] and icon["context"].lower().endswith(".deb"):
+                actions.insert(1, "install_deb")
         disabled = () if file_actions.has_clipboard_item() else ("paste",)
         self.context_menu.show(actions, *self.context_anchor, self._context_action,
                                disabled=disabled)
@@ -433,6 +437,8 @@ class Desktop:
                     self.open_app("files", icon["context"])
                 else:
                     self.open_with.open(icon["context"])
+            elif action == "install_deb" and icon is not None:
+                self._install_deb(icon["context"])
             elif action == "properties" and icon is not None and icon["context"] is not None:
                 self.open_app("files", {"properties": icon["context"]})
             elif action == "open_with" and icon is not None and not icon["is_folder"]:
@@ -479,6 +485,26 @@ class Desktop:
             self._refresh_home_items()
 
         file_actions.run_async(operation, complete)
+
+    def _install_deb(self, path):
+        target = os.path.abspath(path)
+        if target in self.pending_file_actions:
+            return
+        self.pending_file_actions.add(target)
+
+        def installed(result, error):
+            self.pending_file_actions.discard(target)
+            if self.closed:
+                return
+            if error is not None:
+                print(f"nexa: couldn't install {path}: {error}")
+                return
+            package, count = result
+            print(f"nexa: installed {package} ({count} graphical app(s))")
+            if self.on_apps_changed is not None:
+                self.on_apps_changed()
+
+        file_actions.run_async(lambda: deb_packages.install(target), installed)
 
     def _arrange_icons(self):
         x_positions, y_positions = self._grid_axes(self.screen_width, self.screen_height)

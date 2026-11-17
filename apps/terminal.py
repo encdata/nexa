@@ -104,7 +104,7 @@ class TerminalApp:
                 activity, root,
                 lambda: tuple(round(size / self.density) for size in root.getdimensions()),
                 self.apps, self.open_app,
-                services.get("association_changed"))
+                services.get("association_changed"), services.get("install_deb"))
         self.keyboard_input = add_keyboard_input(activity, root)
         self.density = activity.getconfiguration()["density"]
         self.screen = TerminalScreen()

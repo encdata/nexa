@@ -47,11 +47,12 @@ class _LauncherApp:
     external_launcher = True
     preload_ui = False
 
-    def __init__(self, app_id, name, icon, launch):
+    def __init__(self, app_id, name, icon, launch, supports_file=None):
         self.app_id = app_id
         self.name = name
         self.icon = icon
         self.launch = launch
+        self.supports_file = supports_file
 
     def build(self, activity, parent, context=None):
         raise RuntimeError("external apps create windows through the window host")
@@ -116,7 +117,8 @@ class WindowHost:
         existing = self.apps.get(app_id)
         if existing is not None and not getattr(existing, "external_launcher", False):
             raise ValueError(f"app id {app_id!r} is already registered")
-        app = _LauncherApp(str(app_id), str(name), icon, launch)
+        supports_file = getattr(existing, "supports_file", None)
+        app = _LauncherApp(str(app_id), str(name), icon, launch, supports_file)
         self._launchers[app.app_id] = app
         self.apps[app.app_id] = app
         if self.apps_changed is not None:

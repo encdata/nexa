@@ -69,7 +69,10 @@ class SurfaceView(View):
         self.setbuffer(self._frame_buffer)
 
     def close(self):
+        self.release_buffer()
+        self.delete()
+
+    def release_buffer(self):
         if self._frame_buffer is not None:
             self._frame_buffer.remove()
             self._frame_buffer = None
-        self.delete()

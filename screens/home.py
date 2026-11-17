@@ -65,6 +65,8 @@ class DesktopShell:
         self.desktop = Desktop(activity, self.root, self.apps, self.open_app,
                                self.screen_width, self.screen_height, self.density,
                                startup["positions"], startup["home_items"], progress)
+        self.desktop.on_apps_changed = self.refresh_apps
+        self.windows.on_install_deb = self.desktop._install_deb
         self.windows.on_association_change = self.desktop.refresh_associated_icons
         self.taskbar = Taskbar(activity, self.root, self.apps, self.open_app,
                                self.windows.activate_from_taskbar,
@@ -77,6 +79,11 @@ class DesktopShell:
                                       self._launcher_apps_changed)
         self.windows.window_host = self.window_host
         self.windows.on_register_wayland_launcher = self.register_wayland_launcher
+        for app in tuple(self.apps.values()):
+            spec = getattr(app, "launch_spec", None)
+            if spec is not None:
+                argv, cwd, env = spec
+                self.register_wayland_launcher(app.app_id, app.name, app.icon, argv, cwd, env)
         self.wayland_host = None
         self.wayland_start_lock = Lock()
         self.wayland_launch_queue = []
@@ -119,6 +126,12 @@ class DesktopShell:
                 self.apps.clear()
                 self.apps.update(apps)
                 self.window_host.restore_launchers()
+                for app in tuple(self.apps.values()):
+                    spec = getattr(app, "launch_spec", None)
+                    if spec is not None:
+                        argv, cwd, env = spec
+                        self.register_wayland_launcher(
+                            app.app_id, app.name, app.icon, argv, cwd, env)
                 self.windows.apps = self.apps
                 self.desktop.apps = self.apps
                 self.taskbar.set_apps(self.apps)

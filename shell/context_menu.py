@@ -8,10 +8,11 @@ from shell.surface import add_rounded, set_rounded_color
 class ContextMenu:
     width = 224
     row_height = 44
-    actions = ("open", "open_with", "open_terminal", "new_file", "new_folder",
+    actions = ("open", "open_with", "install_deb", "open_terminal", "new_file", "new_folder",
                "copy", "cut", "paste", "rename", "delete", "properties", "refresh",
                "realign")
-    labels = {"open_with": "open with", "open_terminal": "open in terminal",
+    labels = {"open_with": "open with", "install_deb": "install .deb",
+              "open_terminal": "open in terminal",
               "new_file": "new file", "new_folder": "new folder",
               "realign": "realign icons"}
 

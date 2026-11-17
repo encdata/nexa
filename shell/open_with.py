@@ -3,13 +3,17 @@ import os
 from shell import file_associations
 from shell.context_menu import ContextMenu
 
+DEB_INSTALLER_ID = "nexa.deb.install"
+
 
 class OpenWithChooser:
-    def __init__(self, activity, parent, bounds, apps, open_app, on_association_change=None):
+    def __init__(self, activity, parent, bounds, apps, open_app, on_association_change=None,
+                 on_install_deb=None):
         self.activity = activity
         self.apps = apps
         self.open_app = open_app
         self.on_association_change = on_association_change
+        self.on_install_deb = on_install_deb
         self.parent = parent
         self.bounds = bounds
         self._create_menu()
@@ -18,6 +22,7 @@ class OpenWithChooser:
         self.actions = [app_id for app_id, app in self.apps.items()
                         if callable(getattr(app, "supports_file", None))]
         labels = {app_id: self.apps[app_id].name for app_id in self.actions}
+        labels[DEB_INSTALLER_ID] = "Nexa package installer"
         self.script_handlers = {}
         if "terminal" in self.apps:
             self.script_handlers = {
@@ -26,6 +31,7 @@ class OpenWithChooser:
             }
             labels.update({key: interpreter for key, (interpreter, _supports) in self.script_handlers.items()})
             self.actions.extend(self.script_handlers)
+        self.actions.append(DEB_INSTALLER_ID)
         self.actions.append("cancel")
         self.menu = ContextMenu(self.activity, self.parent, self.bounds,
                                 actions=self.actions, labels=labels)
@@ -41,6 +47,11 @@ class OpenWithChooser:
         return self.menu.visible
 
     def open(self, path):
+        if (path.lower().endswith(".deb")
+                and file_associations.get(path) == DEB_INSTALLER_ID):
+            if self.on_install_deb is not None:
+                self.on_install_deb(path)
+            return
         app_id = file_associations.get(path)
         app = self.apps.get(app_id)
         if (app is not None and callable(getattr(app, "supports_file", None))
@@ -50,8 +61,12 @@ class OpenWithChooser:
             self.show(path)
 
     def show(self, path, x=24, y=64):
-        actions = [app_id for app_id in self.actions[:-1]
-                   if app_id not in self.script_handlers and self.apps[app_id].supports_file(path)]
+        actions = [app_id for app_id in self.actions
+                   if app_id not in self.script_handlers
+                   and app_id not in (DEB_INSTALLER_ID, "cancel")
+                   and self.apps[app_id].supports_file(path)]
+        if path.lower().endswith(".deb"):
+            actions.append(DEB_INSTALLER_ID)
         actions.extend(key for key, (_interpreter, supports) in self.script_handlers.items()
                        if supports(path) and os.path.isfile(path))
         actions.append("cancel")
@@ -59,6 +74,13 @@ class OpenWithChooser:
                        lambda app_id: self._choose(path, app_id) if app_id != "cancel" else None)
 
     def _choose(self, path, app_id):
+        if app_id == DEB_INSTALLER_ID:
+            file_associations.set(path, DEB_INSTALLER_ID)
+            if self.on_association_change is not None:
+                self.on_association_change(path, DEB_INSTALLER_ID)
+            if self.on_install_deb is not None:
+                self.on_install_deb(path)
+            return
         handler = self.script_handlers.get(app_id)
         if handler is not None:
             interpreter = handler[0]

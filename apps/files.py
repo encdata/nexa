@@ -5,6 +5,7 @@ from datetime import datetime
 import nexapip as tg
 
 from shell import file_actions, file_associations, palette
+from shell import deb_packages
 from shell.context_menu import ContextMenu
 from shell.icons import load
 from shell.open_with import OpenWithChooser
@@ -41,9 +42,10 @@ class FilesApp:
 
     def build_with_services(self, activity, parent, context, services):
         return self._build(activity, parent, context, services["apps"], services["open_app"],
-                           services.get("association_changed"))
+                           services.get("association_changed"), services.get("refresh_apps"))
 
-    def _build(self, activity, parent, context, apps, open_app, association_changed=None):
+    def _build(self, activity, parent, context, apps, open_app, association_changed=None,
+               refresh_apps=None):
         if isinstance(context, dict) and "properties" in context:
             return self._build_properties(
                 activity, parent, context["properties"], apps, association_changed)
@@ -138,7 +140,7 @@ class FilesApp:
         open_with = OpenWithChooser(
             activity, parent, lambda: tuple(
                 round(value / density) for value in parent.getdimensions()), apps, open_app,
-            on_association_change)
+            on_association_change, lambda path_value: install_package(path_value))
         state = {"path": path, "back_id": back.id, "forward_id": forward.id,
                  "up_id": up.id, "refresh_id": refresh.id, "search_id": search.id,
                  "path_id": path_label.id, "rows": rows,
@@ -268,6 +270,8 @@ class FilesApp:
                 actions = ["new_file", "new_folder", "open_terminal", "paste", "refresh"]
             else:
                 actions = ["open", "open_terminal"]
+                if item[0].lower().endswith(".deb"):
+                    actions.insert(1, "install_deb")
                 if not item[1]:
                     actions.append("open_with")
                 actions.extend(("copy", "cut", "paste", "rename", "delete", "properties"))
@@ -288,6 +292,29 @@ class FilesApp:
 
         def open_path(path_value):
             state["open_with"].open(path_value)
+
+        def install_package(path_value):
+            if state["busy"]:
+                status.settext("wait for the current file operation")
+                return
+            state["busy"] = True
+            status.settext("installing Debian package…")
+
+            def installed(result, error):
+                if state["closed"]:
+                    return
+                state["busy"] = False
+                if error is not None:
+                    status.settext(f"couldn't install package: {error}")
+                    return
+                package, count = result
+                status.settext(f"installed {package}: {count} app(s)")
+                if refresh_apps is not None:
+                    refresh_apps(lambda refresh_error: load_directory())
+                else:
+                    load_directory()
+
+            file_actions.run_async(lambda: deb_packages.install(path_value), installed)
 
         def run_file_action(operation):
             if state["busy"]:
@@ -337,6 +364,8 @@ class FilesApp:
                         load_directory(path_value, add_history=True)
                     else:
                         open_path(path_value)
+                elif action == "install_deb" and item is not None:
+                    install_package(path_value)
                 elif action == "open_with" and item is not None and not item[1]:
                     show_open_with(path_value)
                 elif action == "properties" and item is not None:

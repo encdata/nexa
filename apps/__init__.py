@@ -8,6 +8,7 @@ from pkgutil import iter_modules
 import re
 import sys
 from nexapip import APP_API_VERSION
+from shell.deb_packages import discover as discover_deb_apps
 
 
 INSTALLED_APPS = Path.home() / ".local" / "share" / "nexa" / "apps"
@@ -108,6 +109,9 @@ def discover():
             _register(apps, app, f"installed app {directory.name}")
         except Exception as error:
             print(f"nexa: couldn't load installed app {directory.name}: {error}")
+    for app_id, app in discover_deb_apps().items():
+        if app_id not in apps:
+            _register(apps, app, f"Debian app {app_id}")
     return apps
 
 

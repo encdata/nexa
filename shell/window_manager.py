@@ -49,6 +49,7 @@ class WindowManager:
         self.on_close = None
         self.on_open_app = None
         self.on_association_change = None
+        self.on_install_deb = None
         self.on_set_theme = None
         self.on_set_wallpaper = None
         self.on_refresh_apps = None
@@ -305,6 +306,7 @@ class WindowManager:
             self.activity, content, context,
             {"apps": self.apps, "open_app": self.on_open_app or self.open_app,
              "association_changed": self.on_association_change,
+             "install_deb": self.on_install_deb,
              "personalization": self.personalization,
              "theme": {name: getattr(palette, name) for name in (
                  "background", "surface", "surface_light", "window_border",

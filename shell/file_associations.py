@@ -35,11 +35,13 @@ def get(path):
 def icon_for(path, apps, fallback=None):
     app = apps.get(get(path))
     if app is None:
+        for candidate in apps.values():
+            supports_file = getattr(candidate, "supports_file", None)
+            if callable(supports_file) and supports_file(path):
+                return candidate.icon
         return fallback
     supports_file = getattr(app, "supports_file", None)
-    if not callable(supports_file) or not supports_file(path):
-        return fallback
-    return app.icon
+    return app.icon if callable(supports_file) and supports_file(path) else fallback
 
 
 def set(path, app_id):
