@@ -295,6 +295,7 @@ class Desktop:
         self.open_with.set_apps(self.apps)
         launchable_apps = {app_id: app for app_id, app in self.apps.items()
                            if not getattr(app, "hosted_window", False)}
+        pending = {item[0] for item in self.population_items[self.population_index:]}
         current = {}
         for icon_id, icon in self.icons.items():
             if icon["context"] is not None:
@@ -321,7 +322,7 @@ class Desktop:
         positions = []
         occupied = [(icon["x"], icon["y"]) for icon in self.icons.values()]
         for app_id, app in launchable_apps.items():
-            if app_id in current:
+            if app_id in current or app_id in pending:
                 continue
             grid_index = self.positions.get(app_id)
             if not isinstance(grid_index, int) or isinstance(grid_index, bool):

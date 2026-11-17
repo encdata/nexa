@@ -88,6 +88,7 @@ class DesktopShell:
         self.wayland_start_lock = Lock()
         self.wayland_launch_queue = []
         self.wayland_starting = False
+        self.wayland_start_error = None
         self.x86_runtime_ready = startup.get("x86_runtime_ready", x86_runtime_ready())
         self.closed = False
         self.pointer = Pointer(activity, self.root, self.density)
@@ -163,7 +164,9 @@ class DesktopShell:
                                and not self.x86_runtime_ready)
                 if self.wayland_host is not None and not needs_setup:
                     return self.wayland_host.launch(argv, cwd, env)
-                self.wayland_launch_queue.append((argv, cwd, env))
+                request = (argv, cwd, env)
+                if request not in self.wayland_launch_queue:
+                    self.wayland_launch_queue.append(request)
                 if not self.wayland_starting:
                     self.wayland_starting = True
                     Thread(target=self._start_wayland_app,
@@ -175,6 +178,7 @@ class DesktopShell:
     def _start_wayland_app(self):
         host = self.wayland_host
         created_host = False
+        failed = False
         try:
             while True:
                 with self.wayland_start_lock:
@@ -205,6 +209,7 @@ class DesktopShell:
                         for argv, _cwd, _env in launches))
                     if not closing and not late_setup:
                         self.wayland_host = host
+                        self.wayland_start_error = None
                         self.wayland_launch_queue.clear()
                         break
                 if closing:
@@ -219,16 +224,20 @@ class DesktopShell:
                 with self.wayland_start_lock:
                     if self.closed or self.wayland_host is not host:
                         break
+                try:
                     host.launch(argv, cwd, env)
+                except Exception as error:
+                    print(f"nexa: couldn't launch Wayland app {argv[0]}: {error}")
+                    self.activity.c.toast(f"couldn't launch app: {str(error)[:120]}")
         except Exception as error:
+            failed = True
             print(f"nexa: couldn't start Wayland host: {error}")
-            self.activity.c.toast("couldn't start Wayland host")
-            with self.wayland_start_lock:
-                self.wayland_launch_queue.clear()
+            self.wayland_start_error = error
+            self.activity.c.toast(f"Wayland host failed: {str(error)[:120]}")
         finally:
             with self.wayland_start_lock:
                 self.wayland_starting = False
-                retry = bool(self.wayland_launch_queue) and not self.closed
+                retry = bool(self.wayland_launch_queue) and not self.closed and not failed
                 if retry:
                     self.wayland_starting = True
             if retry:
