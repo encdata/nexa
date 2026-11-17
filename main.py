@@ -152,6 +152,7 @@ def main():
             if not background:
                 raise
             logging.getLogger("nexa").info("loader connection ended: %s", error)
+            return
         finally:
             if background:
                 active_marker.unlink(missing_ok=True)
