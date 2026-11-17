@@ -62,7 +62,9 @@ struct nx_surface {
     char title[512];
     int configured;
     int mapped;
+    int destroying;
     enum nx_surface_role role;
+    struct nx_surface *deferred_next;
 };
 
 struct nx_positioner {
@@ -142,6 +144,7 @@ struct nx_server {
     pthread_mutex_t event_lock;
     pthread_mutex_t api_lock;
     struct nx_event *events_head, *events_tail;
+    struct nx_surface *deferred_surfaces;
 };
 
 static int wake_dispatch(int fd, uint32_t mask, void *data) {
@@ -306,58 +309,74 @@ static void bind_subcompositor(struct wl_client *client, void *data,
 
 static void surface_resource_destroy(struct wl_resource *resource) {
     struct nx_surface *surface = wl_resource_get_user_data(resource);
-    if (!surface) return;
-    struct nx_surface *child, *next_surface;
-    wl_list_for_each_safe(child, next_surface, &surface->server->surfaces, link) {
-        if (child->subsurface_parent == surface && child->subsurface)
-            wl_resource_destroy(child->subsurface);
-        if (child->popup_parent != surface) continue;
-        if (child->popup) xdg_popup_send_popup_done(child->popup);
-        child->popup_parent = NULL;
-        if (child->mapped) {
-            child->mapped = 0;
-            queue_event(child, NX_UNMAP, NULL, 0, 0, 0, 0);
-        }
-    }
-    if (surface->subsurface) wl_resource_destroy(surface->subsurface);
+    if (!surface || surface->destroying) return;
+    surface->destroying = 1;
+    struct nx_server *server = surface->server;
+    if (surface->mapped) queue_event(surface, NX_UNMAP, NULL, 0, 0, 0, 0);
+    queue_event(surface, NX_DESTROY, NULL, 0, 0, 0, 0);
+    uint32_t serial = wl_display_next_serial(server->display);
     struct nx_pointer *pointer;
-    uint32_t serial = wl_display_next_serial(surface->server->display);
-    wl_list_for_each(pointer, &surface->server->pointers, link) {
-        if (pointer->focus == surface) {
-            wl_pointer_send_leave(pointer->resource, serial, surface->resource);
-            pointer->focus = NULL;
-        }
+    wl_list_for_each(pointer, &server->pointers, link) {
+        if (pointer->focus != surface) continue;
+        wl_pointer_send_leave(pointer->resource, serial, resource);
+        pointer->focus = NULL;
     }
     struct nx_keyboard *keyboard;
-    wl_list_for_each(keyboard, &surface->server->keyboards, link) {
-        if (keyboard->focus == surface) {
-            wl_keyboard_send_leave(keyboard->resource, serial, surface->resource);
-            keyboard->focus = NULL;
-        }
+    wl_list_for_each(keyboard, &server->keyboards, link) {
+        if (keyboard->focus != surface) continue;
+        wl_keyboard_send_leave(keyboard->resource, serial, resource);
+        keyboard->focus = NULL;
     }
     struct nx_text_input *input;
-    wl_list_for_each(input, &surface->server->text_inputs, link) {
+    wl_list_for_each(input, &server->text_inputs, link) {
         if (input->surface != surface) continue;
         if (input->enabled)
             queue_event(surface, NX_TEXT_INPUT, NULL, 0, 0, 0, 0);
-        zwp_text_input_v3_send_leave(input->resource, surface->resource);
+        zwp_text_input_v3_send_leave(input->resource, resource);
         input->surface = NULL;
         input->enabled = 0;
     }
-    struct nx_callback *callback, *next_callback;
-    wl_list_for_each_safe(callback, next_callback, &surface->callbacks, link) {
-        wl_resource_destroy(callback->resource);
-        wl_list_remove(&callback->link);
-        free(callback);
-    }
-    if (surface->popup) wl_resource_destroy(surface->popup);
-    if (surface->decoration) wl_resource_destroy(surface->decoration);
-    if (surface->toplevel) wl_resource_destroy(surface->toplevel);
-    if (surface->xdg_surface) wl_resource_destroy(surface->xdg_surface);
-    if (surface->mapped) queue_event(surface, NX_UNMAP, NULL, 0, 0, 0, 0);
-    queue_event(surface, NX_DESTROY, NULL, 0, 0, 0, 0);
+    surface->resource = NULL;
     wl_list_remove(&surface->link);
-    free(surface);
+    surface->deferred_next = server->deferred_surfaces;
+    server->deferred_surfaces = surface;
+}
+
+static void destroy_deferred_surfaces(struct nx_server *server) {
+    while (server->deferred_surfaces) {
+        struct nx_surface *surface = server->deferred_surfaces;
+        server->deferred_surfaces = surface->deferred_next;
+
+        struct nx_surface *child, *next_surface;
+        wl_list_for_each_safe(child, next_surface, &server->surfaces, link) {
+            if (child->subsurface_parent == surface && child->subsurface)
+                wl_resource_destroy(child->subsurface);
+            if (child->popup_parent != surface) continue;
+            if (child->popup) xdg_popup_send_popup_done(child->popup);
+            child->popup_parent = NULL;
+            if (child->mapped) {
+                child->mapped = 0;
+                queue_event(child, NX_UNMAP, NULL, 0, 0, 0, 0);
+            }
+        }
+        for (struct nx_surface *pending = server->deferred_surfaces; pending;
+             pending = pending->deferred_next) {
+            if (pending->subsurface_parent == surface)
+                pending->subsurface_parent = NULL;
+            if (pending->popup_parent == surface)
+                pending->popup_parent = NULL;
+        }
+        struct nx_callback *callback, *next_callback;
+        wl_list_for_each_safe(callback, next_callback, &surface->callbacks, link) {
+            wl_resource_destroy(callback->resource);
+        }
+        if (surface->popup) wl_resource_destroy(surface->popup);
+        if (surface->decoration) wl_resource_destroy(surface->decoration);
+        if (surface->toplevel) wl_resource_destroy(surface->toplevel);
+        if (surface->xdg_surface) wl_resource_destroy(surface->xdg_surface);
+        if (surface->subsurface) wl_resource_destroy(surface->subsurface);
+        free(surface);
+    }
 }
 
 static void surface_destroy(struct wl_client *client, struct wl_resource *resource) {
@@ -373,15 +392,22 @@ static void surface_attach(struct wl_client *client, struct wl_resource *resourc
     surface->pending_attached = 1;
 }
 
+static void callback_resource_destroy(struct wl_resource *resource) {
+    struct nx_callback *callback = wl_resource_get_user_data(resource);
+    if (!callback) return;
+    wl_list_remove(&callback->link);
+    free(callback);
+}
+
 static void surface_frame(struct wl_client *client, struct wl_resource *resource, uint32_t id) {
     struct wl_resource *callback = wl_resource_create(client, &wl_callback_interface, 1, id);
     if (!callback) return;
-    wl_resource_set_implementation(callback, NULL, NULL, NULL);
     struct nx_surface *surface = wl_resource_get_user_data(resource);
     struct nx_callback *pending = calloc(1, sizeof(*pending));
     if (!pending) { wl_resource_destroy(callback); return; }
     pending->resource = callback;
     wl_list_insert(surface->callbacks.prev, &pending->link);
+    wl_resource_set_implementation(callback, NULL, pending, callback_resource_destroy);
 }
 
 static void surface_region(struct wl_client *client, struct wl_resource *resource,
@@ -414,12 +440,12 @@ static void surface_offset(struct wl_client *client, struct wl_resource *resourc
 static void surface_get_release(struct wl_client *client, struct wl_resource *resource, uint32_t id) {
     struct wl_resource *callback = wl_resource_create(client, &wl_callback_interface, 1, id);
     if (!callback) return;
-    wl_resource_set_implementation(callback, NULL, NULL, NULL);
     struct nx_surface *surface = wl_resource_get_user_data(resource);
     struct nx_callback *pending = calloc(1, sizeof(*pending));
     if (!pending) { wl_resource_destroy(callback); return; }
     pending->resource = callback;
     wl_list_insert(surface->callbacks.prev, &pending->link);
+    wl_resource_set_implementation(callback, NULL, pending, callback_resource_destroy);
 }
 static void complete_callbacks(struct nx_surface *surface) {
     struct timespec now;
@@ -429,8 +455,6 @@ static void complete_callbacks(struct nx_surface *surface) {
     wl_list_for_each_safe(callback, next, &surface->callbacks, link) {
         wl_callback_send_done(callback->resource, ms);
         wl_resource_destroy(callback->resource);
-        wl_list_remove(&callback->link);
-        free(callback);
     }
 }
 
@@ -1413,6 +1437,7 @@ int nexa_wl_dispatch(struct nx_server *server, int timeout_ms) {
     pthread_mutex_lock(&server->api_lock);
     struct wl_event_loop *loop = wl_display_get_event_loop(server->display);
     int result = wl_event_loop_dispatch(loop, timeout_ms);
+    destroy_deferred_surfaces(server);
     wl_display_flush_clients(server->display);
     pthread_mutex_unlock(&server->api_lock);
     return result;
@@ -1695,6 +1720,7 @@ void nexa_wl_destroy(struct nx_server *server) {
     if (!server) return;
     pthread_mutex_lock(&server->api_lock);
     wl_display_destroy_clients(server->display);
+    destroy_deferred_surfaces(server);
     wl_display_destroy(server->display);
     server->display = NULL;
     if (server->keymap_fd >= 0) close(server->keymap_fd);
