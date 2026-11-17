@@ -112,7 +112,7 @@ class NexaConnection(Connection):
 
     def _raise_event_error(self):
         if self._event_error is not None:
-            raise RuntimeError("Nexa event connection stopped") from self._event_error
+            raise EOFError("Nexa event connection stopped") from self._event_error
         raise EOFError("Nexa event connection closed")
 
     def close(self):

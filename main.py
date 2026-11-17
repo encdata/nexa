@@ -36,16 +36,21 @@ def run_connection(connection):
     closing = False
     worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nexa-startup")
     startup_future = worker.submit(load_startup, update_loading, configuration)
-    while not startup_future.done():
-        event = connection.wait_event(0.01)
-        if event is not None:
-            pending_events.append(event)
-            if event.type == tg.Event.config:
-                loading.resize(activity.getconfiguration())
-            if event.type == tg.Event.destroy and event.value.get("finishing"):
-                loading_active = False
-                closing = True
-                break
+    try:
+        while not startup_future.done():
+            event = connection.wait_event(0.01)
+            if event is not None:
+                pending_events.append(event)
+                if event.type == tg.Event.config:
+                    loading.resize(activity.getconfiguration())
+                if event.type == tg.Event.destroy and event.value.get("finishing"):
+                    loading_active = False
+                    closing = True
+                    break
+    except EOFError:
+        loading_active = False
+        worker.shutdown(wait=False, cancel_futures=True)
+        raise
 
     if closing:
         worker.shutdown(wait=False, cancel_futures=True)
@@ -98,28 +103,29 @@ def main():
     background = "--background-wait" in sys.argv[1:]
     marker = Path.home() / ".cache" / "nexa" / "launch"
     active_marker = marker.with_name("active")
+    if background:
+        wait_for_launch(marker)
     while True:
+        try:
+            connection = NexaConnection()
+            break
+        except RuntimeError:
+            if not background:
+                raise
+            sleep(1)
+    with connection:
         if background:
-            wait_for_launch(marker)
-        while True:
-            try:
-                connection = NexaConnection()
-                break
-            except RuntimeError:
-                if not background:
-                    raise
-                sleep(1)
-        with connection:
+            active_marker.touch()
+            marker.unlink(missing_ok=True)
+        try:
+            run_connection(connection)
+        except EOFError as error:
+            if not background:
+                raise
+            print(f"nexa: loader connection ended: {error}")
+        finally:
             if background:
-                active_marker.touch()
-                marker.unlink(missing_ok=True)
-            try:
-                run_connection(connection)
-            finally:
-                if background:
-                    active_marker.unlink(missing_ok=True)
-        if not background:
-            return
+                active_marker.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
