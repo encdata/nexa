@@ -1,0 +1,46 @@
+name: build box64 runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      box64_ref:
+        description: box64 branch, tag, or commit
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: install build tools
+        run: sudo apt-get update && sudo apt-get install -y build-essential cmake git
+
+      - name: fetch box64
+        env:
+          BOX64_REF: ${{ inputs.box64_ref }}
+        run: |
+          git clone https://github.com/ptitSeb/box64.git box64
+          git -C box64 checkout "$BOX64_REF"
+
+      - name: configure and build
+        run: |
+          cmake -S box64 -B build \
+            -DARM64=ON \
+            -DARM_DYNAREC=ON \
+            -DBAD_SIGNAL=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DNOGIT=ON
+          cmake --build build --parallel 2
+          mkdir -p artifact
+          cp build/box64 artifact/box64
+          chmod 755 artifact/box64
+
+      - name: upload box64 runtime
+        uses: actions/upload-artifact@v4
+        with:
+          name: box64-aarch64-glibc
+          path: artifact/box64
+          if-no-files-found: error
