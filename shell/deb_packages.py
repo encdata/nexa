@@ -1,4 +1,6 @@
 import configparser
+import hashlib
+import lzma
 import os
 from pathlib import Path
 import re
@@ -6,10 +8,19 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import time
+from urllib.parse import urljoin
+from urllib.request import urlopen
 
 
 PACKAGE_ROOT = Path.home() / ".local" / "share" / "nexa" / "deb-packages"
+DEPENDENCY_PREFIX = "nexa-dependency-"
 SHORTCUT_ROOT = Path.home() / "Nexa Apps"
+DEBIAN_SUITE = "trixie"
+DEBIAN_INDEX_URL = (f"https://deb.debian.org/debian/dists/{DEBIAN_SUITE}"
+                    "/main/binary-amd64/Packages.xz")
+DEBIAN_BASE_URL = "https://deb.debian.org/debian/"
+DEBIAN_CACHE = Path.home() / ".cache" / "nexa" / "debian"
 _VALID_ID = re.compile(r"[^a-zA-Z0-9_.-]+")
 
 
@@ -86,6 +97,237 @@ def _package_roots():
             and (path / ".nexa-package").is_file()]
 
 
+def _read_package_index():
+    DEBIAN_CACHE.mkdir(parents=True, exist_ok=True)
+    index = DEBIAN_CACHE / f"{DEBIAN_SUITE}-amd64-Packages.xz"
+    if not index.is_file() or time.time() - index.stat().st_mtime > 86400:
+        fd, temporary = tempfile.mkstemp(prefix="Packages-", dir=DEBIAN_CACHE)
+        try:
+            with os.fdopen(fd, "wb") as output, urlopen(DEBIAN_INDEX_URL, timeout=45) as response:
+                shutil.copyfileobj(response, output)
+            os.replace(temporary, index)
+        except Exception:
+            Path(temporary).unlink(missing_ok=True)
+            raise
+
+    packages = {}
+    fields = {}
+
+    def save():
+        package = fields.get("Package")
+        architecture = fields.get("Architecture")
+        if package and architecture in ("amd64", "all"):
+            packages[package] = fields.copy()
+
+    with lzma.open(index, "rt", encoding="utf-8", errors="replace") as source:
+        previous = None
+        for line in source:
+            if not line.strip():
+                save()
+                fields.clear()
+                previous = None
+            elif line[:1].isspace() and previous in fields:
+                fields[previous] += " " + line.strip()
+            elif ": " in line:
+                previous, value = line.split(": ", 1)
+                if previous in ("Package", "Version", "Architecture", "Filename",
+                                "SHA256", "Depends", "Pre-Depends", "Provides"):
+                    fields[previous] = value.strip()
+        save()
+    return packages
+
+
+def _split_dependencies(value, delimiter):
+    parts = []
+    depth = 0
+    start = 0
+    for index, character in enumerate(value):
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            depth = max(0, depth - 1)
+        elif character == delimiter and depth == 0:
+            parts.append(value[start:index].strip())
+            start = index + 1
+    parts.append(value[start:].strip())
+    return [part for part in parts if part]
+
+
+def _version_satisfies(installed, operator, required):
+    if not operator or not installed:
+        return True
+    if installed == "system":
+        return False
+    comparison = {"<<": "lt", "<=": "le", "=": "eq",
+                  ">=": "ge", ">>": "gt"}[operator]
+    result = subprocess.run(["dpkg", "--compare-versions", installed,
+                             comparison, required], check=False)
+    return result.returncode == 0
+
+
+def _dependency_parts(value):
+    match = re.match(
+        r"^([a-zA-Z0-9][a-zA-Z0-9+.-]*)(?::(?:any|amd64))?"
+        r"(?:\s*\((<<|<=|=|>=|>>)\s*([^)]*)\))?", value)
+    if match is None:
+        return None
+    return match.group(1), match.group(2), (match.group(3) or "").strip()
+
+
+def _dependency_applies(value):
+    restriction = re.search(r"\[([^]]+)\]", value)
+    if restriction is not None:
+        architectures = restriction.group(1).split()
+        def matches(architecture):
+            return architecture in ("amd64", "any-amd64", "linux-any",
+                                    "linux-amd64", "any")
+
+        if any(item.startswith("!") and matches(item[1:]) for item in architectures):
+            return False
+        positive = [item for item in architectures if not item.startswith("!")]
+        if positive and not any(matches(item) for item in positive):
+            return False
+    return True
+
+
+def _installed_versions():
+    installed = {}
+    for root in _package_roots():
+        try:
+            name = (root / ".nexa-package").read_text(encoding="utf-8").strip()
+            version = (root / ".nexa-version").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if name:
+            installed[name] = version
+    try:
+        version = _run("glibc-runner", "--shell", "getconf GNU_LIBC_VERSION").split()[-1]
+        installed["libc6"] = version
+    except (OSError, subprocess.CalledProcessError, IndexError):
+        pass
+    if (Path(os.environ.get("PREFIX", "/data/data/com.termux/files/usr"))
+            / "glibc/lib/libstdc++.so.6").is_file():
+        installed["libstdc++6"] = "system"
+    return installed
+
+
+def _resolve_dependencies(dependencies):
+    if not any(item.get("Depends") or item.get("Pre-Depends") for item in dependencies):
+        return []
+    packages = _read_package_index()
+    providers = {}
+    for package, fields in packages.items():
+        for provided in _split_dependencies(fields.get("Provides", ""), ","):
+            name = re.match(r"[a-zA-Z0-9][a-zA-Z0-9+.-]*", provided)
+            if name:
+                providers.setdefault(name.group(), package)
+
+    installed = _installed_versions()
+    resolved = {}
+    visiting = set()
+
+    def choose(group):
+        for alternative in _split_dependencies(group, "|"):
+            if not _dependency_applies(alternative):
+                continue
+            parts = _dependency_parts(alternative)
+            if parts is None:
+                continue
+            name, operator, version = parts
+            package = name if name in packages else providers.get(name)
+            if package is None:
+                continue
+            current = installed.get(name) or installed.get(package)
+            if current and _version_satisfies(current, operator, version):
+                return None
+            return packages[package]
+        raise RuntimeError(f"no Debian amd64 package can satisfy: {group}")
+
+    def visit(fields, include=True):
+        package = fields["Package"]
+        version = fields.get("Version", "")
+        if package in visiting:
+            return
+        visiting.add(package)
+        for group in _split_dependencies(fields.get("Pre-Depends", "") + ","
+                                         + fields.get("Depends", ""), ","):
+            selected = choose(group)
+            if selected is not None:
+                visit(selected)
+        visiting.remove(package)
+        if include:
+            installed[package] = version
+            resolved[package] = fields
+
+    for dependency in dependencies:
+        visit(dependency, include=False)
+    return list(resolved.values())
+
+
+def _download_debian_package(fields):
+    name = fields["Package"]
+    version = fields["Version"]
+    digest = fields.get("SHA256", "")
+    filename = fields.get("Filename", "")
+    if not re.fullmatch(r"[a-fA-F0-9]{64}", digest) or not filename:
+        raise RuntimeError(f"Debian repository has incomplete metadata for {name}")
+    package_cache = DEBIAN_CACHE / "packages"
+    package_cache.mkdir(parents=True, exist_ok=True)
+    target = package_cache / f"{name}_{version}_amd64.deb"
+    if target.is_file():
+        hasher = hashlib.sha256()
+        with open(target, "rb") as cached:
+            for chunk in iter(lambda: cached.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        if hasher.hexdigest() == digest:
+            return target
+    fd, temporary = tempfile.mkstemp(prefix=f"{name}-", dir=package_cache)
+    try:
+        with os.fdopen(fd, "wb") as output, urlopen(
+                urljoin(DEBIAN_BASE_URL, filename), timeout=60) as response:
+            shutil.copyfileobj(response, output)
+        hasher = hashlib.sha256()
+        with open(temporary, "rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        if hasher.hexdigest() != digest:
+            raise RuntimeError(f"SHA256 mismatch while downloading {name}")
+        os.replace(temporary, target)
+    except Exception:
+        Path(temporary).unlink(missing_ok=True)
+        raise
+    return target
+
+
+def _extract_package(deb, package, target, version, dependency=False):
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=f".{package}-", dir=target.parent))
+    backup = target.parent / f".{package}-previous"
+    dpkg_deb = shutil.which("dpkg-deb")
+    try:
+        subprocess.run([dpkg_deb, "-x", str(deb), str(staging)], check=True,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        (staging / ".nexa-package").write_text(package, encoding="utf-8")
+        (staging / ".nexa-version").write_text(version, encoding="utf-8")
+        if dependency:
+            (staging / ".nexa-dependency").touch()
+        if backup.exists():
+            shutil.rmtree(backup)
+        if target.exists():
+            target.rename(backup)
+        try:
+            staging.rename(target)
+        except Exception:
+            if backup.exists():
+                backup.rename(target)
+            raise
+        if backup.exists():
+            shutil.rmtree(backup)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+
+
 def _resolve_debian_path(root, path):
     candidate = root / path.lstrip("/")
     if candidate.exists():
@@ -155,6 +397,7 @@ def _desktop_app(package, desktop_file, root):
             if candidate is not None:
                 command[0] = str(candidate)
                 break
+
     if not Path(command[0]).exists():
         return None
 
@@ -165,6 +408,15 @@ def _desktop_app(package, desktop_file, root):
         working_directory = str(root)
     if not os.path.isdir(working_directory):
         working_directory = str(root)
+
+    if package == "discord" and Path(command[0]).name == "discord":
+        config_root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
+        installed_apps = sorted((config_root / "discord").glob("app-*/Discord"), reverse=True)
+        if installed_apps:
+            command = [str(installed_apps[0]), "--no-sandbox",
+                       "--ozone-platform=wayland",
+                       "--enable-features=UseOzonePlatform"]
+            working_directory = str(installed_apps[0].parent)
 
     desktop_id = _VALID_ID.sub("_", desktop_file.relative_to(root / "usr/share/applications").as_posix())
     app_id = f"deb.{package}.{desktop_id}"[:120]
@@ -182,6 +434,8 @@ def discover():
         return apps
     for root in sorted(PACKAGE_ROOT.iterdir()):
         if not root.is_dir():
+            continue
+        if (root / ".nexa-dependency").exists():
             continue
         metadata = root / ".nexa-package"
         try:
@@ -234,32 +488,23 @@ def install(path):
         raise RuntimeError("install dpkg with `pkg install dpkg` to install .deb files")
     package = _run(dpkg_deb, "-f", str(deb), "Package")
     architecture = _run(dpkg_deb, "-f", str(deb), "Architecture")
+    version = _run(dpkg_deb, "-f", str(deb), "Version")
     if not re.fullmatch(r"[a-z0-9][a-z0-9+.-]*", package):
         raise ValueError("the Debian package has an invalid package name")
     if architecture not in ("amd64", "all"):
         raise ValueError(f"this Nexa runtime supports amd64 .deb files; package is {architecture}")
     PACKAGE_ROOT.mkdir(parents=True, exist_ok=True)
-    staging = Path(tempfile.mkdtemp(prefix=f".{package}-", dir=PACKAGE_ROOT))
-    backup = PACKAGE_ROOT / f".{package}-previous"
-    target = PACKAGE_ROOT / package
-    try:
-        subprocess.run([dpkg_deb, "-x", str(deb), str(staging)], check=True,
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        (staging / ".nexa-package").write_text(package, encoding="utf-8")
-        if backup.exists():
-            shutil.rmtree(backup)
-        if target.exists():
-            target.rename(backup)
-        try:
-            staging.rename(target)
-        except Exception:
-            if backup.exists():
-                backup.rename(target)
-            raise
-        if backup.exists():
-            shutil.rmtree(backup)
-    finally:
-        if staging.exists():
-            shutil.rmtree(staging)
+    fields = {"Package": package, "Version": version,
+              "Architecture": architecture,
+              "Pre-Depends": _run(dpkg_deb, "-f", str(deb), "Pre-Depends"),
+              "Depends": _run(dpkg_deb, "-f", str(deb), "Depends")}
+    dependencies = _resolve_dependencies([fields])
+    downloaded = [(item, _download_debian_package(item)) for item in dependencies]
+    for item, dependency_deb in downloaded:
+        _extract_package(dependency_deb, item["Package"],
+                         PACKAGE_ROOT / f"{DEPENDENCY_PREFIX}{item['Package']}",
+                         item["Version"], dependency=True)
+
+    _extract_package(deb, package, PACKAGE_ROOT / package, version)
     apps = [app for app in discover().values() if app.app_id.startswith(f"deb.{package}.")]
     return package, len(apps)
