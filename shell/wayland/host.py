@@ -683,6 +683,18 @@ class WaylandHost:
                 pass
         use_box64 = machine == 62 or Path(argv[0]).name == "box64"
         if use_box64:
+            executable_dir = Path(executable).parent if executable is not None else None
+            chromium_runtime = (executable_dir is not None
+                                and ((executable_dir / "icudtl.dat").is_file()
+                                     or (executable_dir / "resources" / "app.asar").is_file()
+                                     or (executable_dir / "resources" / "electron.asar").is_file()))
+            if chromium_runtime:
+                for option in ("--no-sandbox", "--disable-dev-shm-usage",
+                               "--ozone-platform=wayland",
+                               "--enable-features=UseOzonePlatform"):
+                    if not any(value == option or value.startswith(option + "=")
+                               for value in argv[1:]):
+                        argv.append(option)
             box64 = box64_command()
             if not env or "SHELL" not in env:
                 shell = shell_command()
