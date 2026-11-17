@@ -74,14 +74,42 @@ def ready():
     return _box64_check()[0]
 
 
+def _ensure_gpu_server(pkg, on_status=None):
+    if shutil.which("virgl_test_server_android") is not None:
+        return
+    try:
+        status = "installing VirGL GPU runtime"
+        logger.info("%s", status)
+        if on_status is not None:
+            on_status(status, 0)
+        output = []
+        process = subprocess.Popen([pkg, "install", "-y", "virglrenderer-android"],
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                   text=True, bufsize=1)
+        for line in process.stdout:
+            output.append(line)
+            for match in _PACKAGE_PROGRESS.finditer(line):
+                if on_status is not None:
+                    on_status(status, min(100, int(match.group(1))))
+        result = process.wait()
+        if result:
+            raise RuntimeError("\n".join(output)[-1000:].strip()
+                               or f"pkg exited with status {result}")
+        if on_status is not None:
+            on_status(status, 100)
+    except (OSError, RuntimeError) as error:
+        logger.warning("VirGL setup failed; x86 Linux apps cannot use GPU rendering: %s", error)
+
+
 def ensure_installed(on_status=None):
     logger.info("checking whether the x86_64 runtime is installed")
-    if ready():
-        return
-    logger.warning("installing missing x86_64 runtime packages")
     pkg = shutil.which("pkg")
     if pkg is None:
         raise RuntimeError("Termux pkg command is unavailable")
+    if ready():
+        _ensure_gpu_server(pkg, on_status)
+        return
+    logger.warning("installing missing x86_64 runtime packages")
 
     def run(command, status):
         output = []
@@ -115,3 +143,4 @@ def ensure_installed(on_status=None):
     passed, details = _box64_check()
     if not passed:
         raise RuntimeError(f"x86_64 Wayland runtime installation failed its Box64 check: {details}")
+    _ensure_gpu_server(pkg, on_status)

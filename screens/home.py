@@ -171,6 +171,9 @@ class DesktopShell:
         def launch():
             if self.closed:
                 return None
+            from shell.deb_packages import graphics_packages_installed
+            needs_gpu_setup = ("BOX64_LD_LIBRARY_PATH" in env
+                               and not graphics_packages_installed())
             self.launch_sequence += 1
             token = self.launch_sequence
             self.pending_linux_launches[token] = {
@@ -190,7 +193,7 @@ class DesktopShell:
                     return None
                 needs_setup = (WaylandHost.needs_x86_runtime(argv)
                                and not self.x86_runtime_ready)
-                if self.wayland_host is not None and not needs_setup:
+                if self.wayland_host is not None and not needs_setup and not needs_gpu_setup:
                     host = self.wayland_host
                     try:
                         process = host.launch(argv, cwd, env)
@@ -203,7 +206,9 @@ class DesktopShell:
                 request = (argv, cwd, env, token)
                 if request not in self.wayland_launch_queue:
                     self.wayland_launch_queue.append(request)
-                self.launch_progress.update(token, "preparing x86 runtime", 24)
+                self.launch_progress.update(
+                    token, "preparing Linux graphics" if needs_gpu_setup
+                    else "preparing x86 runtime", 24)
                 if not self.wayland_starting:
                     self.wayland_starting = True
                     Thread(target=self._start_wayland_app,
@@ -305,6 +310,26 @@ class DesktopShell:
                 try:
                     self._post_launch_update(((argv, cwd, env, token),),
                                              "starting Linux app", 64)
+                    if "BOX64_LD_LIBRARY_PATH" in env:
+                        host.require_gpu()
+                        from shell.deb_packages import (ensure_graphics_packages,
+                                                        graphics_packages_installed,
+                                                        refresh_graphics_environment)
+                        if not graphics_packages_installed():
+                            self._post_launch_update(
+                                ((argv, cwd, env, token),),
+                                "installing Mesa GPU libraries", 28)
+                            try:
+                                ensure_graphics_packages(
+                                    on_progress=lambda status, percent:
+                                    self._post_launch_update(
+                                        ((argv, cwd, env, token),), status,
+                                        28 + int(percent * 0.45)))
+                            except Exception as error:
+                                logger.exception("Mesa GPU setup failed")
+                                raise RuntimeError(
+                                    f"could not prepare Mesa GPU rendering: {error}") from error
+                        refresh_graphics_environment(env)
                     process = host.launch(argv, cwd, env)
                     file_actions.post_to_ui(self._set_launch_process, token, process)
                 except Exception as error:

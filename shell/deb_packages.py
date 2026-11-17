@@ -92,7 +92,62 @@ def _library_path():
     return os.pathsep.join(dict.fromkeys(paths))
 
 
+def _driver_path():
+    paths = []
+    for package in _package_roots():
+        for relative in ("usr/lib/x86_64-linux-gnu/dri", "lib/x86_64-linux-gnu/dri",
+                         "usr/lib/dri", "lib/dri"):
+            path = package / relative
+            if path.is_dir():
+                paths.append(str(path))
+    return os.pathsep.join(dict.fromkeys(paths))
+
+
+def graphics_packages_installed():
+    installed = set()
+    for package in _package_roots():
+        try:
+            installed.add((package / ".nexa-package").read_text(encoding="utf-8").strip())
+        except OSError:
+            continue
+    return {"libegl1", "libgl1-mesa-dri"}.issubset(installed)
+
+
+def ensure_graphics_packages(on_progress=None):
+    if graphics_packages_installed():
+        return
+    PACKAGE_ROOT.mkdir(parents=True, exist_ok=True)
+    dependencies = _resolve_dependencies([], on_progress)
+    total = max(1, len(dependencies))
+    for index, item in enumerate(dependencies):
+        start = int(index * 70 / total)
+        end = int((index + 1) * 70 / total)
+        if on_progress is not None:
+            on_progress(f"downloading {item['Package']} ({index + 1}/{len(dependencies)})", start)
+
+        def download_progress(copied, size):
+            if on_progress is not None:
+                on_progress(f"downloading {item['Package']} ({index + 1}/{len(dependencies)})",
+                            start + int((end - start) * copied / size))
+
+        package = _download_debian_package(item, download_progress)
+        _extract_package(package, item["Package"],
+                         PACKAGE_ROOT / f"{DEPENDENCY_PREFIX}{item['Package']}",
+                         item["Version"], dependency=True)
+    if on_progress is not None:
+        on_progress("Mesa GPU libraries ready", 100)
+
+
+def refresh_graphics_environment(environment):
+    environment["BOX64_LD_LIBRARY_PATH"] = _library_path()
+    drivers = _driver_path()
+    if drivers:
+        environment["LIBGL_DRIVERS_PATH"] = drivers
+
+
 def _package_roots():
+    if not PACKAGE_ROOT.is_dir():
+        return []
     return [path for path in PACKAGE_ROOT.iterdir()
             if path.is_dir() and not path.name.startswith(".")
             and (path / ".nexa-package").is_file()]
@@ -314,7 +369,11 @@ def _installed_versions():
 
 
 def _resolve_dependencies(dependencies, on_progress=None):
-    if not any(item.get("Depends") or item.get("Pre-Depends") for item in dependencies):
+    installed = _installed_versions()
+    graphics_packages = [name for name in ("libegl1", "libgl1-mesa-dri")
+                         if name not in installed]
+    if not graphics_packages and not any(
+            item.get("Depends") or item.get("Pre-Depends") for item in dependencies):
         return []
     if on_progress is not None:
         on_progress("reading Debian package catalog", 14)
@@ -326,7 +385,6 @@ def _resolve_dependencies(dependencies, on_progress=None):
             if name:
                 providers.setdefault(name.group(), package)
 
-    installed = _installed_versions()
     resolved = {}
     visiting = set()
 
@@ -365,6 +423,8 @@ def _resolve_dependencies(dependencies, on_progress=None):
 
     for dependency in dependencies:
         visit(dependency, include=False)
+    for package in graphics_packages:
+        visit(packages[package])
     return list(resolved.values())
 
 
@@ -491,6 +551,9 @@ def _desktop_app(package, desktop_file, root, schema_directory=None, fontconfig_
     launch_env = {"BOX64_LD_LIBRARY_PATH": _library_path(),
                   "BOX64_PREFER_EMULATED": "1",
                   "PATH": _package_path_environment(root)}
+    driver_path = _driver_path()
+    if driver_path:
+        launch_env["LIBGL_DRIVERS_PATH"] = driver_path
     if schema_directory is not None:
         launch_env["GSETTINGS_SCHEMA_DIR"] = str(schema_directory)
     if fontconfig_file is not None:
@@ -604,6 +667,9 @@ def discover():
                 launch_env = {"BOX64_LD_LIBRARY_PATH": _library_path(),
                               "BOX64_PREFER_EMULATED": "1",
                               "PATH": _package_path_environment(root)}
+                driver_path = _driver_path()
+                if driver_path:
+                    launch_env["LIBGL_DRIVERS_PATH"] = driver_path
                 if schema_directory is not None:
                     launch_env["GSETTINGS_SCHEMA_DIR"] = str(schema_directory)
                 if fontconfig_file is not None:

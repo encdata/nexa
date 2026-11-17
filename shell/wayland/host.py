@@ -203,6 +203,7 @@ class WaylandHost:
         self.runtime_dir = Path(runtime_dir or Path.home() / ".cache" / "nexa" / "runtime")
         self.runtime_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.runtime_dir, 0o700)
+        self._gpu_socket = self.runtime_dir / "virgl.sock"
         self.socket_name = socket_name
         (self.runtime_dir / socket_name).unlink(missing_ok=True)
         self.environment = os.environ.copy()
@@ -210,6 +211,7 @@ class WaylandHost:
             "XDG_RUNTIME_DIR": str(self.runtime_dir),
             "WAYLAND_DISPLAY": socket_name,
         })
+        self._gpu_server = None
         shell = runner_shell()
         if shell is not None:
             self.environment["SHELL"] = shell
@@ -245,6 +247,9 @@ class WaylandHost:
             str(self.runtime_dir).encode(), socket_name.encode(), width, height)
         if not self._server:
             raise RuntimeError(f"could not create Wayland socket {socket_name}")
+        self._gpu_server = self._start_gpu_server()
+        if self._gpu_server is not None:
+            self.environment["VTEST_SOCKET_NAME"] = str(self._gpu_socket)
         logger.info("Wayland host listening on %s/%s", self.runtime_dir, socket_name)
         self._active_window_callback = self._active_window_changed
         self.window_host.on_active_window_changed = self._active_window_callback
@@ -267,6 +272,59 @@ class WaylandHost:
         self._frame_thread.start()
         self._thread = Thread(target=self._dispatch, name="nexa-wayland", daemon=True)
         self._thread.start()
+
+    @property
+    def gpu_available(self):
+        return self._gpu_server is not None and self._gpu_server.poll() is None
+
+    def require_gpu(self):
+        if not self.gpu_available:
+            raise RuntimeError(
+                "Android VirGL GPU server is unavailable; install virglrenderer-android "
+                "in Termux and restart Nexa")
+
+    def _start_gpu_server(self):
+        executable = shutil.which("virgl_test_server_android")
+        if executable is None:
+            logger.warning("VirGL server is unavailable; x86 Linux apps cannot use GPU rendering")
+            return None
+        log_directory = Path.home() / ".cache" / "nexa" / "logs"
+        log_directory.mkdir(parents=True, exist_ok=True)
+        output = open(log_directory / "gpu.log", "a", encoding="utf-8")
+        environment = os.environ.copy()
+        environment["EPOXY_USE_ANGLE"] = "1"
+        self._gpu_socket.unlink(missing_ok=True)
+        try:
+            process = subprocess.Popen([executable, "--angle-gl", "--socket-path",
+                                        str(self._gpu_socket)], env=environment, stdout=output,
+                                       stderr=subprocess.STDOUT, close_fds=True,
+                                       start_new_session=True)
+        except OSError:
+            output.close()
+            self._gpu_socket.unlink(missing_ok=True)
+            logger.exception("could not start the Android VirGL server")
+            return None
+        deadline = time.monotonic() + 2
+        while (process.poll() is None and not self._gpu_socket.is_socket()
+               and time.monotonic() < deadline):
+            time.sleep(0.05)
+        if process.poll() is not None or not self._gpu_socket.is_socket():
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, 15)
+                    process.wait(timeout=1)
+                except (ProcessLookupError, subprocess.TimeoutExpired):
+                    try:
+                        os.killpg(process.pid, 9)
+                    except ProcessLookupError:
+                        pass
+            output.close()
+            self._gpu_socket.unlink(missing_ok=True)
+            logger.error("Android VirGL server did not create its socket")
+            return None
+        self._gpu_log = output
+        logger.info("Android VirGL server process started on %s", self._gpu_socket)
+        return process
 
     def _dispatch(self):
         while not self._stopping.is_set():
@@ -360,6 +418,7 @@ class WaylandHost:
             view = tg.SurfaceView(activity, parent, keyboard=True, touch=True,
                                   z_order_on_top=False)
             view.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
+            view.set_frame_transform(stretch=True, flip_vertical=True)
             with state["frame_lock"]:
                 state["view"] = view
                 pending_frame = state["frame"]
@@ -690,6 +749,22 @@ class WaylandHost:
             except OSError:
                 pass
         use_box64 = machine == 62 or Path(argv[0]).name == "box64"
+        gpu_enabled = use_box64 and self.gpu_available
+        if use_box64:
+            self.require_gpu()
+        if gpu_enabled:
+            # This flag forces llvmpipe and silently defeats virpipe.
+            environment.pop("LIBGL_ALWAYS_SOFTWARE", None)
+            environment.update({
+                "GALLIUM_DRIVER": "virpipe",
+                "MESA_GL_VERSION_OVERRIDE": "4.3COMPAT",
+                "MESA_GLES_VERSION_OVERRIDE": "3.2",
+                "MESA_NO_ERROR": "1",
+                "LIBGL_DRI3_DISABLE": "1",
+                "LIBGL_DEBUG": "verbose",
+            })
+            environment["GSK_RENDERER"] = "gl"
+            logger.info("configured %s for GPU rendering through Mesa virpipe", app_name)
         if use_box64:
             executable_dir = Path(executable).parent if executable is not None else None
             chromium_runtime = (executable_dir is not None
@@ -697,9 +772,15 @@ class WaylandHost:
                                      or (executable_dir / "resources" / "app.asar").is_file()
                                      or (executable_dir / "resources" / "electron.asar").is_file()))
             if chromium_runtime:
-                for option in ("--no-sandbox", "--disable-dev-shm-usage",
-                               "--ozone-platform=wayland",
-                               "--enable-features=UseOzonePlatform"):
+                options = ["--no-sandbox", "--disable-dev-shm-usage",
+                           "--ozone-platform=wayland",
+                           "--enable-features=UseOzonePlatform",
+                           "--renderer-process-limit=2"]
+                if gpu_enabled:
+                    options.extend(("--use-gl=egl", "--enable-gpu-rasterization",
+                                    "--ignore-gpu-blocklist",
+                                    "--disable-software-rasterizer"))
+                for option in options:
                     if not any(value == option or value.startswith(option + "=")
                                for value in argv[1:]):
                         argv.append(option)
@@ -747,6 +828,19 @@ class WaylandHost:
                         os.killpg(process.pid, 9)
                     except ProcessLookupError:
                         pass
+        if self._gpu_server is not None and self._gpu_server.poll() is None:
+            try:
+                os.killpg(self._gpu_server.pid, 15)
+                self._gpu_server.wait(timeout=1)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(self._gpu_server.pid, 9)
+                except ProcessLookupError:
+                    pass
+        gpu_log = getattr(self, "_gpu_log", None)
+        if gpu_log is not None:
+            gpu_log.close()
+        self._gpu_socket.unlink(missing_ok=True)
         for surface_id in tuple(self._surfaces):
             self._close_surface(surface_id, send_close=False)
         self._library.nexa_wl_destroy(self._server)

@@ -37,6 +37,11 @@ class SurfaceView(View):
         self.a.c.send_msg({"method": "setBuffer", "params": {
             "aid": self.a.aid, "id": self.id, "bid": buffer.bid}})
 
+    def set_frame_transform(self, stretch=False, flip_vertical=False):
+        self.a.c.send_msg({"method": "setSurfaceFrameTransform", "params": {
+            "aid": self.a.aid, "id": self.id, "stretch": stretch,
+            "flipVertical": flip_vertical}})
+
     def present_shm(self, source, width: int, height: int, stride: int,
                     pixel_format: str = "ARGB8888"):
         """Copies a Wayland shm frame into the hardware-backed surface view."""
