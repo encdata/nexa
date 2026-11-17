@@ -644,11 +644,14 @@ class WaylandHost:
             return True
         return False
 
-    def launch(self, argv, cwd=None):
+    def launch(self, argv, cwd=None, env=None):
         argv = [os.fspath(value) for value in argv]
         if not argv:
             raise ValueError("an executable is required")
-        executable = shutil.which(argv[0], path=self.environment.get("PATH"))
+        environment = self.environment.copy()
+        if env:
+            environment.update({str(key): str(value) for key, value in env.items()})
+        executable = shutil.which(argv[0], path=environment.get("PATH"))
         if executable is None and os.path.isfile(argv[0]):
             executable = argv[0]
         machine = None
@@ -666,7 +669,7 @@ class WaylandHost:
             command = "exec " + shlex.join(["box64", *argv[1:]]) if Path(argv[0]).name == "box64" else (
                 "exec " + shlex.join(["box64", executable, *argv[1:]]))
             argv = ["glibc-runner", "--shell", command]
-        process = subprocess.Popen(argv, cwd=cwd, env=self.environment,
+        process = subprocess.Popen(argv, cwd=cwd, env=environment,
                                    close_fds=True, start_new_session=True)
         self._processes.add(process)
         return process

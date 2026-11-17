@@ -1,7 +1,4 @@
 import os
-import shutil
-import subprocess
-from pathlib import Path
 from threading import Lock, Thread
 from apps import discover
 
@@ -20,6 +17,7 @@ from shell.personalization import save as save_personalization, store_wallpaper
 from shell.icons import load as load_icon
 from shell import palette
 from shell import file_actions
+from shell.x86_runtime import ensure_installed, installed as x86_runtime_installed
 
 
 class DesktopShell:
@@ -83,7 +81,8 @@ class DesktopShell:
         self.wayland_start_lock = Lock()
         self.wayland_launch_queue = []
         self.wayland_starting = False
-        self.x86_runtime_ready = self._x86_runtime_installed()
+        self.x86_runtime_ready = startup.get("x86_runtime_ready",
+                                             x86_runtime_installed())
         self.closed = False
         self.pointer = Pointer(activity, self.root, self.density)
         self.desktop.pointer = self.pointer
@@ -137,8 +136,9 @@ class DesktopShell:
         self.desktop.sync_apps()
         self.taskbar.set_apps(self.apps)
 
-    def register_wayland_launcher(self, app_id, name, icon, argv, cwd=None):
+    def register_wayland_launcher(self, app_id, name, icon, argv, cwd=None, env=None):
         argv = tuple(os.fspath(value) for value in argv)
+        env = {str(key): str(value) for key, value in (env or {}).items()}
 
         def launch():
             with self.wayland_start_lock:
@@ -147,8 +147,8 @@ class DesktopShell:
                 needs_setup = (WaylandHost.needs_x86_runtime(argv)
                                and not self.x86_runtime_ready)
                 if self.wayland_host is not None and not needs_setup:
-                    return self.wayland_host.launch(argv, cwd)
-                self.wayland_launch_queue.append((argv, cwd))
+                    return self.wayland_host.launch(argv, cwd, env)
+                self.wayland_launch_queue.append((argv, cwd, env))
                 if not self.wayland_starting:
                     self.wayland_starting = True
                     Thread(target=self._start_wayland_app,
@@ -166,13 +166,14 @@ class DesktopShell:
                     closing = self.closed
                     requested = tuple(self.wayland_launch_queue)
                     needs_setup = (not self.x86_runtime_ready and any(
-                        WaylandHost.needs_x86_runtime(argv) for argv, _cwd in requested))
+                        WaylandHost.needs_x86_runtime(argv)
+                        for argv, _cwd, _env in requested))
                 if closing:
                     if created_host:
                         host.close()
                     return
                 if needs_setup:
-                    self._ensure_x86_runtime()
+                    ensure_installed()
                     with self.wayland_start_lock:
                         if self.closed:
                             return
@@ -185,7 +186,8 @@ class DesktopShell:
                     closing = self.closed
                     launches = tuple(self.wayland_launch_queue)
                     late_setup = (not self.x86_runtime_ready and any(
-                        WaylandHost.needs_x86_runtime(argv) for argv, _cwd in launches))
+                        WaylandHost.needs_x86_runtime(argv)
+                        for argv, _cwd, _env in launches))
                     if not closing and not late_setup:
                         self.wayland_host = host
                         self.wayland_launch_queue.clear()
@@ -198,11 +200,11 @@ class DesktopShell:
                     host.close()
                     host = None
                     created_host = False
-            for argv, cwd in launches:
+            for argv, cwd, env in launches:
                 with self.wayland_start_lock:
                     if self.closed or self.wayland_host is not host:
                         break
-                    host.launch(argv, cwd)
+                    host.launch(argv, cwd, env)
         except Exception as error:
             print(f"nexa: couldn't start Wayland app: {error}")
             self.activity.c.toast("couldn't start Linux app")
@@ -217,27 +219,6 @@ class DesktopShell:
             if retry:
                 Thread(target=self._start_wayland_app,
                        name="nexa-wayland-start", daemon=True).start()
-
-    @staticmethod
-    def _ensure_x86_runtime():
-        if DesktopShell._x86_runtime_installed():
-            return
-        pkg = shutil.which("pkg")
-        if pkg is None:
-            raise RuntimeError("Termux pkg command is unavailable")
-        subprocess.run([pkg, "install", "-y", "glibc-repo"], check=True)
-        subprocess.run([pkg, "update"], check=True)
-        subprocess.run([pkg, "install", "-y", "glibc-runner", "box64-glibc",
-                        "libwayland-glibc", "libwayland-protocols-glibc",
-                        "libxkbcommon-glibc"], check=True)
-
-    @staticmethod
-    def _x86_runtime_installed():
-        prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
-        glibc = Path(prefix) / "glibc"
-        return (shutil.which("grun") is not None
-                and (glibc / "bin" / "box64").is_file()
-                and (glibc / "lib" / "libwayland-client.so.0").is_file())
 
     def set_theme(self, theme):
         if theme not in ("dark", "light") or theme == self.personalization["theme"]:

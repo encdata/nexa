@@ -4,6 +4,7 @@ from shell.icons import preload
 from shell import palette
 from shell.personalization import load as load_personalization
 from shell.wallpaper import load as load_wallpaper
+from shell.x86_runtime import ensure_installed, installed as x86_runtime_installed
 
 
 def load(update, configuration):
@@ -11,6 +12,17 @@ def load(update, configuration):
     personalization = load_personalization()
     palette.set_theme(personalization["theme"])
     apps = discover()
+
+    x86_runtime_ready = x86_runtime_installed()
+    x86_runtime_error = None
+    if not x86_runtime_ready:
+        update("installing x library", None)
+        try:
+            ensure_installed()
+            x86_runtime_ready = True
+        except Exception as error:
+            x86_runtime_error = str(error)
+            print(f"nexa: couldn't install x86_64 runtime: {error}")
 
     update("reading desktop layout", 30)
     positions = load_positions()
@@ -33,4 +45,6 @@ def load(update, configuration):
     update("starting desktop", 72)
     return {"apps": apps, "positions": positions, "home_items": home_items,
             "wallpaper": wallpaper, "personalization": personalization,
-            "configuration": configuration}
+            "configuration": configuration,
+            "x86_runtime_ready": x86_runtime_ready,
+            "x86_runtime_error": x86_runtime_error}
