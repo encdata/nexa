@@ -1,5 +1,6 @@
 import ctypes
 from collections import OrderedDict, deque
+import logging
 import os
 from pathlib import Path
 import shlex
@@ -10,6 +11,8 @@ import time
 
 import nexapip as tg
 from shell.x86_runtime import box64_command, runner_shell
+
+logger = logging.getLogger("nexa.wayland")
 
 
 class _NativeEvent(ctypes.Structure):
@@ -242,6 +245,7 @@ class WaylandHost:
             str(self.runtime_dir).encode(), socket_name.encode(), width, height)
         if not self._server:
             raise RuntimeError(f"could not create Wayland socket {socket_name}")
+        logger.info("Wayland host listening on %s/%s", self.runtime_dir, socket_name)
         self._active_window_callback = self._active_window_changed
         self.window_host.on_active_window_changed = self._active_window_callback
         self._events = deque()
@@ -668,6 +672,7 @@ class WaylandHost:
         argv = [os.fspath(value) for value in argv]
         if not argv:
             raise ValueError("an executable is required")
+        app_name = Path(argv[0]).name
         environment = self.environment.copy()
         if env:
             environment.update({str(key): str(value) for key, value in env.items()})
@@ -704,9 +709,17 @@ class WaylandHost:
             command = ("export LD_PRELOAD=libresolv.so.2; exec "
                        + shlex.join(target))
             argv = ["glibc-runner", "--shell", command]
-        process = subprocess.Popen(argv, cwd=cwd, env=environment,
-                                   close_fds=True, start_new_session=True)
+        log_directory = Path.home() / ".cache" / "nexa" / "logs"
+        log_directory.mkdir(parents=True, exist_ok=True)
+        app_log = log_directory / "linux-apps.log"
+        with open(app_log, "a", encoding="utf-8") as output:
+            output.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} {app_name} ---\n")
+            output.flush()
+            process = subprocess.Popen(argv, cwd=cwd, env=environment,
+                                       stdout=output, stderr=subprocess.STDOUT,
+                                       close_fds=True, start_new_session=True)
         self._processes.add(process)
+        logger.info("launched %s (pid %s); output: %s", app_name, process.pid, app_log)
         return process
 
     def close(self):

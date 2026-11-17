@@ -1,4 +1,5 @@
 import os
+import logging
 from pathlib import Path
 import re
 import shlex
@@ -6,6 +7,7 @@ import shutil
 import subprocess
 
 _PACKAGE_PROGRESS = re.compile(r"\[\s*(\d{1,3})%\]")
+logger = logging.getLogger("nexa.x86")
 
 def box64_command():
     runtime = Path.home() / ".local" / "share" / "nexa" / "runtime" / "box64"
@@ -34,9 +36,11 @@ def installed():
 
 def _box64_check():
     if not installed():
+        logger.error("runtime check failed: runtime packages or Wayland libraries are missing")
         return False, "runtime packages or Wayland libraries are missing"
     runner = shutil.which("glibc-runner")
     if runner is None:
+        logger.error("runtime check failed: glibc-runner is missing")
         return False, "glibc-runner is missing"
     environment = os.environ.copy()
     shell = runner_shell()
@@ -51,12 +55,18 @@ def _box64_check():
         output = error.stdout or ""
         if isinstance(output, bytes):
             output = output.decode("utf-8", "replace")
-        return False, f"Box64 check timed out after 60 seconds: {output.strip()}"
+        details = f"Box64 check timed out after 60 seconds: {output.strip()}"
+        logger.error("%s", details)
+        return False, details
     except OSError as error:
+        logger.exception("could not run Box64 readiness check")
         return False, str(error)
     output = result.stdout.strip()
     if result.returncode:
-        return False, output or f"glibc-runner exited with status {result.returncode}"
+        details = output or f"glibc-runner exited with status {result.returncode}"
+        logger.error("Box64 readiness check failed: %s", details)
+        return False, details
+    logger.info("Box64 readiness check passed: %s", output)
     return True, output
 
 
@@ -65,14 +75,17 @@ def ready():
 
 
 def ensure_installed(on_status=None):
+    logger.info("checking whether the x86_64 runtime is installed")
     if ready():
         return
+    logger.warning("installing missing x86_64 runtime packages")
     pkg = shutil.which("pkg")
     if pkg is None:
         raise RuntimeError("Termux pkg command is unavailable")
 
     def run(command, status):
         output = []
+        logger.info("%s", status)
         if on_status is not None:
             on_status(status, 0)
         process = subprocess.Popen(command, stdout=subprocess.PIPE,

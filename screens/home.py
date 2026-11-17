@@ -1,4 +1,5 @@
 import os
+import logging
 from threading import Lock, Thread
 from apps import discover
 
@@ -19,6 +20,8 @@ from shell.icons import load as load_icon
 from shell import palette
 from shell import file_actions
 from shell.x86_runtime import ensure_installed, ready as x86_runtime_ready
+
+logger = logging.getLogger("nexa.desktop")
 
 
 class DesktopShell:
@@ -305,11 +308,11 @@ class DesktopShell:
                     process = host.launch(argv, cwd, env)
                     file_actions.post_to_ui(self._set_launch_process, token, process)
                 except Exception as error:
-                    print(f"nexa: couldn't launch Wayland app {argv[0]}: {error}")
+                    logger.exception("couldn't launch Wayland app %s", argv[0])
                     file_actions.post_to_ui(self._fail_linux_launch, token, error)
         except Exception as error:
             failed = True
-            print(f"nexa: couldn't start Wayland host: {error}")
+            logger.exception("couldn't start Wayland host")
             self.wayland_start_error = error
             with self.wayland_start_lock:
                 queued = tuple(self.wayland_launch_queue)

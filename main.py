@@ -1,3 +1,5 @@
+import logging
+from logging.handlers import RotatingFileHandler
 import sys
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +16,27 @@ from shell.nexa_connection import NexaConnection
 from shell.startup import load as load_startup
 
 
+def configure_logging():
+    log_directory = Path.home() / ".cache" / "nexa" / "logs"
+    log_directory.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(log_directory / "nexa.log", maxBytes=2 * 1024 * 1024,
+                                  backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(threadName)s %(name)s: %(message)s"))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(handler)
+
+    app_log = log_directory / "linux-apps.log"
+    if app_log.is_file() and app_log.stat().st_size > 5 * 1024 * 1024:
+        previous = log_directory / "linux-apps.log.1"
+        previous.unlink(missing_ok=True)
+        app_log.replace(previous)
+
+
 def run_connection(connection):
+    logger = logging.getLogger("nexa")
+    logger.info("loader connected; starting desktop boot")
     activity = tg.Activity(connection)
     activity.settheme(
         0xFF10131A,
@@ -58,6 +80,9 @@ def run_connection(connection):
 
     try:
         startup = startup_future.result()
+    except Exception:
+        logger.exception("desktop boot failed while preparing startup state")
+        raise
     finally:
         worker.shutdown(wait=True)
 
@@ -65,6 +90,7 @@ def run_connection(connection):
 
     shell = show_home(activity, startup, loading.root, update_loading, loading.show)
     del startup
+    logger.info("desktop shell created")
     try:
         while not shell.desktop.ready:
             event = pending_events.popleft() if pending_events else connection.wait_event(0.01)
@@ -79,6 +105,7 @@ def run_connection(connection):
         loading.update("ready", 100)
         loading.hide()
         loading_active = False
+        logger.info("desktop boot complete")
 
         while True:
             event = pending_events.popleft() if pending_events else connection.wait_event(0.025)
@@ -100,6 +127,8 @@ def wait_for_launch(marker):
 
 
 def main():
+    configure_logging()
+    logging.getLogger("nexa").info("Nexa process started")
     background = "--background-wait" in sys.argv[1:]
     marker = Path.home() / ".cache" / "nexa" / "launch"
     active_marker = marker.with_name("active")
@@ -122,7 +151,7 @@ def main():
         except EOFError as error:
             if not background:
                 raise
-            print(f"nexa: loader connection ended: {error}")
+            logging.getLogger("nexa").info("loader connection ended: %s", error)
         finally:
             if background:
                 active_marker.unlink(missing_ok=True)
