@@ -1,10 +1,18 @@
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 
 _PACKAGE_PROGRESS = re.compile(r"\[\s*(\d{1,3})%\]")
+
+def box64_command():
+    runtime = Path.home() / ".local" / "share" / "nexa" / "runtime" / "box64"
+    if runtime.is_file() and os.access(runtime, os.X_OK):
+        return str(runtime)
+    return "box64"
+
 
 def installed():
     prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
@@ -21,7 +29,8 @@ def _box64_check():
     if runner is None:
         return False, "glibc-runner is missing"
     try:
-        result = subprocess.run([runner, "--shell", "box64 --version"],
+        result = subprocess.run([runner, "--shell",
+                                 f"{shlex.quote(box64_command())} --version"],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, timeout=60)
     except subprocess.TimeoutExpired as error:

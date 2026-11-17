@@ -9,6 +9,7 @@ from threading import Condition, Event, Lock, Thread
 import time
 
 import nexapip as tg
+from shell.x86_runtime import box64_command
 
 
 class _NativeEvent(ctypes.Structure):
@@ -682,8 +683,9 @@ class WaylandHost:
                 pass
         use_box64 = machine == 62 or Path(argv[0]).name == "box64"
         if use_box64:
-            target = (["box64", *argv[1:]] if Path(argv[0]).name == "box64"
-                      else ["box64", executable, *argv[1:]])
+            box64 = box64_command()
+            target = ([box64, *argv[1:]] if Path(argv[0]).name == "box64"
+                      else [box64, executable, *argv[1:]])
             command = ("export LD_PRELOAD=libresolv.so.2; exec "
                        + shlex.join(target))
             argv = ["glibc-runner", "--shell", command]
