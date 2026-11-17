@@ -339,11 +339,9 @@ def _resolve_debian_path(root, path):
     return root / path.lstrip("/")
 
 
-def _package_path_environment():
-    paths = []
-    for package_root in _package_roots():
-        paths.extend(str(package_root / directory)
-                     for directory in ("usr/bin", "usr/games", "bin"))
+def _package_path_environment(root):
+    paths = [str(root / directory)
+             for directory in ("usr/bin", "usr/games", "bin")]
     paths.append(os.environ.get("PATH", ""))
     return os.pathsep.join(path for path in paths if path)
 
@@ -378,7 +376,7 @@ def _desktop_app(package, desktop_file, root):
     if not command:
         return None
     launch_env = {"BOX64_LD_LIBRARY_PATH": _library_path(),
-                  "PATH": _package_path_environment()}
+                  "PATH": _package_path_environment(root)}
     if Path(command[0]).name == "env":
         command.pop(0)
     while len(command) > 1 and re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*=.*", command[0]):
@@ -476,7 +474,8 @@ def discover():
                     encoding="utf-8")
                 package_apps.append(DebApp(
                     app_id, name, "window", shortcut, [str(candidate)], str(root),
-                    {"BOX64_LD_LIBRARY_PATH": _library_path()}))
+                    {"BOX64_LD_LIBRARY_PATH": _library_path(),
+                     "PATH": _package_path_environment(root)}))
         apps.update((app.app_id, app) for app in package_apps)
     return apps
 

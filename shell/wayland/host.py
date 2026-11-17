@@ -676,8 +676,14 @@ class WaylandHost:
                 pass
         use_box64 = machine == 62 or Path(argv[0]).name == "box64"
         if use_box64:
-            command = "exec " + shlex.join(["box64", *argv[1:]]) if Path(argv[0]).name == "box64" else (
-                "exec " + shlex.join(["box64", executable, *argv[1:]]))
+            emulated = environment.get("BOX64_EMULATED_LIBS", "").split(":")
+            if "libxcb-render.so.0" not in emulated:
+                emulated.append("libxcb-render.so.0")
+            environment["BOX64_EMULATED_LIBS"] = ":".join(filter(None, emulated))
+            target = (["box64", *argv[1:]] if Path(argv[0]).name == "box64"
+                      else ["box64", executable, *argv[1:]])
+            command = ("export LD_PRELOAD=libresolv.so.2; exec "
+                       + shlex.join(target))
             argv = ["glibc-runner", "--shell", command]
         process = subprocess.Popen(argv, cwd=cwd, env=environment,
                                    close_fds=True, start_new_session=True)
