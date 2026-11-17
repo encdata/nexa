@@ -47,6 +47,10 @@ def run_async_progress(operation, callback, on_progress):
     _submit_progress(_worker, operation, callback, on_progress)
 
 
+def post_to_ui(callback, *args):
+    _completed.put(("callback", callback, args))
+
+
 def run_background(operation, callback):
     _submit(_read_worker, operation, callback)
 
@@ -60,11 +64,14 @@ def process_completions():
         if item[0] == "progress":
             _, callback, message, percent = item
             callback(message, percent)
+        elif item[0] == "callback":
+            _, callback, args = item
+            callback(*args)
+        elif item[0] == "complete":
+            _, callback, result, error = item
+            callback(result, error)
         elif len(item) == 3:
             callback, result, error = item
-            callback(result, error)
-        else:
-            _, callback, result, error = item
             callback(result, error)
 
 

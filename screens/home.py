@@ -11,6 +11,7 @@ from shell.window_manager import WindowManager
 from shell.window_host import WindowHost
 from shell.wayland import WaylandHost
 from shell.pointer import Pointer
+from shell.deb_launch_progress import DebLaunchProgress
 from shell.text_direction import force_ltr
 from shell.wallpaper import add as add_wallpaper, load as load_wallpaper
 from shell.personalization import save as save_personalization, store_wallpaper
@@ -98,6 +99,10 @@ class DesktopShell:
         self.pointer = Pointer(activity, self.root, self.density)
         self.desktop.pointer = self.pointer
         self.windows.pointer = self.pointer
+        self.launch_progress = DebLaunchProgress(
+            activity, self.root, lambda: (self.screen_width, self.screen_height))
+        self.launch_sequence = 0
+        self.pending_linux_launches = {}
         self.preload_queue = [app_id for app_id, app in self.apps.items()
                               if getattr(app, "preload_ui", False) and app_id != "settings"]
         if "settings" in self.apps and getattr(self.apps["settings"], "preload_ui", False):
@@ -161,16 +166,41 @@ class DesktopShell:
         env = {str(key): str(value) for key, value in (env or {}).items()}
 
         def launch():
+            if self.closed:
+                return None
+            self.launch_sequence += 1
+            token = self.launch_sequence
+            self.pending_linux_launches[token] = {
+                "name": name, "app_id": app_id,
+                "command": os.path.basename(argv[0]).casefold(),
+                "process": None, "started": monotonic(),
+                "launched": None,
+            }
+            host_ready = self.wayland_host is not None
+            self.launch_progress.show(
+                token, name,
+                "starting Linux app" if host_ready else "preparing Wayland host", 18)
             with self.wayland_start_lock:
                 if self.closed:
+                    self.pending_linux_launches.pop(token, None)
+                    self.launch_progress.complete(token, "Nexa is closing")
                     return None
                 needs_setup = (WaylandHost.needs_x86_runtime(argv)
                                and not self.x86_runtime_ready)
                 if self.wayland_host is not None and not needs_setup:
-                    return self.wayland_host.launch(argv, cwd, env)
-                request = (argv, cwd, env)
+                    host = self.wayland_host
+                    try:
+                        process = host.launch(argv, cwd, env)
+                    except Exception as error:
+                        self.pending_linux_launches.pop(token, None)
+                        self.launch_progress.complete(token, error)
+                        return None
+                    self._set_launch_process(token, process)
+                    return process
+                request = (argv, cwd, env, token)
                 if request not in self.wayland_launch_queue:
                     self.wayland_launch_queue.append(request)
+                self.launch_progress.update(token, "preparing x86 runtime", 24)
                 if not self.wayland_starting:
                     self.wayland_starting = True
                     Thread(target=self._start_wayland_app,
@@ -178,6 +208,43 @@ class DesktopShell:
             return None
 
         return self.window_host.register_launcher(app_id, name, icon, launch)
+
+    def _set_launch_process(self, token, process):
+        pending = self.pending_linux_launches.get(token)
+        if pending is None:
+            return
+        pending["process"] = process
+        pending["launched"] = monotonic()
+        self.launch_progress.update(token, "waiting for the app's first frame", 75)
+
+    def _wayland_surface_ready(self, _surface, app_id, title, created_at):
+        ready = [(token, item) for token, item in self.pending_linux_launches.items()
+                 if item["launched"] is not None and item["launched"] <= created_at]
+        if not ready:
+            return
+        actual = f"{app_id} {title}".casefold()
+        token, pending = next((entry for entry in ready if any(
+            candidate and candidate.casefold() in actual
+            for candidate in (entry[1]["command"], entry[1]["name"]))), ready[0])
+        self.pending_linux_launches.pop(token, None)
+        self.launch_progress.complete(token)
+
+    def _check_linux_launches(self):
+        now = monotonic()
+        for token, pending in tuple(self.pending_linux_launches.items()):
+            process = pending["process"]
+            launched = pending["launched"]
+            if launched is None:
+                if now - pending["started"] > 180:
+                    self.pending_linux_launches.pop(token, None)
+                    self.launch_progress.complete(token, "startup timed out")
+            elif process.poll() is not None and now - launched >= 2:
+                self.pending_linux_launches.pop(token, None)
+                self.launch_progress.complete(
+                    token, f"process exited before opening a window ({process.returncode})")
+            elif now - launched >= 45:
+                self.pending_linux_launches.pop(token, None)
+                self.launch_progress.complete(token, "no Wayland window appeared")
 
     def _start_wayland_app(self):
         host = self.wayland_host
@@ -190,18 +257,21 @@ class DesktopShell:
                     requested = tuple(self.wayland_launch_queue)
                     needs_setup = (not self.x86_runtime_ready and any(
                         WaylandHost.needs_x86_runtime(argv)
-                        for argv, _cwd, _env in requested))
+                        for argv, _cwd, _env, _token in requested))
                 if closing:
                     if created_host:
                         host.close()
                     return
                 if needs_setup:
-                    ensure_installed()
+                    self._post_launch_update(requested, "checking x86 runtime", 24)
+                    ensure_installed(on_status=lambda status, percent:
+                                     self._post_launch_update(requested, status, percent))
                     with self.wayland_start_lock:
                         if self.closed:
                             return
                         self.x86_runtime_ready = True
                 if host is None:
+                    self._post_launch_update(requested, "starting Wayland display", 48)
                     host = WaylandHost(
                         self.window_host, width=self.screen_width, height=self.screen_height)
                     created_host = True
@@ -210,9 +280,10 @@ class DesktopShell:
                     launches = tuple(self.wayland_launch_queue)
                     late_setup = (not self.x86_runtime_ready and any(
                         WaylandHost.needs_x86_runtime(argv)
-                        for argv, _cwd, _env in launches))
+                        for argv, _cwd, _env, _token in launches))
                     if not closing and not late_setup:
                         self.wayland_host = host
+                        host.on_surface_ready = self._wayland_surface_ready
                         self.wayland_start_error = None
                         self.wayland_launch_queue.clear()
                         break
@@ -224,20 +295,30 @@ class DesktopShell:
                     host.close()
                     host = None
                     created_host = False
-            for argv, cwd, env in launches:
+            for argv, cwd, env, token in launches:
                 with self.wayland_start_lock:
                     if self.closed or self.wayland_host is not host:
                         break
                 try:
-                    host.launch(argv, cwd, env)
+                    self._post_launch_update(((argv, cwd, env, token),),
+                                             "starting Linux app", 64)
+                    process = host.launch(argv, cwd, env)
+                    file_actions.post_to_ui(self._set_launch_process, token, process)
                 except Exception as error:
                     print(f"nexa: couldn't launch Wayland app {argv[0]}: {error}")
-                    self.activity.c.toast(f"couldn't launch app: {str(error)[:120]}")
+                    file_actions.post_to_ui(self._fail_linux_launch, token, error)
         except Exception as error:
             failed = True
             print(f"nexa: couldn't start Wayland host: {error}")
             self.wayland_start_error = error
-            self.activity.c.toast(f"Wayland host failed: {str(error)[:120]}")
+            with self.wayland_start_lock:
+                queued = tuple(self.wayland_launch_queue)
+                self.wayland_launch_queue.clear()
+            requests = (*locals().get("requested", ()), *queued)
+            for token in {request[3] for request in requests}:
+                file_actions.post_to_ui(self._fail_linux_launch, token, error)
+            file_actions.post_to_ui(self.activity.c.toast,
+                                    f"Wayland host failed: {str(error)[:120]}")
         finally:
             with self.wayland_start_lock:
                 self.wayland_starting = False
@@ -248,6 +329,14 @@ class DesktopShell:
                 Thread(target=self._start_wayland_app,
                        name="nexa-wayland-start", daemon=True).start()
 
+    def _post_launch_update(self, requests, message, percent):
+        for request in requests:
+            file_actions.post_to_ui(self.launch_progress.update, request[3], message, percent)
+
+    def _fail_linux_launch(self, token, error):
+        self.pending_linux_launches.pop(token, None)
+        self.launch_progress.complete(token, error)
+
     def set_theme(self, theme):
         if theme not in ("dark", "light") or theme == self.personalization["theme"]:
             return
@@ -257,6 +346,7 @@ class DesktopShell:
         self.windows.refresh_theme()
         self.taskbar.refresh_theme()
         self.desktop.refresh_theme()
+        self.launch_progress.refresh_theme()
 
     def set_wallpaper(self, path):
         if path:
@@ -298,6 +388,8 @@ class DesktopShell:
     def tick(self):
         if self.wayland_host is not None:
             self.wayland_host.pump()
+        self._check_linux_launches()
+        self.launch_progress.tick()
         self.wallpaper.tick()
         self.desktop.tick()
         now = monotonic()
@@ -321,6 +413,7 @@ class DesktopShell:
         self.windows.resize(width, height)
         self.desktop.resize(width, height)
         self.taskbar.resize(width, height)
+        self.launch_progress.resize()
         if self.wayland_host is not None:
             self.wayland_host.resize_output(width, height)
 

@@ -1693,14 +1693,17 @@ void nexa_wl_key(struct nx_server *server, uint64_t id, uint32_t time,
 
 void nexa_wl_destroy(struct nx_server *server) {
     if (!server) return;
+    pthread_mutex_lock(&server->api_lock);
     wl_display_destroy_clients(server->display);
     wl_display_destroy(server->display);
+    server->display = NULL;
     if (server->keymap_fd >= 0) close(server->keymap_fd);
     close(server->wake_read);
     close(server->wake_write);
     struct nx_event *event = server->events_head;
     while (event) { struct nx_event *next = event->next; nexa_wl_free_event(event); event = next; }
     pthread_mutex_destroy(&server->event_lock);
+    pthread_mutex_unlock(&server->api_lock);
     pthread_mutex_destroy(&server->api_lock);
     free(server);
 }

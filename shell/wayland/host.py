@@ -245,6 +245,7 @@ class WaylandHost:
         self._surfaces = {}
         self._views = {}
         self._pending_popups = []
+        self.on_surface_ready = None
         self._processes = set()
         self._frame_condition = Condition()
         self._pending_frames = OrderedDict()
@@ -306,6 +307,11 @@ class WaylandHost:
             elif kind == self.FRAME:
                 if frame is not None and surface_id in self._surfaces:
                     self._schedule_frame(surface_id, (frame, width, height, stride, fmt))
+                    callback = self.on_surface_ready
+                    if callback is not None:
+                        state = self._surfaces.get(surface_id)
+                        if state is not None:
+                            callback(surface_id, app_id, title, state["created_at"])
             elif kind == self.UNMAP:
                 state = self._surfaces.get(surface_id)
                 if state and state["view"] is not None:
@@ -335,7 +341,7 @@ class WaylandHost:
         state = {"window": None, "view": None, "frame": None,
                  "parent": None, "popup": False, "container": None,
                  "frame_lock": Lock(), "closed": False,
-                 "text_input_enabled": False}
+                 "text_input_enabled": False, "created_at": time.monotonic()}
         self._surfaces[surface_id] = state
         app_id = app_id or "wayland-app"
         title = title or app_id
@@ -695,7 +701,7 @@ class WaylandHost:
             self._pending_frames.clear()
             self._frame_condition.notify_all()
         self._frame_thread.join(timeout=1)
-        self._thread.join(timeout=1)
+        self._thread.join()
         for process in self._processes:
             if process.poll() is None:
                 try:
