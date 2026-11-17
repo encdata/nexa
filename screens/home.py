@@ -1,4 +1,8 @@
 import os
+import shutil
+import subprocess
+from pathlib import Path
+from threading import Lock, Thread
 from apps import discover
 
 import nexapip as tg
@@ -7,6 +11,8 @@ from time import monotonic, sleep
 from shell.desktop import Desktop
 from shell.taskbar import Taskbar
 from shell.window_manager import WindowManager
+from shell.window_host import WindowHost
+from shell.wayland import WaylandHost
 from shell.pointer import Pointer
 from shell.text_direction import force_ltr
 from shell.wallpaper import add as add_wallpaper, load as load_wallpaper
@@ -69,6 +75,16 @@ class DesktopShell:
                                window_context_actions=self.windows.taskbar_context_actions)
         self.windows.on_active_change = self.taskbar.set_active_window
         self.windows.on_close = self.taskbar.remove_window
+        self.window_host = WindowHost(self.windows, self.apps, self.taskbar,
+                                      self._launcher_apps_changed)
+        self.windows.window_host = self.window_host
+        self.windows.on_register_wayland_launcher = self.register_wayland_launcher
+        self.wayland_host = None
+        self.wayland_start_lock = Lock()
+        self.wayland_launch_queue = []
+        self.wayland_starting = False
+        self.x86_runtime_ready = self._x86_runtime_installed()
+        self.closed = False
         self.pointer = Pointer(activity, self.root, self.density)
         self.desktop.pointer = self.pointer
         self.windows.pointer = self.pointer
@@ -83,6 +99,9 @@ class DesktopShell:
             window.get("prewarming") for window in self.windows.windows.values())
 
     def open_app(self, app_id, context=None):
+        app = self.apps.get(app_id)
+        if getattr(app, "external_launcher", False):
+            return app.launch()
         window_id = self.windows.open_app(app_id, context)
         if window_id is not None:
             self.taskbar.add_window(window_id, self.apps[app_id], self.windows.windows[window_id]["title"])
@@ -98,6 +117,7 @@ class DesktopShell:
                 load_icon.cache_clear()
                 self.apps.clear()
                 self.apps.update(apps)
+                self.window_host.restore_launchers()
                 self.windows.apps = self.apps
                 self.desktop.apps = self.apps
                 self.taskbar.set_apps(self.apps)
@@ -112,6 +132,112 @@ class DesktopShell:
                 callback(error)
 
         file_actions.run_background(discover, refreshed)
+
+    def _launcher_apps_changed(self):
+        self.desktop.sync_apps()
+        self.taskbar.set_apps(self.apps)
+
+    def register_wayland_launcher(self, app_id, name, icon, argv, cwd=None):
+        argv = tuple(os.fspath(value) for value in argv)
+
+        def launch():
+            with self.wayland_start_lock:
+                if self.closed:
+                    return None
+                needs_setup = (WaylandHost.needs_x86_runtime(argv)
+                               and not self.x86_runtime_ready)
+                if self.wayland_host is not None and not needs_setup:
+                    return self.wayland_host.launch(argv, cwd)
+                self.wayland_launch_queue.append((argv, cwd))
+                if not self.wayland_starting:
+                    self.wayland_starting = True
+                    Thread(target=self._start_wayland_app,
+                           name="nexa-wayland-start", daemon=True).start()
+            return None
+
+        return self.window_host.register_launcher(app_id, name, icon, launch)
+
+    def _start_wayland_app(self):
+        host = self.wayland_host
+        created_host = False
+        try:
+            while True:
+                with self.wayland_start_lock:
+                    closing = self.closed
+                    requested = tuple(self.wayland_launch_queue)
+                    needs_setup = (not self.x86_runtime_ready and any(
+                        WaylandHost.needs_x86_runtime(argv) for argv, _cwd in requested))
+                if closing:
+                    if created_host:
+                        host.close()
+                    return
+                if needs_setup:
+                    self._ensure_x86_runtime()
+                    with self.wayland_start_lock:
+                        if self.closed:
+                            return
+                        self.x86_runtime_ready = True
+                if host is None:
+                    host = WaylandHost(
+                        self.window_host, width=self.screen_width, height=self.screen_height)
+                    created_host = True
+                with self.wayland_start_lock:
+                    closing = self.closed
+                    launches = tuple(self.wayland_launch_queue)
+                    late_setup = (not self.x86_runtime_ready and any(
+                        WaylandHost.needs_x86_runtime(argv) for argv, _cwd in launches))
+                    if not closing and not late_setup:
+                        self.wayland_host = host
+                        self.wayland_launch_queue.clear()
+                        break
+                if closing:
+                    if created_host:
+                        host.close()
+                    return
+                if created_host:
+                    host.close()
+                    host = None
+                    created_host = False
+            for argv, cwd in launches:
+                with self.wayland_start_lock:
+                    if self.closed or self.wayland_host is not host:
+                        break
+                    host.launch(argv, cwd)
+        except Exception as error:
+            print(f"nexa: couldn't start Wayland app: {error}")
+            self.activity.c.toast("couldn't start Linux app")
+            with self.wayland_start_lock:
+                self.wayland_launch_queue.clear()
+        finally:
+            with self.wayland_start_lock:
+                self.wayland_starting = False
+                retry = bool(self.wayland_launch_queue) and not self.closed
+                if retry:
+                    self.wayland_starting = True
+            if retry:
+                Thread(target=self._start_wayland_app,
+                       name="nexa-wayland-start", daemon=True).start()
+
+    @staticmethod
+    def _ensure_x86_runtime():
+        if DesktopShell._x86_runtime_installed():
+            return
+        pkg = shutil.which("pkg")
+        if pkg is None:
+            raise RuntimeError("Termux pkg command is unavailable")
+        subprocess.run([pkg, "install", "-y", "glibc-repo"], check=True)
+        subprocess.run([pkg, "update"], check=True)
+        subprocess.run([pkg, "install", "-y", "glibc-runner", "box64-glibc",
+                        "libwayland-glibc", "libwayland-protocols-glibc",
+                        "libxkbcommon-glibc"], check=True)
+
+    @staticmethod
+    def _x86_runtime_installed():
+        prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
+        glibc = Path(prefix) / "glibc"
+        return (shutil.which("grun") is not None
+                and (glibc / "bin" / "box64").is_file()
+                and (glibc / "lib" / "libwayland-client.so.0").is_file())
 
     def set_theme(self, theme):
         if theme not in ("dark", "light") or theme == self.personalization["theme"]:
@@ -144,6 +270,8 @@ class DesktopShell:
             self.open_app("settings")
 
     def handle_event(self, event):
+        if self.wayland_host is not None and self.wayland_host.handle_event(event):
+            return True
         if event.type == tg.Event.config:
             width = event.value.get("screenwidth", self.screen_width)
             height = event.value.get("screenheight", self.screen_height)
@@ -159,6 +287,8 @@ class DesktopShell:
                 or self.taskbar.handle_event(event))
 
     def tick(self):
+        if self.wayland_host is not None:
+            self.wayland_host.pump()
         self.wallpaper.tick()
         self.desktop.tick()
         now = monotonic()
@@ -182,10 +312,18 @@ class DesktopShell:
         self.windows.resize(width, height)
         self.desktop.resize(width, height)
         self.taskbar.resize(width, height)
+        if self.wayland_host is not None:
+            self.wayland_host.resize_output(width, height)
 
     def close(self):
+        with self.wayland_start_lock:
+            self.closed = True
+            host, self.wayland_host = self.wayland_host, None
+            self.wayland_launch_queue.clear()
         self.desktop.close()
         self.windows.shutdown()
+        if host is not None:
+            host.close()
         self.wallpaper.close()
 
 

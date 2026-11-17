@@ -121,6 +121,11 @@ class View:
         self.a.c.send_msg(
             {"method": "requestFocus", "params": {"aid": self.a.aid, "id": self.id, "forcesoft": forcesoft}})
 
+    def hidekeyboard(self):
+        """Hides the soft keyboard currently shown for this view."""
+        self.a.c.send_msg(
+            {"method": "hideSoftInput", "params": {"aid": self.a.aid, "id": self.id}})
+
     def handleevent(self, e: Event):
         """Handles an Event for this View. Subclasses can override this to provide event handling."""
         if hasattr(self, "eventlistener"):

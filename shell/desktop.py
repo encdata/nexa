@@ -291,10 +291,17 @@ class Desktop:
 
     def sync_apps(self):
         self.open_with.set_apps(self.apps)
-        current = {icon["key"]: icon_id for icon_id, icon in self.icons.items()
-                   if icon["context"] is None}
+        launchable_apps = {app_id: app for app_id, app in self.apps.items()
+                           if not getattr(app, "hosted_window", False)}
+        current = {}
+        for icon_id, icon in self.icons.items():
+            if icon["context"] is not None:
+                continue
+            app = self.apps.get(icon["key"])
+            if app is None or not getattr(app, "hosted_window", False):
+                current[icon["key"]] = icon_id
         for app_id, icon_id in current.items():
-            app = self.apps.get(app_id)
+            app = launchable_apps.get(app_id)
             icon = self.icons.get(icon_id)
             if app is None:
                 self.icons.pop(icon_id, None)
@@ -311,7 +318,7 @@ class Desktop:
         additions = []
         positions = []
         occupied = [(icon["x"], icon["y"]) for icon in self.icons.values()]
-        for app_id, app in self.apps.items():
+        for app_id, app in launchable_apps.items():
             if app_id in current:
                 continue
             grid_index = self.positions.get(app_id)

@@ -8,7 +8,7 @@ __version__ = "0.2.0"
 __all__ = ['APP_API_VERSION', 'Activity', 'App', 'Buffer', 'Button', 'Checkbox', 'CompoundButton', 'Connection', 'EditText', 'Event',
            'FrameLayout', "GridLayout", 'HorizontalScrollView', 'ImageView', 'LinearLayout', 'NestedScrollView',
            'NexaApp', 'Notification', 'ProgressBar', 'RadioButton', 'RadioGroup', 'RemoteViews', 'Space', 'Spinner',
-           'SwipeRefreshLayout', 'Switch', 'TabLayout', 'Task', 'TextView', 'ToggleButton', 'View', 'ViewGroup',
+           'SwipeRefreshLayout', 'Switch', 'SurfaceView', 'TabLayout', 'Task', 'TextView', 'ToggleButton', 'View', 'ViewGroup',
            'WebView']
 
 from nexapip.activity import Activity
@@ -35,6 +35,7 @@ from nexapip.space import Space
 from nexapip.spinner import Spinner
 from nexapip.swiperefreshlayout import SwipeRefreshLayout
 from nexapip.switch import Switch
+from nexapip.surfaceview import SurfaceView
 from nexapip.tablayout import TabLayout
 from nexapip.task import Task
 from nexapip.textview import TextView

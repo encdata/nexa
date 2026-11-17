@@ -239,7 +239,9 @@ class Taskbar:
 
     def _populate_apps(self, apps):
         previous_letter = None
-        for app in sorted(apps.values(), key=lambda item: item.name.casefold()):
+        launchers = (app for app in apps.values()
+                     if not getattr(app, "hosted_window", False))
+        for app in sorted(launchers, key=lambda item: item.name.casefold()):
             letter = app.name[:1].upper()
             if letter != previous_letter:
                 self._add_app_heading(self.apps_container, letter)

@@ -2,9 +2,6 @@ from mmap import mmap
 import os
 from typing import Literal
 
-import nexapip.msg as msg
-
-
 class Buffer:
     """This represents a raw ARGB888 image buffer.
 
@@ -18,11 +15,13 @@ class Buffer:
 
     def __init__(self, connection, w: int, h: int, format: Literal["ARGB888"] = "ARGB888"):
         self.c = connection
-        self.c.send_msg({"method": "addBuffer", "params": {"w": w, "h": h, "format": format}})
-        ret = msg.read_msg_fd(self.c._main)
-        if len(ret) == 1:
+        self.w = w
+        self.h = h
+        response, fd = self.c.send_read_msg_fd(
+            {"method": "addBuffer", "params": {"w": w, "h": h, "format": format}})
+        if fd is None:
             raise RuntimeError("Could not create Buffer")
-        self.bid, self.fd = ret
+        self.bid, self.fd = response, fd
         self.mem = mmap(self.fd, w * h * 4)
 
     def __enter__(self):

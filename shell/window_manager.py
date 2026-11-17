@@ -158,6 +158,12 @@ class WindowManager:
         available_height = max(160, self.screen_height - self.taskbar_height - 24)
         width = min(self.screen_width - 24, max(360, round(self.screen_width * 0.78)), 820)
         height = min(620, max(300, round(available_height * 0.82)), available_height)
+        initial_size = context.get("size") if getattr(app, "hosted_window", False) else None
+        if initial_size is not None:
+            width = round(initial_size[0] + self.border_width * 2)
+            height = round(initial_size[1] + self.titlebar_height + self.border_width * 2)
+            width = max(self.minimum_width, min(self.screen_width, width))
+            height = max(self.minimum_height, min(available_height, height))
         x = max(0, (self.screen_width - width) // 2)
         y = max(0, (self.screen_height - self.taskbar_height - height) // 2)
 
@@ -298,7 +304,9 @@ class WindowManager:
              "set_theme": self.on_set_theme,
              "set_wallpaper": self.on_set_wallpaper,
              "refresh_apps": self.on_refresh_apps,
-             "app_is_running": self.on_app_is_running})
+             "app_is_running": self.on_app_is_running,
+             "window_host": getattr(self, "window_host", None),
+             "register_wayland_launcher": getattr(self, "on_register_wayland_launcher", None)})
 
     def _finish_build(self, window):
         future = window["build_future"]
@@ -444,11 +452,46 @@ class WindowManager:
     def activate_from_taskbar(self, window_id):
         window = self.windows.get(window_id)
         if window is None:
-            return
+            return False
         if not window["minimized"] and self.active_window == window_id:
             self.minimize(window_id)
         else:
             self.restore(window_id)
+        return True
+
+    def focus_window(self, window_id):
+        window = self.windows.get(window_id)
+        if window is None:
+            return False
+        if window["minimized"]:
+            window["minimized"] = False
+            window["frame"].setvisibility(tg.View.VISIBLE)
+        self._raise_window(window)
+        self._set_active(window_id)
+        return True
+
+    def set_title(self, window_id, title):
+        window = self.windows.get(window_id)
+        if window is None:
+            return False
+        window["title"] = str(title)
+        window["title_view"].settext(window["title"])
+        return True
+
+    def set_window_size(self, window_id, width, height):
+        window = self.windows.get(window_id)
+        if window is None:
+            return False
+        width = max(self.minimum_width, round(width))
+        height = max(self.minimum_height, round(height))
+        x, y, width, height = self._fit_geometry(
+            window["x"], window["y"], width, height)
+        window["x"], window["y"] = x, y
+        window["width"], window["height"] = width, height
+        window["maximized"] = False
+        window["restore_geometry"] = None
+        self._apply_window_geometry(window, top=True)
+        return True
 
     def taskbar_context_actions(self, window_id):
         window = self.windows.get(window_id)
@@ -500,6 +543,10 @@ class WindowManager:
         self.active_window = window_id
         if changed and self.on_active_change is not None:
             self.on_active_change(window_id)
+        if changed:
+            window_host = getattr(self, "window_host", None)
+            if window_host is not None:
+                window_host.active_window_changed(window_id)
         if window_id is not None:
             self._activate_window_handler(self.windows.get(window_id, {}))
 
@@ -771,6 +818,9 @@ class WindowManager:
         window = self.windows.pop(window_id, None)
         if window is None:
             return
+        host_window = window.get("host_window")
+        if host_window is not None:
+            host_window._on_closed()
         if self.show_desktop_windows is not None:
             self.show_desktop_windows = [item for item in self.show_desktop_windows
                                          if item != window_id]
@@ -844,6 +894,9 @@ class WindowManager:
             close = getattr(window["event_handler"], "close", None)
             if close is not None:
                 close()
+            host_window = window.get("host_window")
+            if host_window is not None:
+                host_window._on_closed()
         for window in tuple(self.preloaded.values()):
             self._discard_window(window)
         self.preloaded.clear()

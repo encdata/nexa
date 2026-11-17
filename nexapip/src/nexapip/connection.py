@@ -185,6 +185,13 @@ class Connection:
             self._send_msg(msg)
             return self.__read_msg()
 
+    def send_read_msg_fd(self, msg: Union[str, dict]):
+        """Send a request and read its reply with an attached file descriptor."""
+        with self.__main_lock:
+            self._send_msg(msg)
+            return tgmsg.read_msg_fd(self._main)
+
+
     def send_msg_async(self, msg: Union[str, dict]) -> Future:
         """queue a no-reply message and return its future."""
         future = self._submit_request(self._send_msg, msg)
