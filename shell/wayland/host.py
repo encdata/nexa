@@ -9,7 +9,7 @@ from threading import Condition, Event, Lock, Thread
 import time
 
 import nexapip as tg
-from shell.x86_runtime import box64_command
+from shell.x86_runtime import box64_command, shell_command
 
 
 class _NativeEvent(ctypes.Structure):
@@ -684,6 +684,10 @@ class WaylandHost:
         use_box64 = machine == 62 or Path(argv[0]).name == "box64"
         if use_box64:
             box64 = box64_command()
+            if not env or "SHELL" not in env:
+                shell = shell_command()
+                if shell is not None:
+                    environment["SHELL"] = shell
             target = ([box64, *argv[1:]] if Path(argv[0]).name == "box64"
                       else [box64, executable, *argv[1:]])
             command = ("export LD_PRELOAD=libresolv.so.2; exec "

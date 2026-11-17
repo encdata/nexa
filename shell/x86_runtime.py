@@ -14,11 +14,18 @@ def box64_command():
     return "box64"
 
 
+def shell_command():
+    prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
+    shell = Path(prefix) / "glibc" / "bin" / "bash"
+    return str(shell) if shell.is_file() else None
+
+
 def installed():
     prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
     glibc = Path(prefix) / "glibc"
     return (shutil.which("grun") is not None
             and (glibc / "bin" / "box64").is_file()
+            and (glibc / "bin" / "bash").is_file()
             and (glibc / "lib" / "libwayland-client.so.0").is_file())
 
 
@@ -82,7 +89,7 @@ def ensure_installed(on_status=None):
 
     install("glibc-repo")
     run([pkg, "update"], "updating package lists")
-    for package in ("glibc", "glibc-runner", "box64-glibc", "libwayland-glibc",
+    for package in ("glibc", "glibc-runner", "bash-glibc", "box64-glibc", "libwayland-glibc",
                     "libwayland-protocols-glibc", "libxkbcommon-glibc"):
         install(package)
     passed, details = _box64_check()
