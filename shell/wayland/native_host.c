@@ -115,6 +115,7 @@ struct nx_server {
     struct wl_global *decoration_manager;
     struct wl_global *output;
     struct wl_global *seat;
+    struct wl_global *data_device_manager;
     struct wl_global *text_input_manager;
     struct wl_list surfaces;
     struct wl_list pointers;
@@ -550,6 +551,75 @@ static void bind_seat(struct wl_client *client, void *data, uint32_t version, ui
     wl_resource_set_implementation(resource, &seat_impl, data, NULL);
     wl_seat_send_capabilities(resource, WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD);
     if (wl_resource_get_version(resource) >= 2) wl_seat_send_name(resource, "nexa-seat");
+}
+
+static void data_source_offer(struct wl_client *client, struct wl_resource *resource,
+                              const char *mime_type) {
+    (void)client; (void)resource; (void)mime_type;
+}
+static void data_source_destroy(struct wl_client *client, struct wl_resource *resource) {
+    (void)client; wl_resource_destroy(resource);
+}
+static void data_source_set_actions(struct wl_client *client, struct wl_resource *resource,
+                                    uint32_t actions) {
+    (void)client; (void)resource; (void)actions;
+}
+static const struct wl_data_source_interface data_source_impl = {
+    .offer = data_source_offer,
+    .destroy = data_source_destroy,
+    .set_actions = data_source_set_actions,
+};
+
+static void data_device_start_drag(struct wl_client *client, struct wl_resource *resource,
+                                   struct wl_resource *source, struct wl_resource *origin,
+                                   struct wl_resource *icon, uint32_t serial) {
+    (void)client; (void)resource; (void)source; (void)origin; (void)icon; (void)serial;
+}
+static void data_device_set_selection(struct wl_client *client, struct wl_resource *resource,
+                                      struct wl_resource *source, uint32_t serial) {
+    (void)client; (void)resource; (void)source; (void)serial;
+}
+static void data_device_release(struct wl_client *client, struct wl_resource *resource) {
+    (void)client; wl_resource_destroy(resource);
+}
+static const struct wl_data_device_interface data_device_impl = {
+    .start_drag = data_device_start_drag,
+    .set_selection = data_device_set_selection,
+    .release = data_device_release,
+};
+
+static void data_device_manager_create_source(struct wl_client *client,
+                                               struct wl_resource *resource, uint32_t id) {
+    struct wl_resource *source = wl_resource_create(client, &wl_data_source_interface,
+        wl_resource_get_version(resource), id);
+    if (!source) return;
+    wl_resource_set_implementation(source, &data_source_impl, NULL, NULL);
+}
+static void data_device_manager_get_device(struct wl_client *client,
+                                            struct wl_resource *resource, uint32_t id,
+                                            struct wl_resource *seat) {
+    (void)seat;
+    struct wl_resource *device = wl_resource_create(client, &wl_data_device_interface,
+        wl_resource_get_version(resource), id);
+    if (!device) return;
+    wl_resource_set_implementation(device, &data_device_impl, NULL, NULL);
+}
+static void data_device_manager_release(struct wl_client *client, struct wl_resource *resource) {
+    (void)client; wl_resource_destroy(resource);
+}
+static const struct wl_data_device_manager_interface data_device_manager_impl = {
+    .create_data_source = data_device_manager_create_source,
+    .get_data_device = data_device_manager_get_device,
+    .release = data_device_manager_release,
+};
+static void bind_data_device_manager(struct wl_client *client, void *data,
+                                     uint32_t version, uint32_t id) {
+    (void)data;
+    if (version > 3) version = 3;
+    struct wl_resource *resource = wl_resource_create(client,
+        &wl_data_device_manager_interface, version, id);
+    if (!resource) return;
+    wl_resource_set_implementation(resource, &data_device_manager_impl, NULL, NULL);
 }
 
 static void text_input_resource_destroy(struct wl_resource *resource) {
@@ -1185,12 +1255,15 @@ struct nx_server *nexa_wl_create(const char *runtime_dir, const char *socket_nam
                                        server, bind_output);
     server->seat = wl_global_create(server->display, &wl_seat_interface, 7,
                                      server, bind_seat);
+    server->data_device_manager = wl_global_create(server->display,
+        &wl_data_device_manager_interface, 3, server, bind_data_device_manager);
     server->text_input_manager = wl_global_create(server->display,
         &zwp_text_input_manager_v3_interface, 1, server, bind_text_input_manager);
     server->wake_source = wl_event_loop_add_fd(wl_display_get_event_loop(server->display),
         server->wake_read, WL_EVENT_READABLE, wake_dispatch, server);
     if (!server->compositor || !server->shell || !server->decoration_manager
-        || !server->output || !server->seat || !server->text_input_manager
+        || !server->output || !server->seat || !server->data_device_manager
+        || !server->text_input_manager
         || !server->wake_source) {
         wl_display_destroy(server->display);
         close(server->wake_read);

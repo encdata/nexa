@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import struct
 import subprocess
 import tempfile
 import time
@@ -22,6 +23,8 @@ DEBIAN_INDEX_URL = (f"https://deb.debian.org/debian/dists/{DEBIAN_SUITE}"
 DEBIAN_BASE_URL = "https://deb.debian.org/debian/"
 DEBIAN_CACHE = Path.home() / ".cache" / "nexa" / "debian"
 _VALID_ID = re.compile(r"[^a-zA-Z0-9_.-]+")
+_library_index = None
+_library_index_signature = None
 
 
 class DebApp:
@@ -76,15 +79,112 @@ def _find_icon(root, value):
     return "window"
 
 
-def _library_path():
+def _elf_dependencies(path):
+    try:
+        with open(path, "rb") as binary:
+            header = binary.read(64)
+            if (len(header) != 64 or header[:4] != b"\x7fELF"
+                    or header[4:6] != b"\x02\x01"):
+                return ()
+            ph_offset = struct.unpack_from("<Q", header, 32)[0]
+            ph_size, ph_count = struct.unpack_from("<HH", header, 54)
+            loads = []
+            dynamic = None
+            for index in range(ph_count):
+                binary.seek(ph_offset + index * ph_size)
+                entry = binary.read(ph_size)
+                if len(entry) < 56:
+                    return ()
+                kind, _, offset, address, _, file_size, _, _ = struct.unpack_from(
+                    "<IIQQQQQQ", entry)
+                if kind == 1:
+                    loads.append((address, address + file_size, offset))
+                elif kind == 2:
+                    dynamic = (offset, file_size)
+            if dynamic is None:
+                return ()
+            binary.seek(dynamic[0])
+            entries = binary.read(dynamic[1])
+            string_table = None
+            needed = []
+            for offset in range(0, len(entries) - 15, 16):
+                tag, value = struct.unpack_from("<qQ", entries, offset)
+                if tag == 0:
+                    break
+                if tag == 1:
+                    needed.append(value)
+                elif tag == 5:
+                    string_table = value
+            if string_table is None:
+                return ()
+            string_offset = next((file_offset + string_table - start
+                                  for start, end, file_offset in loads
+                                  if start <= string_table < end), None)
+            if string_offset is None:
+                return ()
+            binary.seek(string_offset)
+            strings = binary.read(max(needed, default=-1) + 256)
+            return tuple(name.decode("ascii", "ignore")
+                         for offset in needed
+                         if (name := strings[offset:strings.find(b"\0", offset)])
+                         and b"/" not in name)
+    except (OSError, struct.error, OverflowError):
+        return ()
+
+
+def _debian_library_index():
+    global _library_index, _library_index_signature
+    roots = _package_roots()
+    signature = tuple((str(root), (root / ".nexa-package").stat().st_mtime_ns)
+                      for root in roots)
+    if _library_index is not None and signature == _library_index_signature:
+        return _library_index
+    index = {}
+    for root in roots:
+        for base in (root / "usr/lib", root / "lib"):
+            if not base.is_dir():
+                continue
+            for directory, _, files in os.walk(base):
+                for name in files:
+                    if ".so" not in name:
+                        continue
+                    path = Path(directory) / name
+                    if path.is_file():
+                        index.setdefault(name, path)
+    _library_index = index
+    _library_index_signature = signature
+    return index
+
+
+def _library_path(executable=None):
     paths = []
-    if PACKAGE_ROOT.is_dir():
-        for package in PACKAGE_ROOT.iterdir():
-            for relative in ("usr/lib/x86_64-linux-gnu", "lib/x86_64-linux-gnu",
-                             "usr/lib", "lib"):
-                path = package / relative
-                if path.is_dir():
-                    paths.append(str(path))
+    if executable:
+        index = _debian_library_index()
+        pending = list(_elf_dependencies(executable))
+        libraries = {}
+        while pending:
+            name = pending.pop()
+            if name in libraries:
+                continue
+            library = index.get(name)
+            if library is None:
+                continue
+            libraries[name] = library
+            pending.extend(_elf_dependencies(library))
+        if libraries:
+            identity = hashlib.sha256((str(executable) + "\0" + "\0".join(
+                f"{name}:{path}" for name, path in sorted(libraries.items()))
+            ).encode()).hexdigest()[:20]
+            overlay = DEBIAN_CACHE / "library-overlays" / identity
+            overlay.mkdir(parents=True, exist_ok=True)
+            for name, library in libraries.items():
+                link = overlay / name
+                if not link.exists():
+                    try:
+                        link.symlink_to(library)
+                    except FileExistsError:
+                        pass
+            paths.append(str(overlay))
     inherited = os.environ.get("BOX64_LD_LIBRARY_PATH", "")
     if inherited:
         paths.extend(inherited.split(os.pathsep))
@@ -375,8 +475,7 @@ def _desktop_app(package, desktop_file, root):
     command = [part for part in command if part]
     if not command:
         return None
-    launch_env = {"BOX64_LD_LIBRARY_PATH": _library_path(),
-                  "PATH": _package_path_environment(root)}
+    launch_env = {"PATH": _package_path_environment(root)}
     if Path(command[0]).name == "env":
         command.pop(0)
     while len(command) > 1 and re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*=.*", command[0]):
@@ -415,6 +514,8 @@ def _desktop_app(package, desktop_file, root):
                        "--ozone-platform=wayland",
                        "--enable-features=UseOzonePlatform"]
             working_directory = str(installed_apps[0].parent)
+
+    launch_env.setdefault("BOX64_LD_LIBRARY_PATH", _library_path(command[0]))
 
     desktop_id = _VALID_ID.sub("_", desktop_file.relative_to(root / "usr/share/applications").as_posix())
     app_id = f"deb.{package}.{desktop_id}"[:120]
@@ -474,7 +575,7 @@ def discover():
                     encoding="utf-8")
                 package_apps.append(DebApp(
                     app_id, name, "window", shortcut, [str(candidate)], str(root),
-                    {"BOX64_LD_LIBRARY_PATH": _library_path(),
+                    {"BOX64_LD_LIBRARY_PATH": _library_path(str(candidate)),
                      "PATH": _package_path_environment(root)}))
         apps.update((app.app_id, app) for app in package_apps)
     return apps
