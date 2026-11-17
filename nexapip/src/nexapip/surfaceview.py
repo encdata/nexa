@@ -7,8 +7,9 @@ class SurfaceView(View):
     """A Surface-backed view that displays frames from a shared Nexa buffer."""
 
     def __init__(self, activity: Activity, parent=None, keyboard: bool = False,
-                 touch: bool = False):
-        args = {"aid": activity.aid, "keyboard": keyboard}
+                 touch: bool = False, z_order_on_top: bool = True):
+        args = {"aid": activity.aid, "keyboard": keyboard,
+                "zorderontop": z_order_on_top}
         if parent is not None:
             args["parent"] = parent.id
         super().__init__(activity, activity.c.send_read_msg(

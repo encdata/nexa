@@ -27,6 +27,7 @@ class View:
         self.id = id
         if self.id == -1:
             raise RuntimeError("Could not create View")
+        self.a._register_view(self.id)
 
     def __eq__(self, other):
         if type(other) is int:

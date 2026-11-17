@@ -17,7 +17,7 @@ from shell.personalization import save as save_personalization, store_wallpaper
 from shell.icons import load as load_icon
 from shell import palette
 from shell import file_actions
-from shell.x86_runtime import ensure_installed, installed as x86_runtime_installed
+from shell.x86_runtime import ensure_installed, ready as x86_runtime_ready
 
 
 class DesktopShell:
@@ -81,8 +81,7 @@ class DesktopShell:
         self.wayland_start_lock = Lock()
         self.wayland_launch_queue = []
         self.wayland_starting = False
-        self.x86_runtime_ready = startup.get("x86_runtime_ready",
-                                             x86_runtime_installed())
+        self.x86_runtime_ready = startup.get("x86_runtime_ready", x86_runtime_ready())
         self.closed = False
         self.pointer = Pointer(activity, self.root, self.density)
         self.desktop.pointer = self.pointer
@@ -91,6 +90,9 @@ class DesktopShell:
                               if getattr(app, "preload_ui", False) and app_id != "settings"]
         if "settings" in self.apps and getattr(self.apps["settings"], "preload_ui", False):
             self.windows.prewarm_app("settings")
+        self.wayland_starting = True
+        Thread(target=self._start_wayland_app,
+               name="nexa-wayland-start", daemon=True).start()
 
     @property
     def preloads_ready(self):
@@ -206,8 +208,8 @@ class DesktopShell:
                         break
                     host.launch(argv, cwd, env)
         except Exception as error:
-            print(f"nexa: couldn't start Wayland app: {error}")
-            self.activity.c.toast("couldn't start Linux app")
+            print(f"nexa: couldn't start Wayland host: {error}")
+            self.activity.c.toast("couldn't start Wayland host")
             with self.wayland_start_lock:
                 self.wayland_launch_queue.clear()
         finally:

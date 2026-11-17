@@ -1,4 +1,5 @@
 from typing import Optional, Literal
+from threading import local
 
 from nexapip.connection import Connection, Configuration
 from nexapip.task import Task
@@ -14,6 +15,8 @@ class Activity:
                  canceloutside: bool = True, intercept: bool = False):
         """When an Activity could not be created, a RuntimeError is raised."""
         self.c = connection
+        self._view_owner = local()
+        self._view_registered = None
         params = {"canceloutside": canceloutside, "intercept": intercept}
         if dialog is not None:
             params["dialog"] = dialog
@@ -32,6 +35,14 @@ class Activity:
         self.t = Task(connection, tid)
         if self.aid == -1:
             raise RuntimeError("Could not create Activity")
+
+    def _set_view_owner(self, owner):
+        self._view_owner.window_id = owner
+
+    def _register_view(self, view_id):
+        owner = getattr(self._view_owner, "window_id", None)
+        if owner is not None and self._view_registered is not None and view_id >= 0:
+            self._view_registered(owner, view_id)
 
     def finish(self):
         """Finishes an Activity."""

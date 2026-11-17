@@ -346,7 +346,8 @@ class WaylandHost:
         def build(activity, parent, context):
             state["activity"] = activity
             state["container"] = parent
-            view = tg.SurfaceView(activity, parent, keyboard=True, touch=True)
+            view = tg.SurfaceView(activity, parent, keyboard=True, touch=True,
+                                  z_order_on_top=False)
             view.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
             with state["frame_lock"]:
                 state["view"] = view
@@ -393,7 +394,8 @@ class WaylandHost:
                  "frame_lock": Lock(), "closed": False,
                  "text_input_enabled": False}
         self._surfaces[surface_id] = state
-        view = tg.SurfaceView(state["activity"], state["container"], keyboard=True, touch=True)
+        view = tg.SurfaceView(state["activity"], state["container"], keyboard=True,
+                              touch=True, z_order_on_top=False)
         view.setdimensions(max(1, width), max(1, height), px=True)
         from shell.geometry import place
         place(view, x / self.density, y / self.density, top=True)

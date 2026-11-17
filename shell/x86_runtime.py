@@ -14,8 +14,23 @@ def installed():
             and (glibc / "lib" / "libwayland-client.so.0").is_file())
 
 
+def ready():
+    if not installed():
+        return False
+    runner = shutil.which("glibc-runner")
+    if runner is None:
+        return False
+    try:
+        result = subprocess.run([runner, "--shell", "box64 --version"],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
 def ensure_installed(on_status=None):
-    if installed():
+    if ready():
         return
     pkg = shutil.which("pkg")
     if pkg is None:
@@ -46,8 +61,8 @@ def ensure_installed(on_status=None):
 
     install("glibc-repo")
     run([pkg, "update"], "updating package lists")
-    for package in ("glibc-runner", "box64-glibc", "libwayland-glibc",
+    for package in ("glibc", "glibc-runner", "box64-glibc", "libwayland-glibc",
                     "libwayland-protocols-glibc", "libxkbcommon-glibc"):
         install(package)
-    if not installed():
-        raise RuntimeError("x86_64 Wayland runtime installation did not complete")
+    if not ready():
+        raise RuntimeError("x86_64 Wayland runtime installation did not pass its Box64 check")

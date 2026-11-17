@@ -11,7 +11,7 @@ class NexaApp:
     description = ""
     api_version = APP_API_VERSION
     preload_ui = False
-    build_threaded = False
+    build_threaded = True
 
     def build(self, activity, parent, context=None):
         raise NotImplementedError

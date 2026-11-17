@@ -35,7 +35,10 @@ class WindowManager:
         self.window_order = []
         self.preloaded = {}
         self.pending_builds = []
-        self.build_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nexa-ui-build")
+        self.build_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="nexa-ui-build")
+        self.view_windows = {}
+        self.window_view_ids = {}
+        self.activity._view_registered = self._register_view
         self.button_events = {}
         self.next_id = 0
         self.id_lock = Lock()
@@ -240,15 +243,19 @@ class WindowManager:
             "prewarming": prewarm,
             "prewarm_position": prewarm,
             "handler_activated": False,
+            "app_executor": ThreadPoolExecutor(max_workers=1,
+                                                thread_name_prefix=f"nexa-app-{window_id}"),
+            "tick_future": None,
+            "view_ids": set(),
             "button_actions": {control.id: self.button_events[control.id] for control in controls},
         }
-        if getattr(app, "build_threaded", False):
+        if getattr(app, "build_threaded", True):
             window["build_pending"] = True
         else:
-            event_handler = self._build_app(app, content, context)
+            event_handler = self._build_window_app(window_id, app, content, context)
             window["event_handler"] = event_handler
             self._notify_window_resize(event_handler, panel_width,
-                                       panel_height - self.titlebar_height)
+                                       panel_height - self.titlebar_height, window)
         self.windows[window_id] = window
         self.window_order.append(window_id)
         # termux:gui sometimes needs a location update after child views are added to lay them out.
@@ -277,7 +284,8 @@ class WindowManager:
         if window["build_pending"]:
             window["build_pending"] = False
             window["build_future"] = self.build_executor.submit(
-                self._build_app, window["app"], window["content"], window["context"])
+                self._build_window_app, window["id"], window["app"],
+                window["content"], window["context"])
         if window_id in self.window_order:
             self.window_order.remove(window_id)
         window["frame"].setvisibility(tg.View.HIDDEN)
@@ -308,6 +316,31 @@ class WindowManager:
              "window_host": getattr(self, "window_host", None),
              "register_wayland_launcher": getattr(self, "on_register_wayland_launcher", None)})
 
+    def _register_view(self, window_id, view_id):
+        self.view_windows[view_id] = window_id
+        self.window_view_ids.setdefault(window_id, set()).add(view_id)
+        window = self.windows.get(window_id)
+        if window is not None:
+            window["view_ids"].add(view_id)
+
+    def _build_window_app(self, window_id, app, content, context):
+        self.activity._set_view_owner(window_id)
+        try:
+            return self._build_app(app, content, context)
+        finally:
+            self.activity._set_view_owner(None)
+
+    def _run_app_callback(self, window, callback, *args):
+        if window.get("minimized") or window.get("closing"):
+            return
+        self.activity._set_view_owner(window["id"])
+        try:
+            callback(*args)
+        except Exception as error:
+            print(f"nexa: app callback failed in {window['title']}: {error}")
+        finally:
+            self.activity._set_view_owner(None)
+
     def _finish_build(self, window):
         future = window["build_future"]
         if future is None or not future.done():
@@ -331,27 +364,39 @@ class WindowManager:
             restore_theme_state(refresh_state)
         self._notify_window_resize(
             handler, max(1, window["width"] - self.border_width * 2),
-            max(1, window["height"] - self.border_width * 2 - self.titlebar_height))
+            max(1, window["height"] - self.border_width * 2 - self.titlebar_height),
+            window)
         if self.active_window == window["id"]:
             self._activate_window_handler(window)
 
-    @staticmethod
-    def _activate_window_handler(window):
+    def _activate_window_handler(self, window):
         if window.get("prewarming") or window.get("handler_activated"):
             return
         handler = window.get("event_handler")
         on_window_open = getattr(handler, "on_window_open", None)
         if on_window_open is not None:
-            on_window_open()
+            window["app_executor"].submit(
+                self._run_app_callback, window, on_window_open)
             window["handler_activated"] = True
 
     def _discard_window(self, window):
-        close = getattr(window["event_handler"], "close", None)
-        if close is not None:
-            close()
+        self._stop_app_worker(window)
+        self._forget_window_views(window["id"])
         for control_id in window["button_actions"]:
             self.button_events.pop(control_id, None)
         window["frame"].delete()
+
+    def _forget_window_views(self, window_id):
+        for view_id in self.window_view_ids.pop(window_id, ()):
+            self.view_windows.pop(view_id, None)
+
+    def _stop_app_worker(self, window):
+        close = getattr(window.get("event_handler"), "close", None)
+        executor = window.get("app_executor")
+        if close is not None and executor is not None:
+            executor.submit(close)
+        if executor is not None:
+            executor.shutdown(wait=False)
 
     def handle_event(self, event):
         event_id = getattr(event, "id", None)
@@ -367,14 +412,16 @@ class WindowManager:
             return True
         if event.type == tg.Event.touch and event_id == self.root.id:
             return self._move_window(event.value)
-        for window_id in reversed(self.window_order):
-            window = self.windows.get(window_id)
-            if window is None or window["minimized"]:
-                continue
-            handler = window["event_handler"]
-            if handler is not None and self._handle_app_event(handler, event):
-                return True
-        return False
+        window_id = self.view_windows.get(event_id)
+        if window_id is None and event.type in (tg.Event.key, "back"):
+            window_id = self.active_window
+        window = self.windows.get(window_id)
+        if window is None or window["minimized"] or window["event_handler"] is None:
+            return False
+        window["app_executor"].submit(
+            self._run_app_callback, window,
+            self._handle_app_event, window["event_handler"], event)
+        return True
 
     def tick(self):
         for window in tuple(self.windows.values()):
@@ -400,8 +447,10 @@ class WindowManager:
                 continue
             handler = window["event_handler"]
             on_tick = getattr(handler, "on_tick", None)
-            if on_tick is not None:
-                on_tick()
+            future = window.get("tick_future")
+            if on_tick is not None and (future is None or future.done()):
+                window["tick_future"] = window["app_executor"].submit(
+                    self._run_app_callback, window, on_tick)
 
         if self.theme_refresh_pending and not any(
                 window["build_pending"] or window["build_future"] is not None
@@ -413,7 +462,8 @@ class WindowManager:
                 continue
             window["build_pending"] = False
             window["build_future"] = self.build_executor.submit(
-                self._build_app, window["app"], window["content"], window["context"])
+                self._build_window_app, window["id"], window["app"],
+                window["content"], window["context"])
 
     @staticmethod
     def _handle_app_event(handler, event):
@@ -562,10 +612,15 @@ class WindowManager:
         self.window_order.append(window_id)
         self._place_window(window, top=True)
 
-    def _notify_window_resize(self, handler, width, height):
+    def _notify_window_resize(self, handler, width, height, window=None):
         callback = getattr(handler, "on_window_resize", None)
         if callback is not None:
-            callback(round(width * self.density), round(height * self.density))
+            args = (round(width * self.density), round(height * self.density))
+            if window is None:
+                callback(*args)
+            else:
+                window["app_executor"].submit(
+                    self._run_app_callback, window, callback, *args)
 
     def _cancel_drag(self, window_id):
         if self.drag is None or self.drag["window_id"] != window_id:
@@ -636,7 +691,7 @@ class WindowManager:
         set_surface_color(window["title_surface"], panel_width, self.titlebar_height,
                           palette.surface_light)
         self._notify_window_resize(window["event_handler"], panel_width,
-                                   max(1, panel_height - self.titlebar_height))
+                                   max(1, panel_height - self.titlebar_height), window)
         place(window["panel"], self.border_width, self.border_width)
         place(window["content_surface"], self.border_width, self.border_width)
         place(window["border_surface"], 0, 0)
@@ -792,7 +847,8 @@ class WindowManager:
             window["build_error"] = False
             window["build_pending"] = True
             window["build_future"] = self.build_executor.submit(
-                self._build_app, window["app"], window["content"], window["context"])
+                self._build_window_app, window["id"], window["app"],
+                window["content"], window["context"])
             window["build_pending"] = False
         for window in tuple(self.preloaded.values()):
             self._discard_window(window)
@@ -854,6 +910,9 @@ class WindowManager:
             return
 
         if window["build_future"] is not None:
+            window["closing"] = True
+            self._stop_app_worker(window)
+            self._forget_window_views(window_id)
             window["frame"].setvisibility(tg.View.GONE)
             self.pending_builds.append(window)
             for event_id, (owner, _) in list(self.button_events.items()):
@@ -865,10 +924,9 @@ class WindowManager:
                 self._activate_top_window()
             return
 
-        handler = window["event_handler"]
-        close = getattr(handler, "close", None)
-        if close is not None:
-            close()
+        window["closing"] = True
+        self._stop_app_worker(window)
+        self._forget_window_views(window_id)
         window["frame"].delete()
         for event_id, (owner, _) in list(self.button_events.items()):
             if owner == window_id:
@@ -891,9 +949,9 @@ class WindowManager:
                 future.add_done_callback(self._close_build_result)
         self.build_executor.shutdown(wait=False, cancel_futures=True)
         for window in self.windows.values():
-            close = getattr(window["event_handler"], "close", None)
-            if close is not None:
-                close()
+            window["closing"] = True
+            self._stop_app_worker(window)
+            self._forget_window_views(window["id"])
             host_window = window.get("host_window")
             if host_window is not None:
                 host_window._on_closed()
