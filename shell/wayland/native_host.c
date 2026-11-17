@@ -314,25 +314,19 @@ static void surface_resource_destroy(struct wl_resource *resource) {
     struct nx_server *server = surface->server;
     if (surface->mapped) queue_event(surface, NX_UNMAP, NULL, 0, 0, 0, 0);
     queue_event(surface, NX_DESTROY, NULL, 0, 0, 0, 0);
-    uint32_t serial = wl_display_next_serial(server->display);
     struct nx_pointer *pointer;
     wl_list_for_each(pointer, &server->pointers, link) {
         if (pointer->focus != surface) continue;
-        wl_pointer_send_leave(pointer->resource, serial, resource);
         pointer->focus = NULL;
     }
     struct nx_keyboard *keyboard;
     wl_list_for_each(keyboard, &server->keyboards, link) {
         if (keyboard->focus != surface) continue;
-        wl_keyboard_send_leave(keyboard->resource, serial, resource);
         keyboard->focus = NULL;
     }
     struct nx_text_input *input;
     wl_list_for_each(input, &server->text_inputs, link) {
         if (input->surface != surface) continue;
-        if (input->enabled)
-            queue_event(surface, NX_TEXT_INPUT, NULL, 0, 0, 0, 0);
-        zwp_text_input_v3_send_leave(input->resource, resource);
         input->surface = NULL;
         input->enabled = 0;
     }
