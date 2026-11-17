@@ -29,11 +29,22 @@ class LoadingScreen:
         title.setheight(64)
         title.setlinearlayoutparams(0)
 
-        self.status = tg.TextView(activity, "starting...", self.panel)
-        self.status.settextsize(16)
-        self.status.setgravity(1, 1)
-        self.status.setheight(48)
-        self.status.setlinearlayoutparams(0)
+        status_row = tg.LinearLayout(activity, self.panel, vertical=False)
+        status_row.setdimensions(tg.View.MATCH_PARENT, 48)
+        status_row.setlinearlayoutparams(0)
+
+        self.status = tg.TextView(activity, "starting...", status_row)
+        self.status.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
+        self.status.settextsize(14)
+        self.status.setgravity(0, 1)
+        self.status.setlinearlayoutparams(1)
+
+        self.percentage = tg.TextView(activity, "0%", status_row)
+        self.percentage.setdimensions(52, tg.View.MATCH_PARENT)
+        self.percentage.settextsize(14)
+        self.percentage.settextcolor(0xFF9AA6B2)
+        self.percentage.setgravity(2, 1)
+        self.percentage.setlinearlayoutparams(0)
 
     def _place_panel(self):
         x = max(0, (self.screen_width - self.panel_width) // 2)
@@ -58,6 +69,7 @@ class LoadingScreen:
 
     def update(self, status, progress):
         self.status.settext(status)
+        self.percentage.settext(f"{progress}%" if progress is not None else "0%")
 
 
 def show(activity, configuration):

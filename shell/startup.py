@@ -16,9 +16,8 @@ def load(update, configuration):
     x86_runtime_ready = x86_runtime_installed()
     x86_runtime_error = None
     if not x86_runtime_ready:
-        update("installing x library", None)
         try:
-            ensure_installed()
+            ensure_installed(update)
             x86_runtime_ready = True
         except Exception as error:
             x86_runtime_error = str(error)
