@@ -79,11 +79,15 @@ class DesktopShell:
                                       self._launcher_apps_changed)
         self.windows.window_host = self.window_host
         self.windows.on_register_wayland_launcher = self.register_wayland_launcher
+        # The desktop and start menu already contain these discovered apps.
+        # Avoid rebuilding both views once per launcher during startup.
+        self.window_host.apps_changed = None
         for app in tuple(self.apps.values()):
             spec = getattr(app, "launch_spec", None)
             if spec is not None:
                 argv, cwd, env = spec
                 self.register_wayland_launcher(app.app_id, app.name, app.icon, argv, cwd, env)
+        self.window_host.apps_changed = self._launcher_apps_changed
         self.wayland_host = None
         self.wayland_start_lock = Lock()
         self.wayland_launch_queue = []
