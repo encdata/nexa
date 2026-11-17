@@ -1,3 +1,5 @@
+from concurrent.futures import ThreadPoolExecutor
+
 from apps import discover
 from shell.desktop_state import load_home_items, load_positions
 from shell.icons import preload
@@ -9,19 +11,13 @@ from shell.x86_runtime import ensure_installed, ready as x86_runtime_ready
 
 def load(update, configuration):
     update("loading apps", 10)
+    runtime_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nexa-runtime-check")
+    runtime_future = runtime_worker.submit(ensure_installed, update)
+
     personalization = load_personalization()
     palette.set_theme(personalization["theme"])
     apps = discover()
-
-    runtime_ready = x86_runtime_ready()
     x86_runtime_error = None
-    if not runtime_ready:
-        try:
-            ensure_installed(update)
-            runtime_ready = True
-        except Exception as error:
-            x86_runtime_error = str(error)
-            print(f"nexa: couldn't install x86_64 runtime: {error}")
 
     update("reading desktop layout", 30)
     positions = load_positions()
@@ -40,6 +36,16 @@ def load(update, configuration):
         personalization["wallpaper"] = None
         wallpaper = load_wallpaper(configuration["screenwidth"], configuration["screenheight"],
                                    configuration["density"])
+
+    try:
+        runtime_future.result()
+        runtime_ready = True
+    except Exception as error:
+        runtime_ready = x86_runtime_ready()
+        x86_runtime_error = str(error)
+        print(f"nexa: couldn't install x86_64 runtime: {error}")
+    finally:
+        runtime_worker.shutdown(wait=True)
 
     update("starting desktop", 72)
     return {"apps": apps, "positions": positions, "home_items": home_items,
