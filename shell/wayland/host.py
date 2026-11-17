@@ -9,7 +9,7 @@ from threading import Condition, Event, Lock, Thread
 import time
 
 import nexapip as tg
-from shell.x86_runtime import box64_command, shell_command
+from shell.x86_runtime import box64_command, runner_shell
 
 
 class _NativeEvent(ctypes.Structure):
@@ -207,6 +207,9 @@ class WaylandHost:
             "XDG_RUNTIME_DIR": str(self.runtime_dir),
             "WAYLAND_DISPLAY": socket_name,
         })
+        shell = runner_shell()
+        if shell is not None:
+            self.environment["SHELL"] = shell
         xkb_root = Path(os.environ.get("PREFIX", "/data/data/com.termux/files/usr"))
         xkb_root = xkb_root / "glibc" / "share" / "X11" / "xkb"
         if xkb_root.is_dir():
@@ -696,10 +699,6 @@ class WaylandHost:
                                for value in argv[1:]):
                         argv.append(option)
             box64 = box64_command()
-            if not env or "SHELL" not in env:
-                shell = shell_command()
-                if shell is not None:
-                    environment["SHELL"] = shell
             target = ([box64, *argv[1:]] if Path(argv[0]).name == "box64"
                       else [box64, executable, *argv[1:]])
             command = ("export LD_PRELOAD=libresolv.so.2; exec "

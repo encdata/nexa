@@ -14,10 +14,13 @@ def box64_command():
     return "box64"
 
 
-def shell_command():
-    prefix = os.environ.get("PREFIX", "/data/data/com.termux/files/usr")
-    shell = Path(prefix) / "glibc" / "bin" / "bash"
-    return str(shell) if shell.is_file() else None
+def runner_shell():
+    prefix = Path(os.environ.get("PREFIX", "/data/data/com.termux/files/usr"))
+    shell = os.environ.get("SHELL")
+    if (shell and os.access(shell, os.X_OK)
+            and Path(shell).parent != prefix / "glibc" / "bin"):
+        return shell
+    return shutil.which("bash") or shutil.which("sh")
 
 
 def installed():
@@ -35,11 +38,15 @@ def _box64_check():
     runner = shutil.which("glibc-runner")
     if runner is None:
         return False, "glibc-runner is missing"
+    environment = os.environ.copy()
+    shell = runner_shell()
+    if shell is not None:
+        environment["SHELL"] = shell
     try:
         result = subprocess.run([runner, "--shell",
                                  f"{shlex.quote(box64_command())} --version"],
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, timeout=60)
+                                text=True, timeout=60, env=environment)
     except subprocess.TimeoutExpired as error:
         output = error.stdout or ""
         if isinstance(output, bytes):
