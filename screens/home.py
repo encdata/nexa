@@ -88,7 +88,7 @@ class DesktopShell:
         self.window_host.apps_changed = None
         for app in tuple(self.apps.values()):
             spec = getattr(app, "launch_spec", None)
-            if spec is not None:
+            if spec is not None and getattr(app, "external_launcher", False):
                 argv, cwd, env = spec
                 self.register_wayland_launcher(app.app_id, app.name, app.icon, argv, cwd, env)
         self.window_host.apps_changed = self._launcher_apps_changed
@@ -140,7 +140,7 @@ class DesktopShell:
                 self.window_host.restore_launchers()
                 for app in tuple(self.apps.values()):
                     spec = getattr(app, "launch_spec", None)
-                    if spec is not None:
+                    if spec is not None and getattr(app, "external_launcher", False):
                         argv, cwd, env = spec
                         self.register_wayland_launcher(
                             app.app_id, app.name, app.icon, argv, cwd, env)
