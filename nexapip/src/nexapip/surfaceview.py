@@ -77,7 +77,12 @@ class SurfaceView(View):
         self.release_buffer()
         self.delete()
 
+    def clear_frame(self):
+        self.a.c.send_msg({"method": "clearSurfaceFrame", "params": {
+            "aid": self.a.aid, "id": self.id}})
+
     def release_buffer(self):
         if self._frame_buffer is not None:
+            self.clear_frame()
             self._frame_buffer.remove()
             self._frame_buffer = None
