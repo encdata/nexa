@@ -451,6 +451,7 @@ class _ElectronWindowView:
         self.webview.allownavigation(True)
         self.ipc = tg.ElectronBridge(
             self.webview,
+            transport=lambda request: self.host.ipc_request(request, self.window_id),
             on_ready=lambda: controller._bridge_ready(self.window_id))
         self.ipc.handle("__nexa:renderer-error", self._log_renderer_error)
         self.webview.loaduri(url)
