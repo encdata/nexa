@@ -341,8 +341,9 @@ class WindowManager:
         finally:
             self.activity._set_view_owner(None)
 
-    def _run_app_callback(self, window, callback, *args):
-        if window.get("minimized") or window.get("closing"):
+    def _run_app_callback(self, window, callback, *args, allow_minimized=False):
+        if (window.get("closing") or
+                (window.get("minimized") and not allow_minimized)):
             return
         self.activity._set_view_owner(window["id"])
         try:
@@ -446,7 +447,14 @@ class WindowManager:
             self._unregister_view(window_id, event_id)
         if window["minimized"]:
             if event.type == tg.Event.webviewDestroyed:
-                window.setdefault("deferred_events", []).append(event)
+                callback = getattr(
+                    window["event_handler"], "handle_hidden_webview_destroyed", None)
+                if callback is None:
+                    window.setdefault("deferred_events", []).append(event)
+                else:
+                    window["app_executor"].submit(
+                        self._run_app_callback, window, callback, event,
+                        allow_minimized=True)
                 return True
             return False
         window["app_executor"].submit(

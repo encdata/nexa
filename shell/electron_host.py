@@ -484,8 +484,9 @@ class _ElectronWindowView:
         self.background_throttling = bool(background_throttling)
         self._applied_visible = True
         self._closed = False
+        self._renderer_dead = False
+        self._renderer_killed_hidden = False
         self._renderer_console_errors = {}
-        self._last_progress_bucket = 0
         logger.info("creating WebView for window %s at %s (visible=%s)",
                     window_id, url, self.visible)
         self.webview = tg.WebView(
@@ -557,12 +558,18 @@ class _ElectronWindowView:
 
     def load(self, url):
         self.url = url
+        if self._renderer_dead:
+            if self.visible:
+                self.controller._restore_renderer(self)
+            return
         self.webview.loaduri(url)
 
     def handle_event(self, event):
         current = self.controller._views.get(self.window_id)
         if current is not None and current is not self:
             return current.handle_event(event)
+        if self._renderer_dead:
+            return True
         if event.type == tg.Event.webviewBridgeError:
             logger.error("webview bridge failed: %s",
                          event.value.get("error", "unknown error"))
@@ -576,12 +583,9 @@ class _ElectronWindowView:
                           tg.Event.webviewDestroyed):
             if event.type == tg.Event.webviewProgress:
                 progress = event.value.get("progress")
-                if isinstance(progress, int):
-                    bucket = min(4, max(0, progress // 25))
-                    if bucket > self._last_progress_bucket:
-                        self._last_progress_bucket = bucket
-                        logger.info("window %s WebView load reached %s%%: %s",
-                                    self.window_id, bucket * 25, self.url)
+                if progress == 100:
+                    logger.info("window %s finished loading %s",
+                                self.window_id, self.url)
             elif event.type in (tg.Event.webviewHTTPError, tg.Event.webviewError,
                                 tg.Event.webviewDestroyed):
                 logger.error("window %s WebView %s: %s",
@@ -594,10 +598,18 @@ class _ElectronWindowView:
 
     def set_visibility(self, visibility):
         self.window_visible = visibility == tg.View.VISIBLE
+        if self._renderer_dead:
+            if self.visible:
+                self.controller._restore_renderer(self)
+            return
         self._apply_visibility()
 
     def set_background_throttling(self, enabled):
         self.background_throttling = bool(enabled)
+        if self._renderer_dead:
+            if self.visible:
+                self.controller._restore_renderer(self)
+            return
         self.webview.setbackgroundthrottling(self.background_throttling)
 
     def on_window_visibility_changed(self, visible):
@@ -608,6 +620,10 @@ class _ElectronWindowView:
                     screen_manager.screen_width, screen_manager.screen_height,
                     screen_manager.density)
         self.container_visible = visible
+        if self._renderer_dead:
+            if self.visible:
+                self.controller._restore_renderer(self)
+            return
         self._apply_visibility()
 
     def on_screen_resize(self, width, height, scale_factor):
@@ -693,6 +709,11 @@ class ElectronRenderer:
     def handle_event(self, event):
         return self.root_view.handle_event(event)
 
+    def handle_hidden_webview_destroyed(self, event):
+        if event.type != tg.Event.webviewDestroyed:
+            return False
+        return self.handle_event(event)
+
     def on_window_visibility_changed(self, visible):
         self.root_view.on_window_visibility_changed(visible)
 
@@ -714,15 +735,30 @@ class ElectronRenderer:
         if (self._closed or self._views.get(window_id) is not old_view
                 or window_id in self._closed_windows):
             return
+        old_view._renderer_dead = True
+        old_view._renderer_killed_hidden = not old_view.visible
+        old_view.close(renderer_destroyed=True)
+        if old_view.visible:
+            self._restore_renderer(old_view)
+        else:
+            logger.info("WebView renderer for hidden window %s was reclaimed; deferring reload",
+                        window_id)
+
+    def _restore_renderer(self, old_view):
+        window_id = old_view.window_id
+        if (self._closed or self._views.get(window_id) is not old_view
+                or window_id in self._closed_windows or not old_view._renderer_dead
+                or not old_view.visible):
+            return
         now = monotonic()
         last_recovery = self._renderer_recoveries.get(window_id)
-        if last_recovery is not None and now - last_recovery < 60:
+        if (not old_view._renderer_killed_hidden and last_recovery is not None
+                and now - last_recovery < 60):
             print(f"nexa: electron renderer {window_id} crashed again during recovery")
-            old_view.close(renderer_destroyed=True)
             return
+        old_view._renderer_killed_hidden = False
         self._renderer_recoveries[window_id] = now
         self._bridge_ready_windows.discard(window_id)
-        old_view.close(renderer_destroyed=True)
         replacement = _ElectronWindowView(
             self, old_view.activity, old_view.parent, window_id,
             old_view.url, old_view.preload_url,
