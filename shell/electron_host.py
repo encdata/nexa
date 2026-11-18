@@ -18,6 +18,7 @@ from nexapip.webview import ELECTRON_PRELOAD
 
 HOST_SCRIPT = Path(__file__).resolve().parents[1] / "runtime" / "electron_host.mjs"
 HOST_EVENT_QUEUE_SIZE = 4
+ELECTRON_WINDOW_START_TIMEOUT = 60
 
 
 class ElectronHost:
@@ -120,7 +121,9 @@ class ElectronHost:
         self.server_url = ready["url"]
         self.url = self.server_url
         if self.main_entry:
-            deadline = monotonic() + 10
+            # Electron apps can do substantial async startup before their first
+            # BrowserWindow.loadURL(). Don't treat a slow main process as a dead one.
+            deadline = monotonic() + ELECTRON_WINDOW_START_TIMEOUT
             found_renderer = False
             while monotonic() < deadline:
                 message = self._next_event(deadline - monotonic())
@@ -145,7 +148,9 @@ class ElectronHost:
                 self._pending.append(message)
             if not found_renderer:
                 self.close()
-                raise TimeoutError("Electron main process did not create a renderer window")
+                raise TimeoutError(
+                    "Electron main process did not load a renderer window within "
+                    f"{ELECTRON_WINDOW_START_TIMEOUT} seconds")
         return self.url
 
     def _read_output(self, stream):
