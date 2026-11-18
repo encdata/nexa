@@ -55,6 +55,11 @@ def run_connection(connection):
         if loading_active:
             loading.update(status, progress)
 
+    def root_activity_is_closing(event):
+        return (event.type == tg.Event.destroy
+                and event.value.get("finishing")
+                and event.value.get("aid") == activity.aid)
+
     closing = False
     worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nexa-startup")
     startup_future = worker.submit(load_startup, update_loading, configuration)
@@ -65,7 +70,7 @@ def run_connection(connection):
                 pending_events.append(event)
                 if event.type == tg.Event.config:
                     loading.resize(activity.getconfiguration())
-                if event.type == tg.Event.destroy and event.value.get("finishing"):
+                if root_activity_is_closing(event):
                     loading_active = False
                     closing = True
                     break
@@ -95,7 +100,7 @@ def run_connection(connection):
         while not shell.desktop.ready:
             event = pending_events.popleft() if pending_events else connection.wait_event(0.01)
             if event is not None:
-                if event.type == tg.Event.destroy and event.value.get("finishing"):
+                if root_activity_is_closing(event):
                     loading_active = False
                     return
                 shell.handle_event(event)
@@ -113,7 +118,7 @@ def run_connection(connection):
             shell.tick()
             if event is None:
                 continue
-            if event.type == tg.Event.destroy and event.value.get("finishing"):
+            if root_activity_is_closing(event):
                 break
             shell.handle_event(event)
     finally:
@@ -151,7 +156,15 @@ def main():
         except EOFError as error:
             if not background:
                 raise
-            logging.getLogger("nexa").info("loader connection ended: %s", error)
+            last_event = connection._last_event
+            last_event_summary = None
+            if last_event is not None:
+                last_event_summary = (
+                    last_event.type,
+                    last_event.value.get("aid"),
+                    last_event.value.get("finishing"))
+            logging.getLogger("nexa").info(
+                "loader connection ended after %s: %s", last_event_summary, error)
             return
         finally:
             if background:

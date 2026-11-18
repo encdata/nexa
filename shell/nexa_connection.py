@@ -19,6 +19,7 @@ class NexaConnection(Connection):
         self._Connection__request_executor = None
         self._Connection__closed = False
         self._events = Queue()
+        self._last_event = None
         self._event_error = None
         self._event_finished = False
         self._closed = False
@@ -78,7 +79,9 @@ class NexaConnection(Connection):
     def _read_events(self):
         try:
             while not self._closed:
-                self._events.put(Event(tgmsg.read_msg(self._event)))
+                event = Event(tgmsg.read_msg(self._event))
+                self._last_event = event
+                self._events.put(event)
         except (EOFError, OSError) as error:
             if not self._closed:
                 self._event_error = error
