@@ -429,6 +429,7 @@ class _ElectronWindowView:
         self.container_visible = container_visible
         self._applied_visible = True
         self._closed = False
+        self._renderer_console_errors = {}
         logger.info("creating WebView for window %s at %s (visible=%s)",
                     window_id, url, self.visible)
         self.webview = tg.WebView(
@@ -466,6 +467,21 @@ class _ElectronWindowView:
                      detail.get("source", ""), detail.get("line", 0),
                      detail.get("column", 0))
 
+    def _log_console_error(self, detail):
+        message = str(detail.get("msg", ""))[:1000]
+        source = str(detail.get("source", ""))[:500]
+        line = detail.get("line", "?")
+        key = (message, source, line)
+        if key not in self._renderer_console_errors:
+            if len(self._renderer_console_errors) >= 128:
+                self._renderer_console_errors.pop(next(iter(self._renderer_console_errors)))
+            self._renderer_console_errors[key] = 0
+        count = self._renderer_console_errors[key] + 1
+        self._renderer_console_errors[key] = count
+        if count & (count - 1) == 0:
+            logger.error("renderer console: %s (%s:%s; repeated %s times)",
+                         message, source, line, count)
+
     def _preload(self):
         script = ELECTRON_PRELOAD
         if self.host.main_entry:
@@ -491,9 +507,7 @@ class _ElectronWindowView:
             return True
         if event.type == tg.Event.webviewConsoleMessage:
             value = event.value
-            logger.error("renderer console: %s (%s:%s)",
-                         value.get("msg", ""), value.get("source", ""),
-                         value.get("line", "?"))
+            self._log_console_error(value)
             return True
         if event.type in (tg.Event.webviewNavigation, tg.Event.webviewProgress,
                           tg.Event.webviewHTTPError, tg.Event.webviewError,
