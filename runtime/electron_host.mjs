@@ -439,11 +439,11 @@ const server = http.createServer((request, response) => {
                     message.windowId = windowId;
                 }
                 let value;
-                if (endpoint === "/__nexa/ipc") value = await electron.dispatch(message);
+                if (endpoint === "/__nexa/ipc") value = await electronHost.dispatch(message);
                 else if (endpoint === "/__nexa/renderer-event") {
-                    value = electron.dispatchRendererEvent(message);
+                    value = electronHost.dispatchRendererEvent(message);
                 } else {
-                    value = electron.windowCommand(message);
+                    value = electronHost.windowCommand(message);
                 }
                 const payload = JSON.stringify({value: value === undefined ? null : value});
                 if (Buffer.byteLength(payload) > maxIpcPayloadBytes) {

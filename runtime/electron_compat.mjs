@@ -29,6 +29,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
     const dnsCacheTtlMs = 30_000;
     const maxDnsCacheEntries = 128;
     let nextWindowId = 0;
+    let nextCssId = 0;
     let activeWindow = null;
 
     async function resolveHost(host, options = {}) {
@@ -72,6 +73,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.destroyed = false;
             this.pendingLoad = null;
             this.visible = options.show !== false;
+            this.focused = this.visible;
             this.minimized = false;
             this.maximized = false;
             this.webContents = new EventEmitter();
@@ -85,6 +87,21 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.webContents.loadFile = (...args) => this.loadFile(...args);
             this.webContents.send = (channel, ...args) => {
                 emit({event: "rendererMessage", windowId: this.id, channel, args});
+            };
+            this.webContents.insertCSS = css => {
+                if (this.webContents.destroyed) {
+                    return Promise.reject(new Error("webContents was destroyed"));
+                }
+                const key = `nexa-electron-css-${this.id}-${++nextCssId}`;
+                this.webContents.send("__nexa:insert-css", key, String(css));
+                return Promise.resolve(key);
+            };
+            this.webContents.removeInsertedCSS = key => {
+                if (this.webContents.destroyed) {
+                    return Promise.reject(new Error("webContents was destroyed"));
+                }
+                this.webContents.send("__nexa:remove-css", String(key));
+                return Promise.resolve();
             };
             this.webContents.openDevTools = () => {};
             this.webContents.closeDevTools = () => {};
@@ -214,18 +231,29 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
 
         show() {
             this.visible = true;
+            if (activeWindow && activeWindow !== this) activeWindow.focused = false;
             activeWindow = this;
+            this.focused = true;
             this.emit("show");
             this.notifyState("show");
         }
 
-        hide() { this.visible = false; this.emit("hide"); this.notifyState("hide"); }
-        focus() { activeWindow = this; this.emit("focus"); this.notifyState("focus"); }
-        blur() { this.emit("blur"); this.notifyState("blur"); }
-        minimize() { this.minimized = true; this.emit("minimize"); this.notifyState("minimize"); }
+        hide() { this.visible = false; this.focused = false; this.emit("hide"); this.notifyState("hide"); }
+        focus() {
+            if (activeWindow && activeWindow !== this) activeWindow.focused = false;
+            activeWindow = this;
+            this.focused = true;
+            this.emit("focus");
+            this.notifyState("focus");
+        }
+        blur() { this.focused = false; this.emit("blur"); this.notifyState("blur"); }
+        minimize() { this.minimized = true; this.focused = false; this.emit("minimize"); this.notifyState("minimize"); }
         restore() {
             this.minimized = false;
             this.visible = true;
+            if (activeWindow && activeWindow !== this) activeWindow.focused = false;
+            activeWindow = this;
+            this.focused = true;
             this.emit("restore");
             this.notifyState("restore");
         }
@@ -234,6 +262,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         isMaximized() { return this.maximized; }
         isMinimized() { return this.minimized; }
         isVisible() { return this.visible; }
+        isFocused() { return this.focused; }
         isDestroyed() { return this.destroyed; }
         getBounds() {
             return {x: this.options.x || 0, y: this.options.y || 0,

@@ -235,6 +235,9 @@ class ElectronHost:
         try:
             with urlopen(request, timeout=5):
                 pass
+        except HTTPError as error:
+            detail = error.read().decode("utf-8", "replace").strip()
+            print(f"nexa: electron renderer event failed ({error.code}): {detail[:1000]}")
         except OSError as error:
             print(f"nexa: electron renderer event failed: {error}")
 

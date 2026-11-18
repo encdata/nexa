@@ -5,6 +5,7 @@
     let nextId = 1;
     const pending = new Map();
     const listeners = new Map();
+    const insertedStyles = new Map();
 
     function request(kind, channel, args) {
         const id = kind === "invoke" ? nextId++ : null;
@@ -84,6 +85,22 @@
         }
 
         if (message.kind !== "event") return;
+        if (message.channel === "__nexa:insert-css") {
+            const [key, css] = message.args || [];
+            const style = document.createElement("style");
+            style.textContent = String(css ?? "");
+            (document.head || document.documentElement).appendChild(style);
+            insertedStyles.set(String(key), style);
+            return;
+        }
+        if (message.channel === "__nexa:remove-css") {
+            const style = insertedStyles.get(String((message.args || [])[0]));
+            if (style) {
+                style.remove();
+                insertedStyles.delete(String((message.args || [])[0]));
+            }
+            return;
+        }
         const entries = listeners.get(message.channel);
         if (!entries) return;
         for (const [listener, options] of [...entries]) {
