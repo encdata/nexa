@@ -166,6 +166,9 @@ def main():
             logging.getLogger("nexa").info(
                 "loader connection ended after %s: %s", last_event_summary, error)
             return
+        except Exception:
+            logging.getLogger("nexa").exception("Nexa desktop session failed")
+            raise
         finally:
             if background:
                 active_marker.unlink(missing_ok=True)
