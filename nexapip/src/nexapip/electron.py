@@ -1,10 +1,12 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 import logging
+from threading import BoundedSemaphore
 
 from nexapip.event import Event
 
 logger = logging.getLogger("nexa.electron")
+MAX_QUEUED_IPC = 8
 
 
 class ElectronBridge:
@@ -20,6 +22,10 @@ class ElectronBridge:
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="nexa-electron-ipc")
             if transport is not None else None
         )
+        self._transport_slots = (
+            BoundedSemaphore(MAX_QUEUED_IPC + 1) if transport is not None else None
+        )
+        self._transport_queue_full_reported = False
 
     def handle(self, channel, callback):
         self.handlers[channel] = callback
@@ -55,7 +61,24 @@ class ElectronBridge:
         callback = self.handlers.get(channel)
         if callback is None:
             if self.transport is not None:
-                future = self._transport_executor.submit(self.transport, request)
+                if not self._transport_slots.acquire(blocking=False):
+                    if kind == "invoke":
+                        self._reply(request, error="Electron IPC queue is full")
+                    elif not self._transport_queue_full_reported:
+                        logger.warning("Electron IPC queue is full; dropping send messages")
+                        self._transport_queue_full_reported = True
+                    return True
+                self._transport_queue_full_reported = False
+                try:
+                    future = self._transport_executor.submit(self.transport, request)
+                except RuntimeError as error:
+                    self._transport_slots.release()
+                    if kind == "invoke":
+                        self._reply(request, error=str(error))
+                    else:
+                        logger.warning("Electron IPC send failed: %s", error)
+                    return True
+                future.add_done_callback(lambda _result: self._transport_slots.release())
                 if kind == "invoke":
                     future.add_done_callback(
                         lambda result, request=request: self._transport_reply(request, result))

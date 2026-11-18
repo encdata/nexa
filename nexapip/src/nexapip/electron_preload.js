@@ -1,4 +1,59 @@
 (() => {
+    if (window.top !== window) return;
+
+    if (typeof window.process === "undefined") {
+        const listeners = new Map();
+        const emitProcessEvent = (name, ...args) => {
+            for (const listener of [...(listeners.get(name) || [])]) listener(...args);
+        };
+        const process = {
+            argv: [],
+            env: {},
+            isMainFrame: window.top === window,
+            platform: "linux",
+            versions: {},
+            type: "renderer",
+            nextTick(callback, ...args) {
+                queueMicrotask(() => callback(...args));
+            },
+            on(name, listener) {
+                const entries = listeners.get(name) || new Set();
+                entries.add(listener);
+                listeners.set(name, entries);
+                return process;
+            },
+            once(name, listener) {
+                if (name === "loaded") {
+                    queueMicrotask(listener);
+                    return process;
+                }
+                const once = (...args) => {
+                    process.removeListener(name, once);
+                    listener(...args);
+                };
+                return process.on(name, once);
+            },
+            removeListener(name, listener) {
+                const entries = listeners.get(name);
+                entries?.delete(listener);
+                if (entries?.size === 0) listeners.delete(name);
+                return process;
+            },
+            emit(name, ...args) {
+                emitProcessEvent(name, ...args);
+                return listeners.has(name);
+            }
+        };
+        window.addEventListener("error", event => emitProcessEvent(
+            "uncaughtException", event.error || new Error(event.message), "uncaughtException"));
+        window.addEventListener("unhandledrejection", event => emitProcessEvent(
+            "unhandledRejection", event.reason));
+        Object.defineProperty(window, "process", {configurable: true, value: process});
+    }
+    if (typeof window.global === "undefined") {
+        Object.defineProperty(window, "global", {configurable: true, value: window});
+    }
+
     const native = window.nexaElectronNative;
     if (!native) return;
 
