@@ -63,6 +63,7 @@ struct nx_surface {
     int configured;
     int mapped;
     int destroying;
+    uint64_t last_frame_ns;
     enum nx_surface_role role;
     struct nx_surface *deferred_next;
 };
@@ -441,15 +442,48 @@ static void surface_get_release(struct wl_client *client, struct wl_resource *re
     wl_list_insert(surface->callbacks.prev, &pending->link);
     wl_resource_set_implementation(callback, NULL, pending, callback_resource_destroy);
 }
-static void complete_callbacks(struct nx_surface *surface) {
+static uint64_t monotonic_ns(void) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
-    uint32_t ms = (uint32_t)(now.tv_sec * 1000 + now.tv_nsec / 1000000);
+    return (uint64_t)now.tv_sec * 1000000000ULL + (uint64_t)now.tv_nsec;
+}
+
+static void complete_callbacks(struct nx_surface *surface) {
+    if (wl_list_empty(&surface->callbacks)) return;
+
+    uint64_t now = monotonic_ns();
+    const uint64_t frame_interval = 1000000000ULL / 60;
+    if (surface->last_frame_ns && now - surface->last_frame_ns < frame_interval)
+        return;
+
+    surface->last_frame_ns = now;
+    uint32_t ms = (uint32_t)(now / 1000000ULL);
     struct nx_callback *callback, *next;
     wl_list_for_each_safe(callback, next, &surface->callbacks, link) {
         wl_callback_send_done(callback->resource, ms);
         wl_resource_destroy(callback->resource);
     }
+}
+
+static int frame_callback_timeout(struct nx_server *server, int timeout_ms) {
+    const uint64_t frame_interval = 1000000000ULL / 60;
+    uint64_t now = monotonic_ns();
+    struct nx_surface *surface;
+    wl_list_for_each(surface, &server->surfaces, link) {
+        if (wl_list_empty(&surface->callbacks) || !surface->last_frame_ns)
+            continue;
+        uint64_t due = surface->last_frame_ns + frame_interval;
+        int remaining = due <= now ? 0 : (int)((due - now + 999999ULL) / 1000000ULL);
+        if (remaining < timeout_ms)
+            timeout_ms = remaining;
+    }
+    return timeout_ms;
+}
+
+static void complete_due_callbacks(struct nx_server *server) {
+    struct nx_surface *surface;
+    wl_list_for_each(surface, &server->surfaces, link)
+        complete_callbacks(surface);
 }
 
 static void surface_commit(struct wl_client *client, struct wl_resource *resource) {
@@ -1430,8 +1464,9 @@ int nexa_wl_dispatch(struct nx_server *server, int timeout_ms) {
     if (!server) return -1;
     pthread_mutex_lock(&server->api_lock);
     struct wl_event_loop *loop = wl_display_get_event_loop(server->display);
-    int result = wl_event_loop_dispatch(loop, timeout_ms);
+    int result = wl_event_loop_dispatch(loop, frame_callback_timeout(server, timeout_ms));
     destroy_deferred_surfaces(server);
+    complete_due_callbacks(server);
     wl_display_flush_clients(server->display);
     pthread_mutex_unlock(&server->api_lock);
     return result;
