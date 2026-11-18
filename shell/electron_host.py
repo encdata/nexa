@@ -23,6 +23,11 @@ HOST_EVENT_QUEUE_SIZE = 4
 logger = logging.getLogger("nexa.electron")
 
 
+def _background_throttling(options):
+    preferences = options.get("webPreferences") or {}
+    return preferences.get("backgroundThrottling") is not False
+
+
 class ElectronHost:
     def __init__(self, app_root, entry="index.html", node=None, main_entry=None,
                  screen_size=None, scale_factor=1.0):
@@ -466,7 +471,7 @@ class ElectronWebsiteRenderer:
 
 class _ElectronWindowView:
     def __init__(self, controller, activity, parent, window_id, url, preload_url=None,
-                 window_visible=True, container_visible=True):
+                 window_visible=True, container_visible=True, background_throttling=True):
         self.controller = controller
         self.host = controller.host
         self.activity = activity
@@ -476,9 +481,11 @@ class _ElectronWindowView:
         self.preload_url = preload_url
         self.window_visible = window_visible
         self.container_visible = container_visible
+        self.background_throttling = bool(background_throttling)
         self._applied_visible = True
         self._closed = False
         self._renderer_console_errors = {}
+        self._last_progress_bucket = 0
         logger.info("creating WebView for window %s at %s (visible=%s)",
                     window_id, url, self.visible)
         self.webview = tg.WebView(
@@ -491,7 +498,8 @@ class _ElectronWindowView:
                 "preload_url": preload_url,
                 "ipc_endpoint": self.host.sync_ipc_url,
                 "ipc_token": self.host.ipc_token,
-                "window_id": window_id
+                "window_id": window_id,
+                "background_throttling": self.background_throttling
             })
         if not self.visible:
             self.webview.setvisibility(tg.View.GONE)
@@ -566,8 +574,14 @@ class _ElectronWindowView:
         if event.type in (tg.Event.webviewNavigation, tg.Event.webviewProgress,
                           tg.Event.webviewHTTPError, tg.Event.webviewError,
                           tg.Event.webviewDestroyed):
-            if event.type == tg.Event.webviewProgress and event.value.get("progress") == 100:
-                logger.info("window %s finished loading %s", self.window_id, self.url)
+            if event.type == tg.Event.webviewProgress:
+                progress = event.value.get("progress")
+                if isinstance(progress, int):
+                    bucket = min(4, max(0, progress // 25))
+                    if bucket > self._last_progress_bucket:
+                        self._last_progress_bucket = bucket
+                        logger.info("window %s WebView load reached %s%%: %s",
+                                    self.window_id, bucket * 25, self.url)
             elif event.type in (tg.Event.webviewHTTPError, tg.Event.webviewError,
                                 tg.Event.webviewDestroyed):
                 logger.error("window %s WebView %s: %s",
@@ -581,6 +595,10 @@ class _ElectronWindowView:
     def set_visibility(self, visibility):
         self.window_visible = visibility == tg.View.VISIBLE
         self._apply_visibility()
+
+    def set_background_throttling(self, enabled):
+        self.background_throttling = bool(enabled)
+        self.webview.setbackgroundthrottling(self.background_throttling)
 
     def on_window_visibility_changed(self, visible):
         if visible:
@@ -662,7 +680,8 @@ class ElectronRenderer:
             self.window_id = self.host.window_id
             self.root_view = _ElectronWindowView(
                 self, activity, parent, self.window_id, self.url,
-                self.host.preload_url, self.host.renderer_visible)
+                self.host.preload_url, self.host.renderer_visible,
+                background_throttling=_background_throttling(self.host.renderer_options))
             self._views[self.window_id] = self.root_view
             self._flush_pending_renderer_messages(self.window_id)
             if not self.host.renderer_visible:
@@ -707,7 +726,8 @@ class ElectronRenderer:
         replacement = _ElectronWindowView(
             self, old_view.activity, old_view.parent, window_id,
             old_view.url, old_view.preload_url,
-            old_view.window_visible, old_view.container_visible)
+            old_view.window_visible, old_view.container_visible,
+            old_view.background_throttling)
         self._views[window_id] = replacement
         if window_id == self.window_id:
             self.root_view = replacement
@@ -735,9 +755,11 @@ class ElectronRenderer:
         logger.info("creating Electron child window %s at %s", window_id, url)
 
         def build(activity, parent, _state):
+            options = message.get("options") or {}
             view = _ElectronWindowView(
                 self, activity, parent, window_id, url, message.get("preloadUrl"),
-                message.get("visible", True))
+                message.get("visible", True),
+                background_throttling=_background_throttling(options))
             self._views[window_id] = view
             self._flush_pending_renderer_messages(window_id)
             return view
@@ -787,7 +809,8 @@ class ElectronRenderer:
                     self.window_id, self.url)
         self.root_view = _ElectronWindowView(
             self, self.activity, self.parent, self.window_id, self.url,
-            message.get("preloadUrl"), message.get("visible", True))
+            message.get("preloadUrl"), message.get("visible", True),
+            background_throttling=_background_throttling(self.host.renderer_options))
         self._views[self.window_id] = self.root_view
         if not message.get("visible", True):
             self.root_view.set_visibility(tg.View.GONE)
@@ -830,7 +853,8 @@ class ElectronRenderer:
             self._root_hidden = not self.host.renderer_visible
             self.root_view = _ElectronWindowView(
                 self, self.activity, self.parent, self.window_id, self.url,
-                self.host.preload_url, self.host.renderer_visible)
+                self.host.preload_url, self.host.renderer_visible,
+                background_throttling=_background_throttling(self.host.renderer_options))
             self._views[self.window_id] = self.root_view
             if not self.host.renderer_visible:
                 self.root_view.set_visibility(tg.View.GONE)
@@ -850,13 +874,20 @@ class ElectronRenderer:
             elif message.get("action") in ("show", "restore"):
                 logger.info("showing Electron root window %s", self.window_id)
                 self.root_view.set_visibility(tg.View.VISIBLE)
+            elif message.get("action") == "backgroundThrottling":
+                self.root_view.set_background_throttling(
+                    (message.get("value") or {}).get("enabled", True))
             return
         host_window = self._host_windows.get(message.get("windowId"))
         if host_window is None:
             return
         action = message.get("action")
         value = message.get("value") or {}
-        if action == "title":
+        if action == "backgroundThrottling":
+            view = self._views.get(message.get("windowId"))
+            if view is not None:
+                view.set_background_throttling(value.get("enabled", True))
+        elif action == "title":
             host_window.set_title(value.get("title", ""))
         elif action == "focus":
             host_window.focus()

@@ -70,6 +70,11 @@ class WebView(View):
                     "ipcToken": token,
                     "windowId": window_id
                 })
+            background_throttling = electron_bridge.get("background_throttling")
+            if background_throttling is not None:
+                if not isinstance(background_throttling, bool):
+                    raise TypeError("electron background_throttling must be a bool")
+                args["electronBridge"]["backgroundThrottling"] = background_throttling
         View.__init__(self, activity, activity.c.send_read_msg({"method": "createWebView", "params": args}))
 
     def allowjavascript(self, allow: bool):
@@ -90,6 +95,10 @@ class WebView(View):
     def setdesktopmode(self, enabled: bool):
         """Uses a desktop viewport and user agent for the loaded page."""
         self.a.c.send_msg({"method": "setDesktopMode", "params": {
+            "aid": self.a.aid, "id": self.id, "enabled": enabled}})
+
+    def setbackgroundthrottling(self, enabled: bool):
+        self.a.c.send_msg({"method": "setElectronBackgroundThrottling", "params": {
             "aid": self.a.aid, "id": self.id, "enabled": enabled}})
 
     def setdata(self, data: str):

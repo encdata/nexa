@@ -80,6 +80,8 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.webContents.id = this.id;
             this.webContents.session = this.session;
             this.webContents.destroyed = false;
+            this.webContents.backgroundThrottling =
+                options.webPreferences?.backgroundThrottling !== false;
             this.webContents.getURL = () => this.url || "";
             this.webContents.getTitle = () => this.title || "";
             this.webContents.isDestroyed = () => this.webContents.destroyed;
@@ -107,6 +109,14 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.webContents.closeDevTools = () => {};
             this.webContents.setWindowOpenHandler = handler => {
                 this.windowOpenHandler = handler;
+            };
+            this.webContents.setBackgroundThrottling = enabled => {
+                const allowed = Boolean(enabled);
+                if (this.webContents.backgroundThrottling === allowed) return;
+                this.webContents.backgroundThrottling = allowed;
+                this.notifyState("backgroundThrottling", {
+                    enabled: allowed
+                });
             };
             contents.set(this.id, this.webContents);
             windows.set(this.id, this);
