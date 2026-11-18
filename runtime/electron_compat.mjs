@@ -11,7 +11,8 @@ import {fileURLToPath, pathToFileURL} from "node:url";
 
 export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath = appRoot,
                                      localUrl, emit, resolveAsar, trustOrigin,
-                                     isTrustedPath = () => false}) {
+                                     isTrustedPath = () => false,
+                                     executablePath = process.execPath}) {
     if (process.platform === "android") {
         Object.defineProperty(process, "platform", {value: "linux", configurable: true});
         os.platform = () => "linux";
@@ -78,6 +79,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.webContents.session = this.session;
             this.webContents.destroyed = false;
             this.webContents.getURL = () => this.url || "";
+            this.webContents.getTitle = () => this.title || "";
             this.webContents.isDestroyed = () => this.webContents.destroyed;
             this.webContents.loadURL = (...args) => this.loadURL(...args);
             this.webContents.loadFile = (...args) => this.loadFile(...args);
@@ -302,6 +304,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
     }
 
     const ipcMain = new EventEmitter();
+    const autoUpdater = new EventEmitter();
     ipcMain.handle = (channel, callback) => {
         if (handlers.has(channel)) throw new Error(`duplicate ipcMain handler: ${channel}`);
         handlers.set(channel, callback);
@@ -339,9 +342,11 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             });
         }
     }
-    const appName = packageData.productName || packageData.name || path.basename(appPath);
-    const userDataPath = process.env.NEXA_ELECTRON_USER_DATA ||
+    let appName = packageData.productName || packageData.name || path.basename(appPath);
+    let desktopName = "";
+    let userDataPath = process.env.NEXA_ELECTRON_USER_DATA ||
         path.join(process.env.HOME || appRoot, ".config", "nexa", "apps", appName);
+    const pathOverrides = new Map();
     function readPreload(file) {
         const absolute = path.resolve(appRoot, file);
         let realFile;
@@ -372,6 +377,9 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
     app.isPackaged = true;
     app.getName = () => appName;
     app.getVersion = () => packageData.version || "0.0.0";
+    app.setVersion = version => { packageData.version = String(version); };
+    app.getLocale = app.getSystemLocale = () =>
+        Intl.DateTimeFormat().resolvedOptions().locale || "en-US";
     app.getAppPath = () => appPath;
     app.getAppMetrics = () => {
         const cpu = process.cpuUsage();
@@ -391,26 +399,57 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
     };
     app.getGPUInfo = async () => ({gpuDevice: []});
     app.getPath = name => {
-        if (name === "home") return process.env.HOME || appRoot;
-        if (name === "appData") return process.env.XDG_CONFIG_HOME || path.join(process.env.HOME || appRoot, ".config");
-        if (name === "userData") {
-            fs.mkdirSync(userDataPath, {recursive: true});
-            return userDataPath;
+        if (pathOverrides.has(name)) return pathOverrides.get(name);
+        const home = process.env.HOME || appRoot;
+        const paths = {
+            home,
+            appData: process.env.XDG_CONFIG_HOME || path.join(home, ".config"),
+            userData: userDataPath,
+            sessionData: userDataPath,
+            cache: process.env.XDG_CACHE_HOME || path.join(home, ".cache"),
+            downloads: path.join(home, "Downloads"),
+            documents: path.join(home, "Documents"),
+            desktop: path.join(home, "Desktop"),
+            pictures: path.join(home, "Pictures"),
+            videos: path.join(home, "Videos"),
+            music: path.join(home, "Music"),
+            logs: path.join(userDataPath, "logs"),
+            temp: process.env.TMPDIR || "/tmp",
+            exe: executablePath,
+            module: appPath,
+            assets: resourcesPath,
+            crashDumps: path.join(userDataPath, "Crashpad", "reports")
+        };
+        const value = paths[name];
+        if (!value) throw new Error(`unknown Electron path: ${name}`);
+        if (name === "userData" || name === "logs") {
+            fs.mkdirSync(value, {recursive: true});
         }
-        if (name === "cache") return process.env.XDG_CACHE_HOME || path.join(process.env.HOME || appRoot, ".cache");
-        if (name === "downloads") return path.join(process.env.HOME || appRoot, "Downloads");
-        if (name === "documents") return path.join(process.env.HOME || appRoot, "Documents");
-        if (name === "desktop") return path.join(process.env.HOME || appRoot, "Desktop");
-        if (name === "pictures") return path.join(process.env.HOME || appRoot, "Pictures");
-        if (name === "videos") return path.join(process.env.HOME || appRoot, "Videos");
-        if (name === "music") return path.join(process.env.HOME || appRoot, "Music");
-        if (name === "logs") return path.join(userDataPath, "logs");
-        if (name === "temp") return process.env.TMPDIR || "/tmp";
-        if (name === "exe") return process.execPath;
-        if (name === "module") return appPath;
-        if (name === "crashDumps") return path.join(userDataPath, "Crashpad", "reports");
-        return appRoot;
+        return value;
     };
+    app.setPath = (name, value) => {
+        if (!Object.hasOwn({home: 1, appData: 1, userData: 1, sessionData: 1,
+            cache: 1, downloads: 1, documents: 1, desktop: 1, pictures: 1,
+            videos: 1, music: 1, logs: 1, temp: 1, exe: 1, module: 1,
+            assets: 1, crashDumps: 1}, name)) {
+            throw new Error(`unknown Electron path: ${name}`);
+        }
+        if (typeof value !== "string" || !path.isAbsolute(value)) {
+            throw new TypeError("Electron paths must be absolute");
+        }
+        const stat = fs.statSync(value);
+        if (name === "exe" ? !stat.isFile() : !stat.isDirectory()) {
+            throw new Error(`Electron path is not the expected file or directory: ${value}`);
+        }
+        pathOverrides.set(name, value);
+        if (name === "userData") userDataPath = value;
+    };
+    app.setName = name => {
+        appName = String(name);
+        app.name = appName;
+    };
+    app.setDesktopName = name => { desktopName = String(name); };
+    app.getDesktopName = () => desktopName;
     app.setAppUserModelId = () => {};
     app.requestSingleInstanceLock = () => true;
     app.commandLine = {appendSwitch() {}, appendArgument() {}};
@@ -466,6 +505,31 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             resolveHost(new URL(url).hostname).catch(() => {});
         };
         session.webRequest = new EventEmitter();
+        const webRequestHandlers = new Map();
+        for (const method of ["onBeforeRequest", "onBeforeSendHeaders", "onSendHeaders",
+            "onHeadersReceived", "onResponseStarted", "onBeforeRedirect",
+            "onCompleted", "onErrorOccurred"]) {
+            session.webRequest[method] = (filter, listener) => {
+                if (typeof filter === "function") {
+                    listener = filter;
+                    filter = {};
+                }
+                if (listener === null) {
+                    webRequestHandlers.delete(method);
+                    return;
+                }
+                if (typeof listener !== "function") {
+                    throw new TypeError(`${method} requires a listener`);
+                }
+                webRequestHandlers.set(method, {filter: filter || {}, listener});
+            };
+        }
+        session.webRequest.dispatch = (method, details, callback) => {
+            const registration = webRequestHandlers.get(method);
+            if (!registration) return;
+            if (callback) registration.listener(details, callback);
+            else registration.listener(details);
+        };
         const registeredProtocols = new Map();
         protocolHandlers.set(session, registeredProtocols);
         session.protocol = {
@@ -488,10 +552,19 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             preloads = [...paths];
         };
         session.getCacheSize = async () => 0;
+        session.getSharedDictionaryUsageInfo = async () => [];
         session.clearCache = async () => {};
         session.clearStorageData = async () => {};
+        // Android WebView owns this cache; clearing it on each launch defeats its warm start.
+        session.clearCodeCaches = async () => {};
         session.flushStorageData = async () => {};
         session.closeAllConnections = async () => {};
+        session.setPermissionRequestHandler = handler => {
+            session.permissionRequestHandler = handler;
+        };
+        session.setPermissionCheckHandler = handler => {
+            session.permissionCheckHandler = handler;
+        };
         return session;
     }
     const defaultSession = createSession();
@@ -649,6 +722,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         },
         nativeTheme,
         screen,
+        autoUpdater,
         session: {
             defaultSession,
             fromPartition: sessionForPartition
@@ -766,8 +840,12 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         if (!mainPath.startsWith(appRoot + path.sep) || !fs.existsSync(mainPath)) {
             throw new Error(`Electron main entry not found: ${entry}`);
         }
-        process.argv = [process.execPath, appPath];
+        process.argv = [executablePath, appPath];
         process.defaultApp = false;
+        const appModulesPath = path.join(appRoot, "node_modules");
+        if (fs.existsSync(appModulesPath) && !Module.globalPaths.includes(appModulesPath)) {
+            Module.globalPaths.unshift(appModulesPath);
+        }
         const isEsm = path.extname(mainPath) === ".mjs" ||
             (path.extname(mainPath) === ".js" && packageData.type === "module");
         if (isEsm) {

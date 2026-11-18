@@ -17,6 +17,7 @@ const maxRendererEventBytes = 8 * 1024 * 1024;
 let root = path.resolve(rootArg);
 let realRoot = fs.realpathSync(root);
 const sourceRoot = root;
+let applicationExecutable = process.execPath;
 const entry = entryArg.replace(/^\/+/, "");
 let baseUrl = "";
 const trustedOrigins = new Set();
@@ -80,6 +81,43 @@ const rendererArchive = archive ? {base: archive.base, header: archive.header} :
 const extractedArchives = new Map();
 const extractedRoots = new Set([realRoot]);
 const linkedModuleArchives = new Set();
+
+function findApplicationExecutable(archivePath) {
+    const resourcesDirectory = path.dirname(archivePath);
+    const appDirectory = path.basename(resourcesDirectory) === "resources"
+        ? path.dirname(resourcesDirectory) : resourcesDirectory;
+    let candidates;
+    try {
+        candidates = fs.readdirSync(appDirectory, {withFileTypes: true});
+    } catch (_) {
+        return null;
+    }
+    const binaries = [];
+    for (const candidate of candidates) {
+        if (!candidate.isFile() || candidate.name === "chrome-sandbox" ||
+            candidate.name === "chrome_crashpad_handler" || /\.(?:so|node)(?:\.|$)/i.test(candidate.name)) {
+            continue;
+        }
+        const file = path.join(appDirectory, candidate.name);
+        try {
+            const stat = fs.statSync(file);
+            if (!(stat.mode & 0o111)) continue;
+            const fd = fs.openSync(file, "r");
+            const header = Buffer.alloc(20);
+            try {
+                if (fs.readSync(fd, header, 0, header.length, 0) !== header.length) continue;
+            } finally {
+                fs.closeSync(fd);
+            }
+            if (header.subarray(0, 4).equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46])) &&
+                header[5] === 1 && header.readUInt16LE(18) === 62) {
+                binaries.push({file, size: stat.size});
+            }
+        } catch (_) {}
+    }
+    binaries.sort((left, right) => right.size - left.size);
+    return binaries[0]?.file || null;
+}
 
 function extractAsar(file, parsed = readAsar(file)) {
     file = path.resolve(file);
@@ -192,6 +230,7 @@ function linkElectronModules(archivePath, extractedRoot) {
 }
 
 if (archive && mainArg) {
+    applicationExecutable = findApplicationExecutable(sourceRoot) || applicationExecutable;
     root = extractAsar(root, archive);
     linkElectronModules(sourceRoot, root);
     archive = null;
@@ -258,7 +297,8 @@ const electronHost = mainArg && !archive
         emit,
         resolveAsar: extractElectronArchive,
         trustOrigin: origin => trustedOrigins.add(origin),
-        isTrustedPath
+        isTrustedPath,
+        executablePath: applicationExecutable
     })
     : null;
 const electron = electronHost?.electron || null;
