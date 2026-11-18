@@ -456,7 +456,7 @@ server.listen(Number(portArg), "127.0.0.1", () => {
     const {port} = server.address();
     baseUrl = `http://127.0.0.1:${port}`;
     emit({event: "ready", url: localUrl(entry)});
-    if (electron) setImmediate(() => electron.runMain(mainArg));
+    if (electronHost) setImmediate(() => electronHost.runMain(mainArg));
 });
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
