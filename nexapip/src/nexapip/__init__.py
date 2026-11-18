@@ -5,7 +5,7 @@ importing the package. """
 
 __version__ = "0.2.0"
 
-__all__ = ['APP_API_VERSION', 'Activity', 'App', 'Buffer', 'Button', 'Checkbox', 'CompoundButton', 'Connection', 'EditText', 'Event',
+__all__ = ['APP_API_VERSION', 'Activity', 'App', 'Buffer', 'Button', 'Checkbox', 'CompoundButton', 'Connection', 'EditText', 'ElectronBridge', 'Event',
            'FrameLayout', "GridLayout", 'HorizontalScrollView', 'ImageView', 'LinearLayout', 'NestedScrollView',
            'NexaApp', 'Notification', 'ProgressBar', 'RadioButton', 'RadioGroup', 'RemoteViews', 'Space', 'Spinner',
            'SwipeRefreshLayout', 'Switch', 'SurfaceView', 'TabLayout', 'Task', 'TextView', 'ToggleButton', 'View', 'ViewGroup',
@@ -19,6 +19,7 @@ from nexapip.checkbox import Checkbox
 from nexapip.compoundbutton import CompoundButton
 from nexapip.connection import Connection
 from nexapip.edittext import EditText
+from nexapip.electron import ElectronBridge
 from nexapip.event import Event
 from nexapip.framelayout import FrameLayout
 from nexapip.gridlayout import GridLayout

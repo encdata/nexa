@@ -1,28 +1,32 @@
 import configparser
 import hashlib
+import json
 import lzma
 import os
 from pathlib import Path
 import re
 import shlex
 import shutil
+import struct
 import subprocess
 import tempfile
 import time
 from xml.sax.saxutils import escape
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 from urllib.request import urlopen
 
 
 PACKAGE_ROOT = Path.home() / ".local" / "share" / "nexa" / "deb-packages"
 DEPENDENCY_PREFIX = "nexa-dependency-"
 SHORTCUT_ROOT = Path.home() / "Nexa Apps"
+WEBVIEW_APPS_PATH = Path.home() / ".config" / "nexa" / "webview-apps.json"
 DEBIAN_SUITE = "trixie"
 DEBIAN_INDEX_URL = (f"https://deb.debian.org/debian/dists/{DEBIAN_SUITE}"
                     "/main/binary-amd64/Packages.xz")
 DEBIAN_BASE_URL = "https://deb.debian.org/debian/"
 DEBIAN_CACHE = Path.home() / ".cache" / "nexa" / "debian"
 _VALID_ID = re.compile(r"[^a-zA-Z0-9_.-]+")
+_webview_apps_cache = None
 
 
 class DebApp:
@@ -43,6 +47,122 @@ class DebApp:
         raise RuntimeError("Debian apps are launched through the Wayland host")
 
 
+class DebElectronApp(DebApp):
+    external_launcher = False
+
+    def __init__(self, app_id, name, icon, shortcut, argv, cwd, env,
+                 archive, entry, main_entry, website_url=None):
+        super().__init__(app_id, name, icon, shortcut, argv, cwd, env)
+        self.archive = str(archive) if archive is not None else None
+        self.renderer_entry = entry
+        self.main_entry = main_entry
+        self.website_url = website_url
+
+    def build(self, activity, parent, context=None):
+        from shell.electron_host import ElectronRenderer, ElectronWebsiteRenderer
+        if self.website_url:
+            return ElectronWebsiteRenderer(activity, parent, self.website_url)
+        return ElectronRenderer(activity, parent, self.archive,
+                                self.renderer_entry, main_entry=self.main_entry,
+                                app_id=self.app_id, app_name=self.name, icon=self.icon)
+
+    def build_with_services(self, activity, parent, context, services):
+        from shell.electron_host import ElectronRenderer, ElectronWebsiteRenderer
+        if self.website_url:
+            return ElectronWebsiteRenderer(activity, parent, self.website_url)
+        return ElectronRenderer(
+            activity, parent, self.archive, self.renderer_entry,
+            main_entry=self.main_entry, app_id=self.app_id,
+            app_name=self.name, icon=self.icon,
+            window_host=services.get("window_host"),
+            close_window=services.get("close_window"))
+
+
+def _asar_header(archive):
+    with archive.open("rb") as stream:
+        prefix = stream.read(16)
+        if len(prefix) != 16:
+            raise ValueError("asar header is truncated")
+        header_size = struct.unpack_from("<I", prefix, 4)[0]
+        json_size = struct.unpack_from("<I", prefix, 12)[0]
+        if json_size <= 0 or json_size + 16 > header_size + 8:
+            raise ValueError("asar header size is invalid")
+        header = json.loads(stream.read(json_size).decode("utf-8"))
+    return header_size, header
+
+
+def _asar_file_node(header, path):
+    node = header
+    for part in path.split("/"):
+        node = node.get("files", {}).get(part)
+        if not isinstance(node, dict):
+            return None
+    return node
+
+
+def _read_asar_file(archive, header_size, node):
+    if node.get("unpacked"):
+        return json.loads(Path(f"{archive}.unpacked/package.json").read_text(encoding="utf-8"))
+    with archive.open("rb") as stream:
+        stream.seek(8 + header_size + int(node["offset"]))
+        return json.loads(stream.read(int(node["size"])).decode("utf-8"))
+
+
+def _electron_bundle(package, root):
+    candidates = set()
+    for pattern in (
+            "usr/lib/*/resources/app.asar",
+            "usr/lib/*/*/resources/app.asar",
+            "usr/lib/*/app.asar",
+            "opt/*/resources/app.asar",
+            "opt/*/*/resources/app.asar",
+            "opt/*/app.asar",
+            "usr/share/*/resources/app.asar",
+            "usr/share/*/*/resources/app.asar",
+            "usr/share/*/app.asar"):
+        candidates.update(root.glob(pattern))
+
+    config_root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / package
+    if config_root.is_dir():
+        candidates.update(config_root.glob("*/resources/app.asar"))
+        candidates.update(config_root.glob("app-*/resources/app.asar"))
+    archives = sorted(set(candidates), key=lambda path: path.stat().st_mtime, reverse=True)
+    for archive in archives:
+        try:
+            header_size, header = _asar_header(archive)
+            package_node = _asar_file_node(header, "package.json")
+            if package_node is None:
+                continue
+            if package_node.get("unpacked"):
+                package_data = json.loads(
+                    Path(f"{archive}.unpacked/package.json").read_text(encoding="utf-8"))
+            else:
+                package_data = _read_asar_file(archive, header_size, package_node)
+            main_entry = package_data.get("main", "index.js")
+            if not isinstance(main_entry, str) or Path(main_entry).is_absolute() or ".." in Path(main_entry).parts:
+                continue
+
+            renderer_entry = "index.html"
+            root_index = _asar_file_node(header, renderer_entry)
+            if root_index is None or "files" in root_index:
+                def find_index(directory, prefix=""):
+                    for name, item in directory.get("files", {}).items():
+                        relative = f"{prefix}/{name}".strip("/")
+                        if "files" in item:
+                            found = find_index(item, relative)
+                            if found is not None:
+                                return found
+                        elif name == "index.html":
+                            return relative
+                    return None
+
+                renderer_entry = find_index(header) or renderer_entry
+            return archive, renderer_entry, main_entry
+        except (OSError, ValueError, KeyError, json.JSONDecodeError) as error:
+            print(f"nexa: couldn't inspect Electron archive {archive}: {error}")
+    return None
+
+
 def _run(*args):
     result = subprocess.run(args, check=True, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True)
@@ -51,7 +171,78 @@ def _run(*args):
 
 def _desktop_files(root):
     directory = root / "usr" / "share" / "applications"
-    return sorted(directory.rglob("*.desktop")) if directory.is_dir() else []
+    files = set(directory.rglob("*.desktop")) if directory.is_dir() else set()
+    vendor_directory = root / "usr" / "share" / root.name
+    if vendor_directory.is_dir():
+        files.update(vendor_directory.rglob("*.desktop"))
+    return sorted(files)
+
+
+def _desktop_app_id(package, desktop_file, root):
+    applications_directory = root / "usr" / "share" / "applications"
+    desktop_base = (applications_directory if applications_directory in desktop_file.parents
+                    else root / "usr" / "share")
+    desktop_id = _VALID_ID.sub("_", desktop_file.relative_to(desktop_base).as_posix())
+    return f"deb.{package}.{desktop_id}"[:120]
+
+
+def _webview_app_urls():
+    global _webview_apps_cache
+    if _webview_apps_cache is None:
+        try:
+            with WEBVIEW_APPS_PATH.open(encoding="utf-8") as source:
+                saved = json.load(source)
+        except FileNotFoundError:
+            saved = {}
+        except (OSError, json.JSONDecodeError) as error:
+            print(f"nexa: couldn't read WebView app settings: {error}")
+            saved = {}
+        _webview_apps_cache = (
+            {key: value.strip() for key, value in saved.items()
+             if isinstance(key, str) and isinstance(value, str) and value.strip()}
+            if isinstance(saved, dict) else {})
+    return _webview_apps_cache
+
+
+def set_webview_app_url(app_id, url):
+    global _webview_apps_cache
+    if not isinstance(app_id, str) or not app_id.strip():
+        raise ValueError("app id is required")
+    urls = dict(_webview_app_urls())
+    if url is None or not str(url).strip():
+        urls.pop(app_id, None)
+    else:
+        url = str(url).strip()
+        _validate_webview_url(url)
+        urls[app_id] = url
+
+    WEBVIEW_APPS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+                "w", encoding="utf-8", dir=WEBVIEW_APPS_PATH.parent,
+                prefix=".webview-apps-", delete=False) as target:
+            temporary_path = target.name
+            json.dump(urls, target, separators=(",", ":"))
+        os.replace(temporary_path, WEBVIEW_APPS_PATH)
+    finally:
+        if temporary_path and os.path.exists(temporary_path):
+            os.remove(temporary_path)
+    _webview_apps_cache = urls
+
+
+def _validate_webview_url(url):
+    try:
+        parsed_url = urlsplit(url)
+        hostname = (parsed_url.hostname or "").lower()
+        parsed_url.port
+    except ValueError as error:
+        raise ValueError(f"invalid Nexa WebView URL: {error}") from error
+    local_http = parsed_url.scheme == "http" and hostname in (
+        "127.0.0.1", "localhost", "::1")
+    if (parsed_url.scheme != "https" and not local_http) or not hostname \
+            or parsed_url.username is not None or parsed_url.password is not None:
+        raise ValueError("Nexa WebView URL must use HTTPS or local HTTP")
 
 
 def _find_icon(root, value):
@@ -519,10 +710,14 @@ def _package_path_environment(root):
     return os.pathsep.join(path for path in paths if path)
 
 
-def _desktop_app(package, desktop_file, root, schema_directory=None, fontconfig_file=None):
-    parser = configparser.ConfigParser(interpolation=None, strict=False)
-    parser.read(desktop_file, encoding="utf-8")
-    entry = parser["Desktop Entry"] if parser.has_section("Desktop Entry") else None
+def _desktop_app(package, desktop_file, root, schema_directory=None, fontconfig_file=None,
+                 electron_bundle=None, desktop_entry=None):
+    if desktop_entry is None:
+        parser = configparser.ConfigParser(interpolation=None, strict=False)
+        parser.read(desktop_file, encoding="utf-8")
+        entry = parser["Desktop Entry"] if parser.has_section("Desktop Entry") else None
+    else:
+        entry = desktop_entry
     if (entry is None or entry.get("Type", "Application") != "Application"
             or entry.getboolean("Hidden", fallback=False)
             or entry.getboolean("NoDisplay", fallback=False)
@@ -530,10 +725,15 @@ def _desktop_app(package, desktop_file, root, schema_directory=None, fontconfig_
         return None
     name = entry.get("Name", "").strip()
     exec_line = entry.get("Exec", "").strip()
-    if not name or not exec_line:
+    app_id = _desktop_app_id(package, desktop_file, root)
+    website_url = (_webview_app_urls().get(app_id)
+                   or entry.get("X-Nexa-WebView-URL", "").strip() or None)
+    if not name or (not exec_line and not website_url):
         return None
+    if website_url:
+        _validate_webview_url(website_url)
     try:
-        command = shlex.split(exec_line)
+        command = shlex.split(exec_line) if exec_line and not website_url else []
     except ValueError:
         return None
     expanded = []
@@ -546,29 +746,31 @@ def _desktop_app(package, desktop_file, root, schema_directory=None, fontconfig_
             expanded.append(part)
     command = expanded
     command = [part for part in command if part]
-    if not command:
+    if not command and not website_url:
         return None
-    launch_env = {"BOX64_LD_LIBRARY_PATH": _library_path(),
-                  "BOX64_PREFER_EMULATED": "1",
-                  "PATH": _package_path_environment(root)}
-    driver_path = _driver_path()
-    if driver_path:
-        launch_env["LIBGL_DRIVERS_PATH"] = driver_path
-    if schema_directory is not None:
-        launch_env["GSETTINGS_SCHEMA_DIR"] = str(schema_directory)
-    if fontconfig_file is not None:
-        launch_env["FONTCONFIG_FILE"] = str(fontconfig_file)
-    if Path(command[0]).name == "env":
+    launch_env = {}
+    if not website_url:
+        launch_env = {"BOX64_LD_LIBRARY_PATH": _library_path(),
+                      "BOX64_PREFER_EMULATED": "1",
+                      "PATH": _package_path_environment(root)}
+        driver_path = _driver_path()
+        if driver_path:
+            launch_env["LIBGL_DRIVERS_PATH"] = driver_path
+        if schema_directory is not None:
+            launch_env["GSETTINGS_SCHEMA_DIR"] = str(schema_directory)
+        if fontconfig_file is not None:
+            launch_env["FONTCONFIG_FILE"] = str(fontconfig_file)
+    if command and Path(command[0]).name == "env":
         command.pop(0)
     while len(command) > 1 and re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*=.*", command[0]):
         key, value = command.pop(0).split("=", 1)
         launch_env[key] = value
-    if not command:
+    if not command and not website_url:
         return None
-    executable = command[0]
-    if executable.startswith("/"):
+    executable = command[0] if command else None
+    if executable and executable.startswith("/"):
         command[0] = str(_resolve_debian_path(root, executable))
-    elif "/" not in executable:
+    elif executable and "/" not in executable:
         for package_root in _package_roots():
             candidate = next((package_root / relative / executable
                               for relative in ("usr/bin", "usr/games", "bin")
@@ -577,7 +779,7 @@ def _desktop_app(package, desktop_file, root, schema_directory=None, fontconfig_
                 command[0] = str(candidate)
                 break
 
-    if not Path(command[0]).exists():
+    if command and not Path(command[0]).exists() and not website_url:
         return None
 
     working_directory = entry.get("Path", "").strip()
@@ -588,39 +790,41 @@ def _desktop_app(package, desktop_file, root, schema_directory=None, fontconfig_
     if not os.path.isdir(working_directory):
         working_directory = str(root)
 
-    if package == "discord" and Path(command[0]).name == "discord":
-        config_root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-        installed_apps = sorted((config_root / "discord").glob("app-*/Discord"), reverse=True)
-        if installed_apps:
-            command = [str(installed_apps[0]), "--no-sandbox",
-                       "--ozone-platform=wayland",
-                       "--enable-features=UseOzonePlatform"]
-            working_directory = str(installed_apps[0].parent)
-
-    desktop_id = _VALID_ID.sub("_", desktop_file.relative_to(root / "usr/share/applications").as_posix())
-    app_id = f"deb.{package}.{desktop_id}"[:120]
     SHORTCUT_ROOT.mkdir(parents=True, exist_ok=True)
     shortcut = SHORTCUT_ROOT / f"{app_id}.desktop"
     shortcut.write_text(f"[Desktop Entry]\nType=Application\nName={name}\nX-Nexa-App={app_id}\n",
                         encoding="utf-8")
-    return DebApp(app_id, name, _find_icon(root, entry.get("Icon")), shortcut,
-                  command, working_directory, launch_env)
+    icon = _find_icon(root, entry.get("Icon"))
+    if electron_bundle is not None or website_url:
+        archive, renderer_entry, main_entry = electron_bundle or (None, None, None)
+        return DebElectronApp(app_id, name, icon, shortcut, command,
+                              working_directory, launch_env, archive,
+                              renderer_entry, main_entry, website_url)
+    return DebApp(app_id, name, icon, shortcut, command, working_directory, launch_env)
 
 
 def discover():
     apps = {}
     if not PACKAGE_ROOT.is_dir():
         return apps
-    try:
-        schema_directory = _schema_directory()
-    except (OSError, RuntimeError) as error:
-        print(f"nexa: couldn't compile Debian GSettings schemas: {error}")
-        schema_directory = None
-    try:
-        fontconfig_file = _fontconfig_file()
-    except OSError as error:
-        print(f"nexa: couldn't prepare Debian font configuration: {error}")
-        fontconfig_file = None
+    schema_directory = None
+    fontconfig_file = None
+    runtime_paths_loaded = False
+
+    def load_runtime_paths():
+        nonlocal schema_directory, fontconfig_file, runtime_paths_loaded
+        if runtime_paths_loaded:
+            return
+        runtime_paths_loaded = True
+        try:
+            schema_directory = _schema_directory()
+        except (OSError, RuntimeError) as error:
+            print(f"nexa: couldn't compile Debian GSettings schemas: {error}")
+        try:
+            fontconfig_file = _fontconfig_file()
+        except OSError as error:
+            print(f"nexa: couldn't prepare Debian font configuration: {error}")
+
     for root in sorted(PACKAGE_ROOT.iterdir()):
         if not root.is_dir():
             continue
@@ -632,10 +836,40 @@ def discover():
         except OSError:
             continue
         package_apps = []
-        for desktop_file in _desktop_files(root):
+        desktop_files = _desktop_files(root)
+        desktop_entries = {}
+        needs_electron_bundle = False
+        for desktop_file in desktop_files:
+            parser = configparser.ConfigParser(interpolation=None, strict=False)
+            try:
+                parser.read(desktop_file, encoding="utf-8")
+                entry = (parser["Desktop Entry"]
+                         if parser.has_section("Desktop Entry") else None)
+            except (configparser.Error, OSError) as error:
+                desktop_entries[desktop_file] = None
+                needs_electron_bundle = True
+                print(f"nexa: couldn't read Debian launcher {desktop_file}: {error}")
+                continue
+            desktop_entries[desktop_file] = entry
+            app_id = _desktop_app_id(package, desktop_file, root)
+            website_url = (_webview_app_urls().get(app_id)
+                           or (entry.get("X-Nexa-WebView-URL", "").strip()
+                               if entry is not None else ""))
+            if not website_url:
+                needs_electron_bundle = True
+                break
+        electron_bundle = (_electron_bundle(package, root)
+                           if desktop_files and needs_electron_bundle else None)
+        if needs_electron_bundle:
+            load_runtime_paths()
+        for desktop_file in desktop_files:
+            desktop_entry = desktop_entries.get(desktop_file)
+            if desktop_entry is None:
+                continue
             try:
                 app = _desktop_app(package, desktop_file, root,
-                                   schema_directory, fontconfig_file)
+                                   schema_directory, fontconfig_file, electron_bundle,
+                                   desktop_entry)
             except (configparser.Error, OSError, ValueError) as error:
                 print(f"nexa: couldn't read Debian launcher {desktop_file}: {error}")
                 continue
@@ -656,6 +890,7 @@ def discover():
                     except OSError:
                         continue
             if len(binaries) == 1:
+                load_runtime_paths()
                 candidate = binaries[0]
                 name = candidate.name
                 app_id = f"deb.{package}.{_VALID_ID.sub('_', name)}"[:120]

@@ -62,7 +62,8 @@ class Connection(tg.Connection):
                               tg.Event.touch | tg.Event.refresh | tg.Event.selected | tg.Event.itemselected |
                               tg.Event.text | tg.Event.webviewNavigation | tg.Event.webviewHTTPError |
                               tg.Event.webviewError | tg.Event.webviewDestroyed | tg.Event.webviewProgress |
-                              tg.Event.webviewConsoleMessage]:
+                              tg.Event.webviewConsoleMessage | tg.Event.webviewBridgeMessage |
+                              tg.Event.webviewBridgeError]:
                             if a.root is not None:
                                 _dispatch_event_recursive(e, a.root)
                         case _:

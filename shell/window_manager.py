@@ -298,7 +298,7 @@ class WindowManager:
         window["x"] = max(0, (self.screen_width - window["width"]) // 2)
         window["y"] = max(0, (self.screen_height - self.taskbar_height - window["height"]) // 2)
 
-    def _build_app(self, app, content, context):
+    def _build_app(self, app, content, context, window_id):
         build_with_services = getattr(app, "build_with_services", None)
         if build_with_services is None:
             return app.build(self.activity, content, context)
@@ -316,6 +316,7 @@ class WindowManager:
              "refresh_apps": self.on_refresh_apps,
              "app_is_running": self.on_app_is_running,
              "window_host": getattr(self, "window_host", None),
+             "close_window": lambda: self.close(window_id),
              "register_wayland_launcher": getattr(self, "on_register_wayland_launcher", None)})
 
     def _register_view(self, window_id, view_id):
@@ -325,10 +326,18 @@ class WindowManager:
         if window is not None:
             window["view_ids"].add(view_id)
 
+    def _unregister_view(self, window_id, view_id):
+        if self.view_windows.get(view_id) == window_id:
+            self.view_windows.pop(view_id, None)
+        self.window_view_ids.get(window_id, set()).discard(view_id)
+        window = self.windows.get(window_id)
+        if window is not None:
+            window["view_ids"].discard(view_id)
+
     def _build_window_app(self, window_id, app, content, context):
         self.activity._set_view_owner(window_id)
         try:
-            return self._build_app(app, content, context)
+            return self._build_app(app, content, context, window_id)
         finally:
             self.activity._set_view_owner(None)
 
@@ -340,6 +349,17 @@ class WindowManager:
             callback(*args)
         except Exception as error:
             print(f"nexa: app callback failed in {window['title']}: {error}")
+        finally:
+            self.activity._set_view_owner(None)
+
+    def _run_window_visibility_callback(self, window, callback, visible):
+        if window.get("closing"):
+            return
+        self.activity._set_view_owner(window["id"])
+        try:
+            callback(visible)
+        except Exception as error:
+            print(f"nexa: app visibility callback failed in {window['title']}: {error}")
         finally:
             self.activity._set_view_owner(None)
 
@@ -360,6 +380,8 @@ class WindowManager:
             window["build_error"] = True
             return
         window["event_handler"] = handler
+        if window["minimized"]:
+            self._notify_window_visibility(window, False)
         refresh_state = window.pop("theme_refresh_state", None)
         restore_theme_state = getattr(handler, "restore_theme_state", None)
         if refresh_state is not None and restore_theme_state is not None:
@@ -418,7 +440,14 @@ class WindowManager:
         if window_id is None and event.type in (tg.Event.key, "back"):
             window_id = self.active_window
         window = self.windows.get(window_id)
-        if window is None or window["minimized"] or window["event_handler"] is None:
+        if window is None or window["event_handler"] is None:
+            return False
+        if event.type == tg.Event.webviewDestroyed:
+            self._unregister_view(window_id, event_id)
+        if window["minimized"]:
+            if event.type == tg.Event.webviewDestroyed:
+                window.setdefault("deferred_events", []).append(event)
+                return True
             return False
         window["app_executor"].submit(
             self._run_app_callback, window,
@@ -450,7 +479,9 @@ class WindowManager:
             handler = window["event_handler"]
             on_tick = getattr(handler, "on_tick", None)
             future = window.get("tick_future")
-            if on_tick is not None and (future is None or future.done()):
+            should_tick = getattr(handler, "should_tick", None)
+            if (on_tick is not None and (should_tick is None or should_tick())
+                    and (future is None or future.done())):
                 window["tick_future"] = window["app_executor"].submit(
                     self._run_app_callback, window, on_tick)
 
@@ -487,19 +518,43 @@ class WindowManager:
     def minimize(self, window_id):
         window = self.windows[window_id]
         self._cancel_drag(window_id)
+        if window["minimized"]:
+            return
         window["minimized"] = True
         window["frame"].setvisibility(tg.View.GONE)
+        self._notify_window_visibility(window, False)
         if self.active_window == window_id:
             self._activate_top_window()
 
     def restore(self, window_id):
         window = self.windows[window_id]
+        was_minimized = window["minimized"]
         if self.show_desktop_windows is not None:
             self.show_desktop_windows = None
         window["minimized"] = False
         window["frame"].setvisibility(tg.View.VISIBLE)
+        if was_minimized:
+            self._notify_window_visibility(window, True)
+            self._replay_deferred_events(window)
         self._raise_window(window)
         self._set_active(window_id)
+
+    def _replay_deferred_events(self, window):
+        handler = window.get("event_handler")
+        events = window.pop("deferred_events", ())
+        if handler is None or window.get("closing"):
+            return
+        for event in events:
+            window["app_executor"].submit(
+                self._run_app_callback, window,
+                self._handle_app_event, handler, event)
+
+    def _notify_window_visibility(self, window, visible):
+        handler = window.get("event_handler")
+        callback = getattr(handler, "on_window_visibility_changed", None)
+        if callback is not None and not window.get("closing"):
+            window["app_executor"].submit(
+                self._run_window_visibility_callback, window, callback, visible)
 
     def activate_from_taskbar(self, window_id):
         window = self.windows.get(window_id)
@@ -518,6 +573,8 @@ class WindowManager:
         if window["minimized"]:
             window["minimized"] = False
             window["frame"].setvisibility(tg.View.VISIBLE)
+            self._notify_window_visibility(window, True)
+            self._replay_deferred_events(window)
         self._raise_window(window)
         self._set_active(window_id)
         return True
@@ -542,6 +599,15 @@ class WindowManager:
         window["width"], window["height"] = width, height
         window["maximized"] = False
         window["restore_geometry"] = None
+        self._apply_window_geometry(window, top=True)
+        return True
+
+    def set_window_position(self, window_id, x, y):
+        window = self.windows.get(window_id)
+        if window is None:
+            return False
+        window["x"], window["y"], _, _ = self._fit_geometry(
+            x, y, window["width"], window["height"])
         self._apply_window_geometry(window, top=True)
         return True
 
@@ -646,6 +712,12 @@ class WindowManager:
                 window["x"], window["y"], window["width"], window["height"] = self._fit_geometry(
                     window["x"], window["y"], window["width"], window["height"])
             self._apply_window_geometry(window)
+            handler = window["event_handler"]
+            on_screen_resize = getattr(handler, "on_screen_resize", None)
+            if on_screen_resize is not None and not window["minimized"]:
+                window["app_executor"].submit(
+                    self._run_app_callback, window, on_screen_resize,
+                    self.screen_width, self.screen_height, self.density)
 
         for window in self.preloaded.values():
             window["x"], window["y"], window["width"], window["height"] = self._fit_geometry(

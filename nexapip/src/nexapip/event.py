@@ -27,6 +27,8 @@ class Event:
     webviewDestroyed = "webviewDestroyed"
     webviewProgress = "webviewProgress"
     webviewConsoleMessage = "webviewConsoleMessage"
+    webviewBridgeMessage = "webviewBridgeMessage"
+    webviewBridgeError = "webviewBridgeError"
     remoteclick = "remoteclick"
 
     # activity events

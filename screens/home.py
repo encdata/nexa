@@ -97,7 +97,9 @@ class DesktopShell:
         self.wayland_launch_queue = []
         self.wayland_starting = False
         self.wayland_start_error = None
-        self.x86_runtime_ready = startup.get("x86_runtime_ready", x86_runtime_ready())
+        runtime_ready = startup.get("x86_runtime_ready")
+        self.x86_runtime_ready = (x86_runtime_ready() if runtime_ready is None
+                                  else runtime_ready)
         self.closed = False
         self.pointer = Pointer(activity, self.root, self.density)
         self.desktop.pointer = self.pointer
@@ -110,9 +112,6 @@ class DesktopShell:
                               if getattr(app, "preload_ui", False) and app_id != "settings"]
         if "settings" in self.apps and getattr(self.apps["settings"], "preload_ui", False):
             self.windows.prewarm_app("settings")
-        self.wayland_starting = True
-        Thread(target=self._start_wayland_app,
-               name="nexa-wayland-start", daemon=True).start()
 
     @property
     def preloads_ready(self):

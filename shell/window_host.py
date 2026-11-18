@@ -81,6 +81,11 @@ class HostWindow:
         return self._host.windows.set_window_size(
             self.window_id, width, height)
 
+    def move(self, x, y):
+        if self._closed:
+            return False
+        return self._host.windows.set_window_position(self.window_id, x, y)
+
     def focus(self):
         if self._closed:
             return False
@@ -178,9 +183,15 @@ class WindowHost:
                 icon = launcher.icon
             app_name = launcher.name
         else:
-            if icon is None:
-                icon = "window"
-            app_name = str(app_id)
+            registered = self.apps.get(str(app_id))
+            if registered is not None:
+                if icon is None:
+                    icon = registered.icon
+                app_name = registered.name
+            else:
+                if icon is None:
+                    icon = "window"
+                app_name = str(app_id)
         internal_id = "host:" + str(app_id)
         app = self._apps.get(internal_id)
         if app is None:

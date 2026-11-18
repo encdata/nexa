@@ -13,3 +13,6 @@ license-files = ["LICENSE"]
 [tool.setuptools.packages.find]
 where = ["src"]
 include = ["nexapip*"]
+
+[tool.setuptools.package-data]
+nexapip = ["*.js"]
