@@ -471,6 +471,11 @@ class _ElectronWindowView:
         message = str(detail.get("msg", ""))[:1000]
         source = str(detail.get("source", ""))[:500]
         line = detail.get("line", "?")
+        repeat_count = detail.get("repeatCount")
+        if isinstance(repeat_count, int) and repeat_count > 0:
+            logger.error("renderer console: %s (%s:%s; repeated %s times)",
+                         message, source, line, repeat_count)
+            return
         key = (message, source, line)
         if key not in self._renderer_console_errors:
             if len(self._renderer_console_errors) >= 128:
