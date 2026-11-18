@@ -18,7 +18,6 @@ from nexapip.webview import ELECTRON_PRELOAD
 
 HOST_SCRIPT = Path(__file__).resolve().parents[1] / "runtime" / "electron_host.mjs"
 HOST_EVENT_QUEUE_SIZE = 4
-ELECTRON_WINDOW_START_TIMEOUT = 60
 
 
 class ElectronHost:
@@ -121,14 +120,14 @@ class ElectronHost:
         self.server_url = ready["url"]
         self.url = self.server_url
         if self.main_entry:
-            # Electron apps can do substantial async startup before their first
-            # BrowserWindow.loadURL(). Don't treat a slow main process as a dead one.
-            deadline = monotonic() + ELECTRON_WINDOW_START_TIMEOUT
-            found_renderer = False
-            while monotonic() < deadline:
-                message = self._next_event(deadline - monotonic())
+            while True:
+                message = self._next_event(1)
                 if message is None:
-                    break
+                    if self.process.poll() is not None:
+                        self.close()
+                        raise RuntimeError(
+                            "Electron main process exited before creating a renderer window")
+                    continue
                 if message.get("event") == "renderer" and message.get("url"):
                     self.url = message["url"]
                     self.renderer_origin = _http_origin(self.url)
@@ -137,7 +136,6 @@ class ElectronHost:
                     self.renderer_options = message.get("options") or {}
                     self.renderer_title = message.get("title") or ""
                     self.renderer_visible = message.get("visible", True)
-                    found_renderer = True
                     break
                 if message.get("event") == "mainError":
                     self.close()
@@ -146,11 +144,6 @@ class ElectronHost:
                     self.close()
                     raise RuntimeError("Electron app exited before creating a window")
                 self._pending.append(message)
-            if not found_renderer:
-                self.close()
-                raise TimeoutError(
-                    "Electron main process did not load a renderer window within "
-                    f"{ELECTRON_WINDOW_START_TIMEOUT} seconds")
         return self.url
 
     def _read_output(self, stream):
