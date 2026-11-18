@@ -11,6 +11,25 @@ if (!rootArg) throw new Error("usage: electron_host.mjs <app-root-or-app.asar> [
 const ipcToken = process.env.NEXA_ELECTRON_IPC_TOKEN || "";
 const eventFd = Number(process.env.NEXA_ELECTRON_EVENT_FD);
 if (!Number.isInteger(eventFd) || eventFd < 3) throw new Error("Nexa event pipe is unavailable");
+const parentFd = Number(process.env.NEXA_ELECTRON_PARENT_FD);
+if (Number.isInteger(parentFd) && parentFd >= 3) {
+    const parentControl = fs.createReadStream(null, {fd: parentFd});
+    parentControl.on("end", () => {
+        try {
+            process.kill(-process.pid, "SIGTERM");
+        } catch (_) {
+            process.exit(0);
+        }
+    });
+    parentControl.on("error", () => {
+        try {
+            process.kill(-process.pid, "SIGTERM");
+        } catch (_) {
+            process.exit(0);
+        }
+    });
+    parentControl.resume();
+}
 const maxIpcPayloadBytes = 1024 * 1024;
 const maxRendererEventBytes = 8 * 1024 * 1024;
 

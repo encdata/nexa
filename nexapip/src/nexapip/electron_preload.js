@@ -2,6 +2,36 @@
     const native = window.nexaElectronNative;
     if (!native) return;
 
+    let rendererErrorCount = 0;
+    const reportedErrors = new Set();
+    function reportRendererError(type, message, source = "", line = 0, column = 0) {
+        const detail = {
+            type,
+            message: String(message || type).slice(0, 1000),
+            source: String(source || "").slice(0, 500),
+            line: Number(line) || 0,
+            column: Number(column) || 0
+        };
+        const key = `${detail.type}:${detail.message}:${detail.source}:${detail.line}`;
+        if (rendererErrorCount >= 40 || reportedErrors.has(key)) return;
+        reportedErrors.add(key);
+        rendererErrorCount++;
+        native.postMessage(JSON.stringify({
+            kind: "send", channel: "__nexa:renderer-error", args: [detail]
+        }));
+    }
+
+    window.addEventListener("error", event => {
+        reportRendererError("error", event.message, event.filename,
+            event.lineno, event.colno);
+    }, true);
+    window.addEventListener("unhandledrejection", event => {
+        const reason = event.reason;
+        reportRendererError("unhandledrejection",
+            reason?.stack || reason?.message || reason,
+            location.href);
+    });
+
     let nextId = 1;
     const pending = new Map();
     const listeners = new Map();

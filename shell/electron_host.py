@@ -1,10 +1,12 @@
 import json
 from collections import deque
+import logging
 import os
 from pathlib import Path
 from queue import Empty, Full, Queue
 import secrets
 import shutil
+import signal
 import subprocess
 from threading import Event, Lock, Thread
 from time import monotonic
@@ -18,6 +20,7 @@ from nexapip.webview import ELECTRON_PRELOAD
 
 HOST_SCRIPT = Path(__file__).resolve().parents[1] / "runtime" / "electron_host.mjs"
 HOST_EVENT_QUEUE_SIZE = 4
+logger = logging.getLogger("nexa.electron")
 
 
 class ElectronHost:
@@ -43,6 +46,8 @@ class ElectronHost:
         self._reader = None
         self._event_reader = None
         self._event_stream = None
+        self._control_stream = None
+        self._process_group = False
         self._reader_stop = Event()
         self.preload_url = None
 
@@ -83,7 +88,9 @@ class ElectronHost:
         environment["NEXA_ELECTRON_SCREEN_HEIGHT"] = str(max(1, int(self.screen_size[1])))
         environment["NEXA_ELECTRON_SCALE_FACTOR"] = str(max(0.1, float(self.scale_factor)))
         event_read_fd, event_write_fd = os.pipe()
+        control_read_fd, control_write_fd = os.pipe()
         environment["NEXA_ELECTRON_EVENT_FD"] = str(event_write_fd)
+        environment["NEXA_ELECTRON_PARENT_FD"] = str(control_read_fd)
         self._reader_stop.clear()
         try:
             self.process = subprocess.Popen(
@@ -96,13 +103,21 @@ class ElectronHost:
                 env=environment,
                 text=True,
                 bufsize=1,
-                pass_fds=(event_write_fd,)
+                pass_fds=(event_write_fd, control_read_fd),
+                start_new_session=os.name == "posix"
             )
+            self._process_group = os.name == "posix"
+            logger.info("started Electron host pid=%s app=%s",
+                        self.process.pid, self.app_root)
         except Exception:
             os.close(event_read_fd)
             os.close(event_write_fd)
+            os.close(control_read_fd)
+            os.close(control_write_fd)
             raise
         os.close(event_write_fd)
+        os.close(control_read_fd)
+        self._control_stream = os.fdopen(control_write_fd, "wb", buffering=0)
         self._event_stream = os.fdopen(event_read_fd, "r", encoding="utf-8")
         self._reader = Thread(
             target=self._read_output, args=(self.process.stdout,), daemon=True)
@@ -136,6 +151,8 @@ class ElectronHost:
                     self.renderer_options = message.get("options") or {}
                     self.renderer_title = message.get("title") or ""
                     self.renderer_visible = message.get("visible", True)
+                    logger.info("Electron main process created window %s at %s (visible=%s)",
+                                self.window_id, self.url, self.renderer_visible)
                     break
                 if message.get("event") == "mainError":
                     self.close()
@@ -153,18 +170,19 @@ class ElectronHost:
             line = line.rstrip()
             if not line:
                 continue
+            line = line.replace(self.ipc_token, "[redacted]")
             now = monotonic()
             if now - last_log < 1:
                 suppressed_logs += 1
                 continue
             if suppressed_logs:
-                print(f"nexa electron: suppressed {suppressed_logs} log lines")
+                logger.info("suppressed %s rapid Electron host log lines", suppressed_logs)
                 suppressed_logs = 0
-            print(f"nexa electron: {line[:1000]}")
+            logger.info("host: %s", line[:1000])
             last_log = now
 
         if suppressed_logs:
-            print(f"nexa electron: suppressed {suppressed_logs} log lines")
+            logger.info("suppressed %s rapid Electron host log lines", suppressed_logs)
 
     def _read_events(self, stream):
         for line in stream:
@@ -276,6 +294,8 @@ class ElectronHost:
         process, self.process = self.process, None
         self._reader_stop.set()
         event_stream, self._event_stream = self._event_stream, None
+        control_stream, self._control_stream = self._control_stream, None
+        process_group, self._process_group = self._process_group, False
         self.url = None
         self.server_url = None
         self.renderer_origin = None
@@ -284,13 +304,32 @@ class ElectronHost:
         self.renderer_title = ""
         self.renderer_visible = True
         self.preload_url = None
-        if process is not None and process.poll() is None:
+        if process is not None and process_group:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        elif process is not None and process.poll() is None:
             process.terminate()
+        if process is not None and process.poll() is None:
             try:
                 process.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                process.kill()
+                if process_group:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                else:
+                    process.kill()
                 process.wait()
+        elif process is not None and process_group:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if control_stream is not None:
+            control_stream.close()
         if event_stream is not None:
             event_stream.close()
         if process is not None and process.stdout is not None:
@@ -391,6 +430,8 @@ class _ElectronWindowView:
         self.container_visible = container_visible
         self._applied_visible = True
         self._closed = False
+        logger.info("creating WebView for window %s at %s (visible=%s)",
+                    window_id, url, self.visible)
         self.webview = tg.WebView(
             activity, parent,
             visibility=tg.View.VISIBLE if self.visible else tg.View.GONE,
@@ -412,7 +453,18 @@ class _ElectronWindowView:
         self.ipc = tg.ElectronBridge(
             self.webview,
             on_ready=lambda: controller._bridge_ready(self.window_id))
+        self.ipc.handle("__nexa:renderer-error", self._log_renderer_error)
         self.webview.loaduri(url)
+
+    @staticmethod
+    def _log_renderer_error(detail):
+        if not isinstance(detail, dict):
+            logger.error("renderer error: %s", detail)
+            return
+        logger.error("renderer %s: %s (%s:%s:%s)",
+                     detail.get("type", "error"), detail.get("message", ""),
+                     detail.get("source", ""), detail.get("line", 0),
+                     detail.get("column", 0))
 
     def _preload(self):
         script = ELECTRON_PRELOAD
@@ -434,11 +486,24 @@ class _ElectronWindowView:
         if current is not None and current is not self:
             return current.handle_event(event)
         if event.type == tg.Event.webviewBridgeError:
-            print(f"nexa: electron bridge: {event.value.get('error', 'unknown error')}")
+            logger.error("webview bridge failed: %s",
+                         event.value.get("error", "unknown error"))
+            return True
+        if event.type == tg.Event.webviewConsoleMessage:
+            value = event.value
+            logger.error("renderer console: %s (%s:%s)",
+                         value.get("msg", ""), value.get("source", ""),
+                         value.get("line", "?"))
             return True
         if event.type in (tg.Event.webviewNavigation, tg.Event.webviewProgress,
                           tg.Event.webviewHTTPError, tg.Event.webviewError,
                           tg.Event.webviewDestroyed):
+            if event.type == tg.Event.webviewProgress and event.value.get("progress") == 100:
+                logger.info("window %s finished loading %s", self.window_id, self.url)
+            elif event.type in (tg.Event.webviewHTTPError, tg.Event.webviewError,
+                                tg.Event.webviewDestroyed):
+                logger.error("window %s WebView %s: %s",
+                             self.window_id, event.type, event.value)
             self.host.renderer_event(event, self.window_id)
             if event.type == tg.Event.webviewDestroyed:
                 self.controller._renderer_destroyed(self)
@@ -599,6 +664,7 @@ class ElectronRenderer:
         url = message.get("url")
         if not url:
             return
+        logger.info("creating Electron child window %s at %s", window_id, url)
 
         def build(activity, parent, _state):
             view = _ElectronWindowView(
@@ -649,6 +715,8 @@ class ElectronRenderer:
         self.host.renderer_options = message.get("options") or {}
         self.host.renderer_title = message.get("title") or ""
         self.host.renderer_visible = message.get("visible", True)
+        logger.info("promoting Electron window %s to the desktop: %s",
+                    self.window_id, self.url)
         self.root_view = _ElectronWindowView(
             self, self.activity, self.parent, self.window_id, self.url,
             message.get("preloadUrl"), message.get("visible", True))
@@ -709,8 +777,10 @@ class ElectronRenderer:
     def _handle_window_state(self, message):
         if message.get("windowId") == self.window_id:
             if message.get("action") in ("hide", "minimize"):
+                logger.info("hiding Electron root window %s", self.window_id)
                 self.root_view.set_visibility(tg.View.GONE)
             elif message.get("action") in ("show", "restore"):
+                logger.info("showing Electron root window %s", self.window_id)
                 self.root_view.set_visibility(tg.View.VISIBLE)
             return
         host_window = self._host_windows.get(message.get("windowId"))
@@ -723,8 +793,10 @@ class ElectronRenderer:
         elif action == "focus":
             host_window.focus()
         elif action in ("hide", "minimize"):
+            logger.info("hiding Electron window %s", message.get("windowId"))
             self.window_host.windows.minimize(host_window.window_id)
         elif action in ("show", "restore"):
+            logger.info("showing Electron window %s", message.get("windowId"))
             self.window_host.windows.restore(host_window.window_id)
         elif action == "resize":
             if isinstance(value.get("width"), (int, float)) and isinstance(
