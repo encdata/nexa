@@ -164,25 +164,24 @@ class ElectronHost:
         return self.url
 
     def _read_output(self, stream):
-        last_log = 0
-        suppressed_logs = 0
+        previous_line = None
+        repeated_lines = 0
         for line in stream:
             line = line.rstrip()
             if not line:
                 continue
             line = line.replace(self.ipc_token, "[redacted]")
-            now = monotonic()
-            if now - last_log < 1:
-                suppressed_logs += 1
+            if line == previous_line:
+                repeated_lines += 1
                 continue
-            if suppressed_logs:
-                logger.info("suppressed %s rapid Electron host log lines", suppressed_logs)
-                suppressed_logs = 0
+            if repeated_lines:
+                logger.info("previous Electron host line repeated %s more times", repeated_lines)
+                repeated_lines = 0
             logger.info("host: %s", line[:1000])
-            last_log = now
+            previous_line = line
 
-        if suppressed_logs:
-            logger.info("suppressed %s rapid Electron host log lines", suppressed_logs)
+        if repeated_lines:
+            logger.info("previous Electron host line repeated %s more times", repeated_lines)
 
     def _read_events(self, stream):
         for line in stream:
