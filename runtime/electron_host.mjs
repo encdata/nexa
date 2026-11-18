@@ -12,8 +12,32 @@ const ipcToken = process.env.NEXA_ELECTRON_IPC_TOKEN || "";
 const eventFd = Number(process.env.NEXA_ELECTRON_EVENT_FD);
 if (!Number.isInteger(eventFd) || eventFd < 3) throw new Error("Nexa event pipe is unavailable");
 const parentFd = Number(process.env.NEXA_ELECTRON_PARENT_FD);
+let electronHost = null;
 if (Number.isInteger(parentFd) && parentFd >= 3) {
     const parentControl = fs.createReadStream(null, {fd: parentFd});
+    let controlBuffer = "";
+    parentControl.setEncoding("utf8");
+    parentControl.on("data", chunk => {
+        controlBuffer += chunk;
+        let newline;
+        while ((newline = controlBuffer.indexOf("\n")) !== -1) {
+            const line = controlBuffer.slice(0, newline);
+            controlBuffer = controlBuffer.slice(newline + 1);
+            if (Buffer.byteLength(line) > 1024 * 1024) continue;
+            try {
+                const message = JSON.parse(line);
+                if (message.kind === "rendererEvent") {
+                    electronHost?.dispatchRendererEvent(message);
+                }
+            } catch (error) {
+                process.stderr.write(`nexa electron: invalid parent control message: ${error.message}\n`);
+            }
+        }
+        if (Buffer.byteLength(controlBuffer) > 1024 * 1024) {
+            controlBuffer = "";
+            process.stderr.write("nexa electron: parent control message exceeds 1 MiB\n");
+        }
+    });
     parentControl.on("end", () => {
         try {
             process.kill(-process.pid, "SIGTERM");
@@ -307,7 +331,7 @@ function localUrl(relative) {
     return url.href;
 }
 
-const electronHost = mainArg && !archive
+electronHost = mainArg && !archive
     ? createElectronCompat({
         appRoot: root,
         appPath: sourceRoot,

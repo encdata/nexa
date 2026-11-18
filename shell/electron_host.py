@@ -8,7 +8,7 @@ import secrets
 import shutil
 import signal
 import subprocess
-from threading import Event, Lock, Thread
+from threading import Event, Lock, Thread, current_thread
 from time import monotonic
 from urllib.parse import urlsplit, urlunsplit
 from urllib.error import HTTPError
@@ -49,6 +49,10 @@ class ElectronHost:
         self._control_stream = None
         self._process_group = False
         self._reader_stop = Event()
+        self._renderer_event_queue = Queue(maxsize=64)
+        self._renderer_event_stop = Event()
+        self._renderer_event_worker = None
+        self._renderer_event_drop_warned = False
         self.preload_url = None
 
     @property
@@ -92,6 +96,13 @@ class ElectronHost:
         environment["NEXA_ELECTRON_EVENT_FD"] = str(event_write_fd)
         environment["NEXA_ELECTRON_PARENT_FD"] = str(control_read_fd)
         self._reader_stop.clear()
+        self._renderer_event_stop.clear()
+        self._renderer_event_drop_warned = False
+        if self.main_entry:
+            self._renderer_event_worker = Thread(
+                target=self._renderer_event_loop,
+                name="nexa-electron-events", daemon=True)
+            self._renderer_event_worker.start()
         try:
             self.process = subprocess.Popen(
                 [self.node, str(HOST_SCRIPT), str(self.app_root), self.entry, "0",
@@ -110,6 +121,7 @@ class ElectronHost:
             logger.info("started Electron host pid=%s app=%s",
                         self.process.pid, self.app_root)
         except Exception:
+            self._renderer_event_stop.set()
             os.close(event_read_fd)
             os.close(event_write_fd)
             os.close(control_read_fd)
@@ -231,32 +243,59 @@ class ElectronHost:
         return result.get("value")
 
     def renderer_event(self, event, window_id=None):
-        self._post_renderer_event(event.type, event.value, window_id)
+        self._queue_renderer_event(event.type, event.value, window_id)
+
+    def _queue_renderer_event(self, event_type, value, window_id=None):
+        if self.server_url is None or not self.main_entry or self._renderer_event_stop.is_set():
+            return
+        try:
+            self._renderer_event_queue.put_nowait(
+                (event_type, value, window_id))
+        except Full:
+            if not self._renderer_event_drop_warned:
+                logger.warning("Electron renderer event queue is full; dropping events")
+                self._renderer_event_drop_warned = True
+
+    def _renderer_event_loop(self):
+        while not self._renderer_event_stop.is_set():
+            try:
+                event_type, value, window_id = self._renderer_event_queue.get(timeout=0.1)
+            except Empty:
+                continue
+            try:
+                self._post_renderer_event(event_type, value, window_id)
+            finally:
+                self._renderer_event_queue.task_done()
 
     def update_screen_metrics(self, width, height, scale_factor):
-        self._post_renderer_event("screenMetricsChanged", {
+        self._queue_renderer_event("screenMetricsChanged", {
             "width": width,
             "height": height,
             "scaleFactor": scale_factor
-        })
+        }, None)
 
     def _post_renderer_event(self, event_type, value, window_id=None):
-        if self.server_url is None or not self.main_entry:
+        control_stream = self._control_stream
+        if control_stream is None or not self.main_entry:
             return
-        parsed = urlsplit(self.server_url)
-        endpoint = urlunsplit((parsed.scheme, parsed.netloc, "/__nexa/renderer-event", "", ""))
-        payload = {"windowId": self.window_id if window_id is None else window_id,
-                   "type": event_type, "value": value, "token": self.ipc_token}
-        request = Request(endpoint, data=json.dumps(payload).encode("utf-8"),
-                          headers={"Content-Type": "application/json"}, method="POST")
+        payload = {"kind": "rendererEvent",
+                   "windowId": self.window_id if window_id is None else window_id,
+                   "type": event_type, "value": value}
         try:
-            with urlopen(request, timeout=5):
-                pass
-        except HTTPError as error:
-            detail = error.read().decode("utf-8", "replace").strip()
-            print(f"nexa: electron renderer event failed ({error.code}): {detail[:1000]}")
-        except OSError as error:
-            print(f"nexa: electron renderer event failed: {error}")
+            data = (json.dumps(payload, separators=(",", ":")) + "\n").encode()
+            if len(data) > 1024 * 1024:
+                logger.warning("Electron renderer event exceeds 1 MiB; dropping it")
+                return
+            offset = 0
+            while offset < len(data):
+                written = control_stream.write(data[offset:])
+                if not written:
+                    raise OSError("renderer event pipe accepted no data")
+                offset += written
+        except (OSError, ValueError) as error:
+            if not self._renderer_event_stop.is_set():
+                logger.warning("Electron renderer event pipe failed: %s", error)
+                self._renderer_event_stop.set()
 
     def window_command(self, window_id, action):
         if self.server_url is None:
@@ -292,6 +331,14 @@ class ElectronHost:
     def close(self):
         process, self.process = self.process, None
         self._reader_stop.set()
+        self._renderer_event_stop.set()
+        while True:
+            try:
+                self._renderer_event_queue.get_nowait()
+                self._renderer_event_queue.task_done()
+            except Empty:
+                break
+        renderer_event_worker, self._renderer_event_worker = self._renderer_event_worker, None
         event_stream, self._event_stream = self._event_stream, None
         control_stream, self._control_stream = self._control_stream, None
         process_group, self._process_group = self._process_group, False
@@ -341,6 +388,8 @@ class ElectronHost:
                 break
         self._reader = None
         self._event_reader = None
+        if renderer_event_worker is not None and renderer_event_worker is not current_thread():
+            renderer_event_worker.join(timeout=0.1)
 
     def __enter__(self):
         self.start()
