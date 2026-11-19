@@ -170,11 +170,20 @@ class ElectronHost:
             while True:
                 message = self._next_event(1)
                 if message is None:
-                    if self.process.poll() is not None:
+                    exit_code = self.process.poll()
+                    if exit_code is not None:
                         self.close()
                         raise RuntimeError(
-                            "Electron main process exited before creating a renderer window")
+                            "Electron main process exited before creating a renderer window "
+                            f"(status {exit_code})")
                     continue
+                if message.get("event") == "processExit":
+                    logger.error("Electron main process called process.exit before its first window "
+                                 "(code=%s): %s", message.get("code", 0),
+                                 message.get("stack", "no stack available"))
+                    self.close()
+                    raise RuntimeError(
+                        "Electron main process called process.exit before creating a renderer window")
                 if message.get("event") == "renderer" and message.get("url"):
                     self.url = message["url"]
                     self.renderer_origin = _http_origin(self.url)

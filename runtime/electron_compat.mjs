@@ -1733,6 +1733,12 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         if (!mainPath.startsWith(appRoot + path.sep) || !fs.existsSync(mainPath)) {
             throw new Error(`Electron main entry not found: ${entry}`);
         }
+        const originalExit = process.exit;
+        process.exit = function(code = 0) {
+            emit({event: "processExit", code,
+                stack: new Error("process.exit called").stack});
+            return originalExit.call(process, code);
+        };
         process.argv = [executablePath, appPath];
         process.defaultApp = false;
         const appModulesPath = path.join(appRoot, "node_modules");
