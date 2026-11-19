@@ -97,6 +97,7 @@ class DebElectronApp(DebApp):
         if not self.requires_x86_node or node is None or runner is None:
             return None, None, dict(self.launch_spec[2])
         environment = dict(self.launch_spec[2])
+        environment.setdefault("BOX64_PROFILE", "safe")
         library_paths = [str(addon.parent) for addon in self._native_addons()]
         library_paths.extend(environment.get("BOX64_LD_LIBRARY_PATH", "").split(os.pathsep))
         environment["BOX64_LD_LIBRARY_PATH"] = os.pathsep.join(
