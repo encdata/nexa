@@ -203,6 +203,25 @@
         }
     };
 
+    const openWindow = window.open.bind(window);
+    window.open = (url = "", frameName = "", features = "") => {
+        if (frameName === "_self" || frameName === "_parent" || frameName === "_top") {
+            return openWindow(url, frameName, features);
+        }
+        let target;
+        try {
+            target = new URL(String(url || "about:blank"), location.href).href;
+        } catch (_) {
+            return null;
+        }
+        ipcRenderer.send("__nexa:window-open", {
+            url: target,
+            frameName: String(frameName || ""),
+            features: String(features || "")
+        });
+        return null;
+    };
+
     class NexaBuffer extends Uint8Array {
         static from(value, encoding) {
             if (typeof value === "string") {

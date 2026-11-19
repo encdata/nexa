@@ -443,6 +443,62 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
     };
     ipcMain.removeHandler = channel => handlers.delete(channel);
 
+    ipcMain.on("__nexa:window-open", (event, details) => {
+        const opener = BrowserWindow.fromWebContents(event.sender);
+        if (!opener || opener.isDestroyed() || !details ||
+            typeof details.url !== "string") return;
+        let url;
+        try {
+            url = new URL(details.url, opener.url);
+        } catch (_) {
+            return;
+        }
+        if (!["http:", "https:"].includes(url.protocol)) return;
+        const request = {
+            url: url.href,
+            frameName: String(details.frameName || ""),
+            features: String(details.features || "")
+        };
+        if (request.frameName && request.frameName !== "_blank" &&
+            request.frameName[0] !== "_") {
+            const namedWindow = [...windows.values()].find(window =>
+                window !== opener && !window.destroyed && window.name === request.frameName);
+            if (namedWindow) {
+                namedWindow.loadURL(url.href).catch(() => {});
+                namedWindow.show();
+                namedWindow.focus();
+                return;
+            }
+        }
+        let decision = {action: "allow"};
+        try {
+            if (typeof opener.windowOpenHandler === "function") {
+                decision = opener.windowOpenHandler(request) || {action: "deny"};
+            }
+        } catch (error) {
+            emit({event: "mainError", error: `window open handler failed: ${error.message}`});
+            return;
+        }
+        if (decision.action !== "allow") return;
+
+        const options = {...(decision.overrideBrowserWindowOptions || {})};
+        for (const [key, option] of Object.entries({width: "width", height: "height",
+            left: "x", top: "y"})) {
+            const match = new RegExp(`(?:^|,)\\s*${key}\\s*=\\s*(\\d+)`, "i")
+                .exec(request.features);
+            if (match && options[option] === undefined) options[option] = Number(match[1]);
+        }
+        options.title ||= opener.title;
+        const child = new BrowserWindow(options);
+        child.name = request.frameName;
+        child.webContents.emit("did-navigate", {}, url.href);
+        child.loadURL(url.href).catch(() => {});
+        child.show();
+        opener.webContents.emit("did-create-window", child, {
+            options, frameName: request.frameName
+        });
+    });
+
     const app = new EventEmitter();
     let ready = false;
     const markReady = () => {
