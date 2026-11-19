@@ -2033,7 +2033,8 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                     }
                     return;
                 }
-                if (method !== "onBeforeRequest" && method !== "onErrorOccurred") {
+                if (method !== "onBeforeRequest" && method !== "onErrorOccurred" &&
+                    method !== "onCompleted" && method !== "onHeadersReceived") {
                     throw new Error(`Electron webRequest.${method} is not supported by Nexa WebView yet`);
                 }
                 if (typeof listener !== "function") {
@@ -2052,6 +2053,9 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                     throw new TypeError("webRequest filter urls must be an array of patterns");
                 }
                 webRequestHandlers.set(method, {filter: requestFilter, listener});
+                if (method === "onHeadersReceived") {
+                    console.warn("Electron webRequest.onHeadersReceived cannot modify Android WebView response headers");
+                }
                 if (method === "onBeforeRequest" && !session.webRequestEnabled) {
                     session.webRequestEnabled = true;
                     void Promise.resolve(nativeCall({method: "session.setWebRequestEnabled",
@@ -3325,7 +3329,25 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                 }
             } catch (_) {}
             rendererContents.emit("did-navigate", {}, rendererContents.url);
+        } else if (message.type === "webviewHTTPError") {
+            const url = String(value.url || "");
+            rendererContents._webRequestHttpErrors ||= new Set();
+            rendererContents._webRequestHttpErrors.add(url);
+            rendererContents.session.webRequest.dispatchEvent("onCompleted", {
+                id: 0, url, statusCode: Number(value.code) || 0,
+                timestamp: Date.now() / 1000, webContentsId: rendererContents.id,
+                resourceType: "mainFrame"
+            });
         } else if (message.type === "webviewLoadFinished") {
+            const url = String(value.url || rendererContents.url || "");
+            const httpErrors = rendererContents._webRequestHttpErrors;
+            if (!httpErrors?.has(url)) {
+                rendererContents.session.webRequest.dispatchEvent("onCompleted", {
+                    id: 0, url, statusCode: 200, timestamp: Date.now() / 1000,
+                    webContentsId: rendererContents.id, resourceType: "mainFrame"
+                });
+            }
+            httpErrors?.delete(url);
             setWebContentsMainFrameLoading(rendererContents, false);
             rendererContents.emit("did-frame-finish-load", {}, true, process.pid,
                 rendererContents.id);
