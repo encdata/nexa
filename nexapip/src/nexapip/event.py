@@ -28,6 +28,7 @@ class Event:
     webviewLoadFinished = "webviewLoadFinished"
     webviewHTTPError = "webviewHTTPError"
     webviewError = "webviewError"
+    webviewRequestError = "webviewRequestError"
     webviewDestroyed = "webviewDestroyed"
     webviewProgress = "webviewProgress"
     webviewTitleChanged = "webviewTitleChanged"

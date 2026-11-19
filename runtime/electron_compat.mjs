@@ -2033,7 +2033,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                     }
                     return;
                 }
-                if (method !== "onBeforeRequest") {
+                if (method !== "onBeforeRequest" && method !== "onErrorOccurred") {
                     throw new Error(`Electron webRequest.${method} is not supported by Nexa WebView yet`);
                 }
                 if (typeof listener !== "function") {
@@ -2060,6 +2060,17 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                 }
             };
         }
+        session.webRequest.dispatchEvent = (method, details) => {
+            const registration = webRequestHandlers.get(method);
+            if (!registration) return;
+            const patterns = registration.filter.urls || ["<all_urls>"];
+            if (!patterns.some(pattern => matchesRequestUrl(pattern, details.url))) return;
+            try {
+                registration.listener(details);
+            } catch (error) {
+                console.error(`Electron webRequest.${method} listener failed: ${error.message}`);
+            }
+        };
         session.webRequest.dispatch = async (method, details) => {
             const registration = webRequestHandlers.get(method);
             if (!registration) return {};
@@ -3337,7 +3348,26 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             } else {
                 setWebContentsLoading(rendererContents, true);
             }
+        } else if (message.type === "webviewRequestError") {
+            rendererContents.session.webRequest.dispatchEvent("onErrorOccurred", {
+                id: Number(value.requestId) || 0,
+                url: String(value.url || ""),
+                error: String(value.error || value.description || "net::ERR_FAILED"),
+                method: value.method,
+                timestamp: Number(value.timestamp) || Date.now() / 1000,
+                webContentsId: rendererContents.id,
+                resourceType: value.isMainFrame === true ? "mainFrame" : "other"
+            });
         } else if (message.type === "webviewError") {
+            rendererContents.session.webRequest.dispatchEvent("onErrorOccurred", {
+                id: Number(value.requestId) || 0,
+                url: String(value.url || ""),
+                error: String(value.error || value.description || "net::ERR_FAILED"),
+                method: value.method,
+                timestamp: Number(value.timestamp) || Date.now() / 1000,
+                webContentsId: rendererContents.id,
+                resourceType: "mainFrame"
+            });
             if (value.isMainFrame !== false) {
                 setWebContentsWaitingForResponse(rendererContents, false);
             }

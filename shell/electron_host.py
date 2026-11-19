@@ -709,6 +709,7 @@ class _ElectronWindowView:
                           tg.Event.webviewCommitVisible, tg.Event.webviewLoadFinished,
                           tg.Event.webviewProgress,
                           tg.Event.webviewHTTPError, tg.Event.webviewError,
+                          tg.Event.webviewRequestError,
                           tg.Event.webviewDestroyed, tg.Event.webviewTitleChanged):
             if event.type == tg.Event.webviewProgress:
                 progress = event.value.get("progress")
@@ -914,6 +915,7 @@ class _ElectronEmbeddedView:
                           tg.Event.webviewCommitVisible, tg.Event.webviewLoadFinished,
                           tg.Event.webviewProgress,
                           tg.Event.webviewHTTPError, tg.Event.webviewError,
+                          tg.Event.webviewRequestError,
                           tg.Event.webviewDestroyed, tg.Event.webviewTitleChanged):
             if event.type == tg.Event.webviewProgress and event.value.get("progress") == 100:
                 logger.info("embedded contents %s finished loading %s",

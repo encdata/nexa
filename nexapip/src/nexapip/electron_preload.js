@@ -2035,6 +2035,10 @@
 
 // Chromium-backed Electron apps often use the free `require` identifier directly.
 var require = window.require;
+// Some WebView providers evaluate document-start scripts in a wrapper scope.
+try {
+    window.eval("var require = window.require;");
+} catch (_) {}
 if (window.nexaElectronNative) {
     window.nexaElectronNative.postMessage(JSON.stringify({kind: "preload-ready",
         hasRequire: typeof window.require === "function",

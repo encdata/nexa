@@ -64,7 +64,8 @@ class Connection(tg.Connection):
                               tg.Event.webviewLoadStarted |
                               tg.Event.webviewCommitVisible | tg.Event.webviewLoadFinished |
                               tg.Event.webviewHTTPError |
-                              tg.Event.webviewError | tg.Event.webviewDestroyed | tg.Event.webviewProgress |
+                              tg.Event.webviewError | tg.Event.webviewRequestError |
+                              tg.Event.webviewDestroyed | tg.Event.webviewProgress |
                               tg.Event.webviewTitleChanged |
                               tg.Event.webviewConsoleMessage | tg.Event.webviewBridgeMessage |
                               tg.Event.webviewBridgeError | tg.Event.webviewDownload |
