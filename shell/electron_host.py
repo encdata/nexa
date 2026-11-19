@@ -550,10 +550,11 @@ class _ElectronWindowView:
         if not isinstance(detail, dict):
             logger.error("renderer error: %s", detail)
             return
-        logger.error("renderer %s: %s (%s:%s:%s)",
+        logger.error("renderer %s: %s (%s:%s:%s; frame=%s; main=%s; require=%s)",
                      detail.get("type", "error"), detail.get("message", ""),
                      detail.get("source", ""), detail.get("line", 0),
-                     detail.get("column", 0))
+                     detail.get("column", 0), detail.get("frameUrl", ""),
+                     detail.get("isMainFrame"), detail.get("hasRequire"))
 
     def _log_console_error(self, detail):
         message = str(detail.get("msg", ""))[:1000]
@@ -1072,6 +1073,8 @@ class ElectronRenderer:
             self.app_id, title, build, icon=self.icon, state=message,
             on_close=on_close, size=size)
         self._host_windows[window_id] = host_window
+        if options.get("resizable") is False:
+            host_window.set_resizable(False)
         if not message.get("visible", True):
             self.window_host.windows.minimize(host_window.window_id)
 
@@ -1202,6 +1205,8 @@ class ElectronRenderer:
             if isinstance(value.get("x"), (int, float)) and isinstance(
                     value.get("y"), (int, float)):
                 host_window.move(value["x"], value["y"])
+        elif action == "resizable":
+            host_window.set_resizable(value.get("enabled", True))
         elif action in ("maximize", "unmaximize"):
             window = self.window_host.windows.windows.get(host_window.window_id)
             if window is not None and window["maximized"] != (action == "maximize"):

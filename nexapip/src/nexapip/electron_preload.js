@@ -91,7 +91,10 @@
             message: String(message || type).slice(0, 1000),
             source: String(source || "").slice(0, 500),
             line: Number(line) || 0,
-            column: Number(column) || 0
+            column: Number(column) || 0,
+            frameUrl: String(location.href || "").slice(0, 500),
+            isMainFrame: window.top === window,
+            hasRequire: typeof window.require === "function"
         };
         const key = `${detail.type}:${detail.message}:${detail.source}:${detail.line}`;
         if (rendererErrorCount >= 40 || reportedErrors.has(key)) return;
@@ -1369,8 +1372,14 @@
         },
         shell: {openExternal: url => ipcRenderer.invoke("shell.openExternal", url)},
         clipboard: {
-            readText: () => ipcRenderer.invoke("clipboard.readText"),
-            writeText: text => ipcRenderer.invoke("clipboard.writeText", text)
+            readText: (type = "clipboard") => ipcRenderer.sendSync("clipboard.readText", type),
+            writeText: (text, type = "clipboard") => ipcRenderer.sendSync(
+                "clipboard.writeText", text, type),
+            clear: (type = "clipboard") => ipcRenderer.sendSync("clipboard.clear", type),
+            availableFormats: (type = "clipboard") => ipcRenderer.sendSync(
+                "clipboard.availableFormats", type),
+            has: (format, type = "clipboard") => ipcRenderer.sendSync(
+                "clipboard.has", format, type)
         },
         app: {
             getPath: name => fsResult(ipcRenderer.sendSync("nexa:electron:app:getPath", name)),
@@ -1455,7 +1464,8 @@
         const methods = type === "window" ? [
             "close", "destroy", "show", "hide", "focus", "blur", "minimize", "restore",
             "maximize", "unmaximize", "isMaximized", "isMinimized", "isVisible", "isFocused",
-            "isDestroyed", "isFullScreen", "getBounds", "getSize", "getPosition", "getTitle",
+            "isDestroyed", "isFullScreen", "isNormal", "isResizable", "getBounds", "getSize",
+            "getPosition", "getTitle",
             "setTitle", "setBounds", "setSize", "setPosition", "setFullScreen", "setResizable",
             "setMenuBarVisibility"
         ] : ["getURL", "getTitle", "isDestroyed", "send", "setBackgroundThrottling",
@@ -1628,7 +1638,8 @@
     }
     if (typeof window.require !== "function") {
         Object.defineProperty(window, "require", {
-            configurable: true,
+            configurable: false,
+            writable: false,
             value: name => loadCommonJsModule(name, window.__NEXA_ELECTRON_PRELOAD_BASE__)
         });
     }

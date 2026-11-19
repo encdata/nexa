@@ -81,6 +81,11 @@ class HostWindow:
         return self._host.windows.set_window_size(
             self.window_id, width, height)
 
+    def set_resizable(self, resizable):
+        if self._closed:
+            return False
+        return self._host.windows.set_window_resizable(self.window_id, resizable)
+
     def move(self, x, y):
         if self._closed:
             return False

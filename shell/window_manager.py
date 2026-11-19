@@ -242,6 +242,7 @@ class WindowManager:
             "restore_geometry": None,
             "maximized": False,
             "minimized": False,
+            "resizable": True,
             "prewarming": prewarm,
             "prewarm_position": prewarm,
             "handler_activated": False,
@@ -760,6 +761,16 @@ class WindowManager:
             self.window_order.remove(window_id)
         self.window_order.append(window_id)
 
+    def set_window_resizable(self, window_id, resizable):
+        window = self.windows.get(window_id)
+        if window is None:
+            return False
+        window["resizable"] = bool(resizable)
+        if not window["resizable"] and self.drag is not None and \
+                self.drag["window_id"] == window_id and self.drag["mode"].startswith("resize-"):
+            self._cancel_drag(window_id)
+        return True
+
     def _apply_window_geometry(self, window, top=False):
         width, height = window["width"], window["height"]
         window["frame"].setdimensions(width, height)
@@ -806,7 +817,8 @@ class WindowManager:
             self._set_active(window["id"])
             mode = None
             bottom = window["y"] + window["height"]
-            if not window["maximized"] and local_y >= bottom - self.resize_corner_size:
+            if window["resizable"] and not window["maximized"] and \
+                    local_y >= bottom - self.resize_corner_size:
                 if local_x <= window["x"] + self.resize_corner_size:
                     mode = "resize-left"
                 elif local_x >= window["x"] + window["width"] - self.resize_corner_size:

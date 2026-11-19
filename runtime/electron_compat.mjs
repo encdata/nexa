@@ -1,4 +1,5 @@
 import {EventEmitter} from "node:events";
+import {execFile, execFileSync} from "node:child_process";
 import {createHash} from "node:crypto";
 import dns from "node:dns/promises";
 import fs from "node:fs";
@@ -9,6 +10,9 @@ import {registerHooks} from "node:module";
 import os from "node:os";
 import path from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
+import {promisify} from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath = appRoot,
                                      localUrl, emit, resolveAsar, trustOrigin,
@@ -347,6 +351,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.focused = this.visible;
             this.minimized = false;
             this.maximized = false;
+            this.resizable = options.resizable !== false;
             this.webContents = new EventEmitter();
             this.webContents.id = this.id;
             this.webContents.ownerWindowId = this.id;
@@ -633,6 +638,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         isVisible() { return this.visible; }
         isFocused() { return this.focused; }
         isDestroyed() { return this.destroyed; }
+        isNormal() { return !this.minimized && !this.maximized && !this.isFullScreen(); }
         getBounds() {
             return {x: this.options.x || 0, y: this.options.y || 0,
                 width: this.options.width || 800, height: this.options.height || 600};
@@ -670,7 +676,11 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.options.y = y;
             this.notifyState("move", {x, y});
         }
-        setResizable() {}
+        setResizable(resizable) {
+            this.resizable = Boolean(resizable);
+            this.notifyState("resizable", {enabled: this.resizable});
+        }
+        isResizable() { return this.resizable; }
         getContentSize() { return this.getSize(); }
         setContentSize(width, height) { this.setSize(width, height); }
         setContentView(view) {
@@ -793,6 +803,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             isMaximized: () => target.isMaximized(), isMinimized: () => target.isMinimized(),
             isVisible: () => target.isVisible(), isFocused: () => target.isFocused(),
             isDestroyed: () => target.isDestroyed(), isFullScreen: () => target.isFullScreen(),
+            isNormal: () => target.isNormal(), isResizable: () => target.isResizable(),
             getBounds: () => target.getBounds(), getSize: () => target.getSize(),
             getPosition: () => target.getPosition(), getTitle: () => target.getTitle(),
             setTitle: () => target.setTitle(args[0]), setBounds: () => target.setBounds(args[0]),
@@ -1189,10 +1200,101 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         }));
     });
 
+    function openExternal(url) {
+        let parsed;
+        try {
+            parsed = new URL(url);
+        } catch (_) {
+            throw new TypeError("shell.openExternal expects a valid URL");
+        }
+        if (["file:", "javascript:", "data:"].includes(parsed.protocol)) {
+            throw new TypeError(`shell.openExternal does not support ${parsed.protocol}`);
+        }
+        return execFileAsync("am", ["start", "-a", "android.intent.action.VIEW", "-d", parsed.href], {
+            timeout: 10000,
+            maxBuffer: 64 * 1024
+        }).then(() => undefined);
+    }
+
     const shell = {
-        openExternal: url => emit({event: "nativeCall", method: "shell.openExternal", args: [url]}),
+        openExternal,
         showItemInFolder: file => emit({event: "nativeCall", method: "shell.showItemInFolder", args: [file]})
     };
+
+    function requireClipboardType(type = "clipboard") {
+        if (type !== "clipboard") {
+            throw new Error("Android only provides the system clipboard; selection clipboard is unavailable");
+        }
+    }
+
+    function readClipboardText() {
+        try {
+            return execFileSync("termux-clipboard-get", [], {
+                timeout: 5000,
+                maxBuffer: 2 * 1024 * 1024,
+                encoding: "utf8"
+            });
+        } catch (error) {
+            if (error.code === "ENOENT") {
+                throw new Error("clipboard access needs the Termux:API package and app");
+            }
+            throw error;
+        }
+    }
+
+    function writeClipboardText(text) {
+        try {
+            execFileSync("termux-clipboard-set", [], {
+                input: String(text), timeout: 5000, maxBuffer: 64 * 1024
+            });
+        } catch (error) {
+            if (error.code === "ENOENT") {
+                throw new Error("clipboard access needs the Termux:API package and app");
+            }
+            throw error;
+        }
+    }
+
+    const clipboard = {
+        readText(type = "clipboard") {
+            requireClipboardType(type);
+            return readClipboardText();
+        },
+        writeText(text, type = "clipboard") {
+            requireClipboardType(type);
+            writeClipboardText(text);
+        },
+        clear(type = "clipboard") {
+            requireClipboardType(type);
+            writeClipboardText("");
+        },
+        availableFormats(type = "clipboard") {
+            requireClipboardType(type);
+            return readClipboardText() ? ["text/plain"] : [];
+        },
+        has(format, type = "clipboard") {
+            requireClipboardType(type);
+            return format === "text/plain" && Boolean(readClipboardText());
+        }
+    };
+    ipcMain.handle("shell.openExternal", (_event, url) => openExternal(url));
+    ipcMain.on("clipboard.readText", (event, type) => {
+        event.returnValue = clipboard.readText(type);
+    });
+    ipcMain.on("clipboard.writeText", (event, text, type) => {
+        clipboard.writeText(text, type);
+        event.returnValue = undefined;
+    });
+    ipcMain.on("clipboard.clear", (event, type) => {
+        clipboard.clear(type);
+        event.returnValue = undefined;
+    });
+    ipcMain.on("clipboard.availableFormats", (event, type) => {
+        event.returnValue = clipboard.availableFormats(type);
+    });
+    ipcMain.on("clipboard.has", (event, format, type) => {
+        event.returnValue = clipboard.has(format, type);
+    });
     function createSession() {
         const session = new EventEmitter();
         const cookies = new Map();
@@ -1467,7 +1569,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             fromPartition: sessionForPartition
         },
         dialog,
-        clipboard: {},
+        clipboard,
         Menu: {buildFromTemplate: template => template, setApplicationMenu() {}},
         protocol,
         powerMonitor: new EventEmitter(),
