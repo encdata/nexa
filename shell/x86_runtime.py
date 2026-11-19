@@ -104,11 +104,8 @@ def box64_command():
 
 def runner_shell():
     prefix = Path(os.environ.get("PREFIX", "/data/data/com.termux/files/usr"))
-    shell = os.environ.get("SHELL")
-    if (shell and os.access(shell, os.X_OK)
-            and Path(shell).parent != prefix / "glibc" / "bin"):
-        return shell
-    return shutil.which("bash") or shutil.which("sh")
+    shell = prefix / "glibc" / "bin" / "bash"
+    return str(shell) if os.access(shell, os.X_OK) else None
 
 
 def installed():
