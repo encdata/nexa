@@ -76,7 +76,9 @@
     }
 
     const native = window.nexaElectronNative;
-    if (!native) return;
+    if (!native) {
+        console.error("nexa electron preload: native WebView bridge is missing");
+    }
 
     let rendererErrorCount = 0;
     const reportedErrors = new Set();
@@ -92,7 +94,7 @@
         if (rendererErrorCount >= 40 || reportedErrors.has(key)) return;
         reportedErrors.add(key);
         rendererErrorCount++;
-        native.postMessage(JSON.stringify({
+        postBridgeMessage(JSON.stringify({
             kind: "send", channel: "__nexa:renderer-error", args: [detail]
         }));
     }
@@ -116,12 +118,53 @@
     let queuedSendChars = 0;
     let sendFlushQueued = false;
 
+    function postBridgeMessage(data) {
+        if (native) {
+            native.postMessage(data);
+            return;
+        }
+        const endpoint = window.__NEXA_ELECTRON_SYNC_ENDPOINT__;
+        if (!endpoint) {
+            console.error("nexa electron preload: IPC endpoint is missing");
+            return;
+        }
+        const message = JSON.parse(data);
+        message.token = window.__NEXA_ELECTRON_IPC_TOKEN__;
+        message.windowId = window.__NEXA_ELECTRON_WINDOW_ID__;
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", endpoint, true);
+        xhr.setRequestHeader("Content-Type", "text/plain;charset=UTF-8");
+        xhr.onload = () => {
+            let result;
+            try { result = JSON.parse(xhr.responseText); }
+            catch (_) { result = {error: `Electron IPC failed (${xhr.status})`}; }
+            if (message.kind !== "invoke") {
+                if (result.error !== undefined) console.error(result.error);
+                return;
+            }
+            const call = pending.get(message.id);
+            if (!call) return;
+            pending.delete(message.id);
+            if (xhr.status < 200 || xhr.status >= 300 || result.error !== undefined) {
+                call.reject(new Error(result.error || `Electron IPC failed (${xhr.status})`));
+            } else call.resolve(result.value);
+        };
+        xhr.onerror = () => {
+            if (message.kind !== "invoke") return;
+            const call = pending.get(message.id);
+            if (!call) return;
+            pending.delete(message.id);
+            call.reject(new Error("Electron IPC request failed"));
+        };
+        xhr.send(JSON.stringify(message));
+    }
+
     function flushSends() {
         sendFlushQueued = false;
         if (!queuedSends.length) return;
         const messages = queuedSends.splice(0, queuedSends.length);
         queuedSendChars = 0;
-        native.postMessage(`{"kind":"batch","messages":[${messages.join(",")}]}`);
+        postBridgeMessage(`{"kind":"batch","messages":[${messages.join(",")}]}`);
     }
 
     function request(kind, channel, args) {
@@ -129,7 +172,7 @@
             const message = JSON.stringify({kind, channel, args});
             if (message.length > 256 * 1024) {
                 flushSends();
-                native.postMessage(message);
+                postBridgeMessage(message);
                 return;
             }
             if (queuedSendChars + message.length > 256 * 1024 || queuedSends.length >= 128) {
@@ -148,10 +191,10 @@
         if (id !== null) {
             return new Promise((resolve, reject) => {
                 pending.set(id, {resolve, reject});
-                native.postMessage(JSON.stringify({kind, id, channel, args}));
+                postBridgeMessage(JSON.stringify({kind, id, channel, args}));
             });
         }
-        native.postMessage(JSON.stringify({kind, channel, args}));
+        postBridgeMessage(JSON.stringify({kind, channel, args}));
     }
 
     function addListener(channel, listener, once = false) {
@@ -1158,7 +1201,7 @@
         };
     };
 
-    native.onmessage = event => {
+    if (native) native.onmessage = event => {
         let message;
         try {
             message = JSON.parse(event.data);

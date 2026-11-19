@@ -901,6 +901,7 @@ class ElectronRenderer:
         self.host.update_screen_metrics(*metrics)
 
     def _bridge_ready(self, window_id):
+        logger.info("Electron WebView bridge ready for contents %s", window_id)
         self._bridge_ready_windows.add(window_id)
         self._flush_pending_renderer_messages(window_id)
 
@@ -927,6 +928,8 @@ class ElectronRenderer:
             return
         self._embedded_views[contents_id] = view
         self._embedded_view_ids[view.webview.id] = view
+        logger.info("created embedded Electron contents %s for window %s at %s",
+                    contents_id, window_id, view.url)
         self._flush_pending_renderer_messages(contents_id)
 
     def _attach_pending_views(self, window_id):
