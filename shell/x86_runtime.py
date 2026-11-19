@@ -222,7 +222,8 @@ def ensure_installed(on_status=None, electron_node=False):
 
     install("glibc-repo")
     run([pkg, "update"], "updating package lists")
-    for package in ("glibc", "glibc-runner", "bash-glibc", "box64-glibc", "libwayland-glibc",
+    for package in ("glibc", "glibc-runner", "readline-glibc", "bash-glibc",
+                    "box64-glibc", "libwayland-glibc",
                     "libwayland-protocols-glibc", "libxkbcommon-glibc"):
         install(package)
     passed, details = _box64_check()
