@@ -379,6 +379,7 @@
     function encodeFsValue(value) {
         if (typeof value === "bigint") return {__nexaType: "BigInt", value: value.toString()};
         if (value instanceof URL) return {__nexaType: "FileURL", value: value.href};
+        if (value instanceof Date) return {__nexaType: "Date", value: value.toISOString()};
         if (value instanceof Uint8Array) {
             let binary = "";
             for (let offset = 0; offset < value.length; offset += 0x8000) {
@@ -400,6 +401,7 @@
         if (value && typeof value === "object") {
             if (value.__nexaType === "BigInt") return BigInt(value.value);
             if (value.__nexaType === "FileURL") return new URL(value.value);
+            if (value.__nexaType === "Undefined") return undefined;
             if (value.__nexaType === "Date") return new Date(value.value);
             if (value.__nexaType === "Buffer") return NexaBuffer.from(value.data, "base64");
             if (value.__nexaType === "FsError") {
@@ -1174,6 +1176,24 @@
         }
 
         if (message.kind !== "event") return;
+        if (message.channel === "__nexa:execute-js") {
+            const [requestId, code] = message.args || [];
+            Promise.resolve().then(() => window.eval(String(code))).then(value => {
+                try {
+                    let encoded = encodeFsValue(value);
+                    if (encoded === undefined) encoded = {__nexaType: "Undefined"};
+                    JSON.stringify(encoded);
+                    ipcRenderer.send("__nexa:execute-js-result", requestId, {value: encoded});
+                } catch (error) {
+                    ipcRenderer.send("__nexa:execute-js-result", requestId, {
+                        error: `JavaScript result cannot cross the Electron bridge: ${error.message}`
+                    });
+                }
+            }, error => ipcRenderer.send("__nexa:execute-js-result", requestId, {
+                error: error?.message || String(error)
+            }));
+            return;
+        }
         if (message.channel === "__nexa:insert-css") {
             const [key, css] = message.args || [];
             const style = document.createElement("style");
@@ -1246,12 +1266,36 @@
         BrowserWindow: {
             getAllWindows: () => fsResult(ipcRenderer.sendSync(
                 "nexa:electron:windows:list")).map(item =>
-                remoteElectronTarget("window", item.id, item.title))
+                remoteElectronTarget("window", item.id, item.title)),
+            getFocusedWindow: () => {
+                const windows = fsResult(ipcRenderer.sendSync("nexa:electron:windows:list"));
+                const window = windows.find(item => item.focused);
+                return window ? remoteElectronTarget("window", window.id, window.title) : null;
+            },
+            fromId: id => {
+                const window = fsResult(ipcRenderer.sendSync("nexa:electron:windows:list"))
+                    .find(item => item.id === Number(id));
+                return window ? remoteElectronTarget("window", window.id, window.title) : null;
+            },
+            fromWebContents: webContents => webContents?.id
+                ? remoteElectronTarget("window", webContents.id) : null
         },
         webContents: {
             getAllWebContents: () => fsResult(ipcRenderer.sendSync(
                 "nexa:electron:webContents:list")).map(item =>
-                remoteElectronTarget("webContents", item.id, item.title))
+                remoteElectronTarget("webContents", item.id, item.title)),
+            getFocusedWebContents: () => {
+                const contents = fsResult(ipcRenderer.sendSync("nexa:electron:webContents:list"));
+                const webContents = contents.find(item => item.focused);
+                return webContents
+                    ? remoteElectronTarget("webContents", webContents.id, webContents.title) : null;
+            },
+            fromId: id => {
+                const contents = fsResult(ipcRenderer.sendSync("nexa:electron:webContents:list"))
+                    .find(item => item.id === Number(id));
+                return contents
+                    ? remoteElectronTarget("webContents", contents.id, contents.title) : null;
+            }
         }
     };
 
@@ -1275,6 +1319,23 @@
         target.id = id;
         if (type === "window") target.title = title || "";
         if (type === "webContents") target.getTitle = () => title || "";
+        const call = (method, ...args) => fsResult(ipcRenderer.sendSync(
+            "nexa:electron:object:call", type, id, method, encodeFsValue(args)));
+        const methods = type === "window" ? [
+            "close", "destroy", "show", "hide", "focus", "blur", "minimize", "restore",
+            "maximize", "unmaximize", "isMaximized", "isMinimized", "isVisible", "isFocused",
+            "isDestroyed", "isFullScreen", "getBounds", "getSize", "getPosition", "getTitle",
+            "setTitle", "setBounds", "setSize", "setPosition", "setFullScreen", "setResizable",
+            "setMenuBarVisibility"
+        ] : ["getURL", "getTitle", "isDestroyed", "send", "setBackgroundThrottling",
+            "setZoomFactor", "openDevTools", "closeDevTools", "stop"];
+        const asyncMethods = type === "window" ? ["loadURL", "loadFile"]
+            : ["loadURL", "loadFile", "reload", "reloadIgnoringCache", "executeJavaScript",
+                "executeJavaScriptInIsolatedWorld"];
+        for (const method of methods) target[method] = (...args) => call(method, ...args);
+        for (const method of asyncMethods) target[method] = (...args) => ipcRenderer.invoke(
+            "nexa:electron:object:invoke", type, id, method, encodeFsValue(args)).then(fsResult);
+        if (type === "window") target.webContents = remoteElectronTarget("webContents", id, title);
         const targetOn = target.on;
         target.on = function(name, listener) {
             const first = !this._events.has(name);

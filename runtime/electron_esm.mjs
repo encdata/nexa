@@ -4,6 +4,9 @@ if (!electron) throw new Error("Nexa Electron runtime was not initialized");
 export const {
     app,
     process,
+    View,
+    WebContentsView,
+    BaseWindow,
     BrowserWindow,
     ipcMain,
     shell,

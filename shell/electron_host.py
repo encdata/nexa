@@ -641,6 +641,17 @@ class _ElectronWindowView:
             return
         self._apply_visibility()
 
+    def set_content_bounds(self, bounds):
+        if not isinstance(bounds, dict):
+            return
+        x = int(bounds.get("x", 0))
+        y = int(bounds.get("y", 0))
+        width = max(1, int(bounds.get("width", 1)))
+        height = max(1, int(bounds.get("height", 1)))
+        self.webview.setdimensions(width, height)
+        for direction, margin in (("left", x), ("top", y), ("right", 0), ("bottom", 0)):
+            self.webview.setmargin(margin, direction)
+
     def set_background_throttling(self, enabled):
         self.background_throttling = bool(enabled)
         if self._renderer_dead:
@@ -693,6 +704,121 @@ class _ElectronWindowView:
         return self.controller.should_tick()
 
 
+class _ElectronEmbeddedView:
+    def __init__(self, controller, contents_id, window_id, message, parent):
+        self.controller = controller
+        self.host = controller.host
+        self.contents_id = contents_id
+        self.window_id = window_id
+        self.activity = controller.activity
+        self.parent = parent
+        self.url = message.get("url", "about:blank")
+        self.bounds = {"x": 0, "y": 0, "width": 1, "height": 1}
+        options = message.get("options") or {}
+        self.background_throttling = _background_throttling(options)
+        self._closed = False
+        self._renderer_console_errors = {}
+        self.webview = tg.WebView(
+            self.activity, self.parent,
+            visibility=tg.View.VISIBLE if message.get("visible", True) else tg.View.GONE,
+            electron_bridge={
+                "origins": sorted({origin for origin in (
+                    self.host.origin, _http_origin(self.url)) if origin}),
+                "preload": self._preload(),
+                "preload_url": message.get("preloadUrl"),
+                "ipc_endpoint": self.host.sync_ipc_url,
+                "ipc_token": self.host.ipc_token,
+                "window_id": contents_id,
+                "background_throttling": self.background_throttling
+            })
+        self.ipc = tg.ElectronBridge(
+            self.webview,
+            transport=lambda request: self.host.ipc_request(request, self.contents_id),
+            on_ready=lambda: controller._bridge_ready(self.contents_id))
+        self.ipc.handle("__nexa:renderer-error", _ElectronWindowView._log_renderer_error)
+        self.apply_state(message)
+        self.webview.setdesktopmode(True)
+        self.webview.allownavigation(True)
+        self.webview.loaduri(self.url)
+
+    def _preload(self):
+        script = ELECTRON_PRELOAD
+        if self.host.main_entry:
+            cwd = (self.host.app_root.parent if self.host.app_root.is_file()
+                   else self.host.app_root)
+            home = os.environ.get("HOME", str(Path.home()))
+            script = ("window.__NEXA_ELECTRON_SYNC_ENDPOINT__ = " +
+                      json.dumps(self.host.sync_ipc_url) + ";\n" +
+                      "window.__NEXA_ELECTRON_IPC_TOKEN__ = " +
+                      json.dumps(self.host.ipc_token) + ";\n" +
+                      "window.__NEXA_ELECTRON_WINDOW_ID__ = " +
+                      json.dumps(self.contents_id) + ";\n" +
+                      "window.__NEXA_ELECTRON_CWD__ = " +
+                      json.dumps(str(cwd)) + ";\n" +
+                      "window.__NEXA_ELECTRON_HOME__ = " +
+                      json.dumps(home) + ";\n" + script)
+        return script
+
+    def apply_state(self, state):
+        bounds = state.get("bounds")
+        if isinstance(bounds, dict):
+            self.bounds.update({key: value for key, value in bounds.items()
+                                if key in self.bounds and isinstance(value, (int, float))})
+            x = int(self.bounds["x"])
+            y = int(self.bounds["y"])
+            width = max(1, int(self.bounds["width"]))
+            height = max(1, int(self.bounds["height"]))
+            self.webview.setdimensions(width, height)
+            for direction, margin in (("left", x), ("top", y), ("right", 0), ("bottom", 0)):
+                self.webview.setmargin(margin, direction)
+        if "visible" in state:
+            self.webview.setvisibility(
+                tg.View.VISIBLE if state["visible"] else tg.View.GONE)
+        if "backgroundColor" in state:
+            color = _android_color(state["backgroundColor"])
+            if color is not None:
+                self.webview.setbackgroundcolor(color)
+        throttling = state.get("backgroundThrottling")
+        if isinstance(throttling, bool):
+            self.background_throttling = throttling
+            self.webview.setbackgroundthrottling(throttling)
+
+    def load(self, url):
+        self.url = url
+        self.webview.loaduri(url)
+
+    def handle_event(self, event):
+        if self._closed or event.id != self.webview.id:
+            return False
+        if event.type == tg.Event.webviewBridgeError:
+            logger.error("embedded WebView bridge failed: %s",
+                         event.value.get("error", "unknown error"))
+            return True
+        if event.type == tg.Event.webviewConsoleMessage:
+            _ElectronWindowView._log_console_error(self, event.value)
+            return True
+        if event.type in (tg.Event.webviewNavigation, tg.Event.webviewProgress,
+                          tg.Event.webviewHTTPError, tg.Event.webviewError,
+                          tg.Event.webviewDestroyed):
+            if event.type == tg.Event.webviewProgress and event.value.get("progress") == 100:
+                logger.info("embedded contents %s finished loading %s",
+                            self.contents_id, self.url)
+            elif event.type in (tg.Event.webviewHTTPError, tg.Event.webviewError,
+                                tg.Event.webviewDestroyed):
+                logger.error("embedded contents %s WebView %s: %s",
+                             self.contents_id, event.type, event.value)
+            self.host.renderer_event(event, self.contents_id)
+            return True
+        return self.ipc.handle_event(event)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self.ipc.close()
+        self.webview.delete()
+
+
 class ElectronRenderer:
     def __init__(self, activity, parent, app_root, entry="index.html", node=None,
                  main_entry=None, app_id="electron", app_name="electron", icon="window",
@@ -723,6 +849,9 @@ class ElectronRenderer:
         self.window_host = window_host
         self.close_window = close_window
         self._views = {}
+        self._embedded_views = {}
+        self._embedded_view_ids = {}
+        self._pending_view_events = {}
         self._host_windows = {}
         self._bridge_ready_windows = set()
         self._pending_renderer_messages = {}
@@ -740,6 +869,7 @@ class ElectronRenderer:
                 self.host.preload_url, self.host.renderer_visible,
                 background_throttling=_background_throttling(self.host.renderer_options))
             self._views[self.window_id] = self.root_view
+            self._attach_pending_views(self.window_id)
             self._flush_pending_renderer_messages(self.window_id)
             if not self.host.renderer_visible:
                 self.root_view.set_visibility(tg.View.GONE)
@@ -748,6 +878,9 @@ class ElectronRenderer:
             raise
 
     def handle_event(self, event):
+        embedded = self._embedded_view_ids.get(event.id)
+        if embedded is not None:
+            return embedded.handle_event(event)
         return self.root_view.handle_event(event)
 
     def handle_hidden_webview_destroyed(self, event):
@@ -770,6 +903,77 @@ class ElectronRenderer:
     def _bridge_ready(self, window_id):
         self._bridge_ready_windows.add(window_id)
         self._flush_pending_renderer_messages(window_id)
+
+    def _create_embedded_view(self, message):
+        contents_id = message.get("contentsId")
+        window_id = message.get("windowId")
+        if (type(contents_id) is not int or type(window_id) is not int
+                or contents_id == window_id or window_id in self._closed_windows):
+            return
+        current = self._embedded_views.get(contents_id)
+        if current is not None:
+            if message.get("url") != current.url:
+                current.load(message["url"])
+            current.apply_state(message)
+            return
+        if window_id not in self._views:
+            self._pending_view_events.setdefault(window_id, []).append(("create", message))
+            return
+        try:
+            view = _ElectronEmbeddedView(
+                self, contents_id, window_id, message, self._views[window_id].parent)
+        except Exception:
+            logger.exception("could not create embedded Electron contents %s", contents_id)
+            return
+        self._embedded_views[contents_id] = view
+        self._embedded_view_ids[view.webview.id] = view
+        self._flush_pending_renderer_messages(contents_id)
+
+    def _attach_pending_views(self, window_id):
+        for event, message in self._pending_view_events.pop(window_id, ()):
+            if event == "create":
+                self._create_embedded_view(message)
+                continue
+            contents_id = message.get("contentsId")
+            if contents_id == window_id:
+                view = self._views.get(window_id)
+                if view is not None:
+                    if "bounds" in message:
+                        view.set_content_bounds(message["bounds"])
+                    if "visible" in message:
+                        view.set_visibility(
+                            tg.View.VISIBLE if message["visible"] else tg.View.GONE)
+                    if isinstance(message.get("backgroundThrottling"), bool):
+                        view.set_background_throttling(message["backgroundThrottling"])
+                    if "backgroundColor" in message:
+                        color = _android_color(message["backgroundColor"])
+                        if color is not None:
+                            view.webview.setbackgroundcolor(color)
+            else:
+                view = self._embedded_views.get(contents_id)
+                if view is not None:
+                    view.apply_state(message)
+
+    def _close_embedded_view(self, contents_id):
+        view = self._embedded_views.pop(contents_id, None)
+        self._bridge_ready_windows.discard(contents_id)
+        self._pending_renderer_messages.pop(contents_id, None)
+        for window_id, events in tuple(self._pending_view_events.items()):
+            remaining = [(kind, message) for kind, message in events
+                         if message.get("contentsId") != contents_id]
+            if remaining:
+                self._pending_view_events[window_id] = remaining
+            else:
+                self._pending_view_events.pop(window_id, None)
+        if view is None:
+            return
+        self._embedded_view_ids.pop(view.webview.id, None)
+        view.close()
+
+    def _close_embedded_views_for_window(self, window_id):
+        for contents_id, view in tuple(self._embedded_views.items()):
+            if view.window_id == window_id:
+                self._close_embedded_view(contents_id)
 
     def _renderer_destroyed(self, old_view):
         window_id = old_view.window_id
@@ -810,7 +1014,7 @@ class ElectronRenderer:
             self.root_view = replacement
 
     def _flush_pending_renderer_messages(self, window_id):
-        view = self._views.get(window_id)
+        view = self._embedded_views.get(window_id) or self._views.get(window_id)
         if view is None or window_id not in self._bridge_ready_windows:
             return
         for message in self._pending_renderer_messages.pop(window_id, ()):
@@ -838,16 +1042,19 @@ class ElectronRenderer:
                 message.get("visible", True),
                 background_throttling=_background_throttling(options))
             self._views[window_id] = view
+            self._attach_pending_views(window_id)
             self._flush_pending_renderer_messages(window_id)
             return view
 
         def on_close():
             self._closed_windows.add(window_id)
+            self._close_embedded_views_for_window(window_id)
             if window_id not in self._remote_closing:
                 Thread(target=self.host.window_command,
                        args=(window_id, "close"), daemon=True).start()
             self._host_windows.pop(window_id, None)
             self._views.pop(window_id, None)
+            self._pending_view_events.pop(window_id, None)
             self._bridge_ready_windows.discard(window_id)
             self._pending_renderer_messages.pop(window_id, None)
             self._renderer_recoveries.pop(window_id, None)
@@ -868,7 +1075,9 @@ class ElectronRenderer:
     def _promote_hidden_root(self, message):
         old_window_id = self.window_id
         old_view = self.root_view
+        self._close_embedded_views_for_window(old_window_id)
         self._views.pop(old_window_id, None)
+        self._pending_view_events.pop(old_window_id, None)
         self._bridge_ready_windows.discard(old_window_id)
         self._pending_renderer_messages.pop(old_window_id, None)
         self._renderer_recoveries.pop(old_window_id, None)
@@ -889,12 +1098,15 @@ class ElectronRenderer:
             message.get("preloadUrl"), message.get("visible", True),
             background_throttling=_background_throttling(self.host.renderer_options))
         self._views[self.window_id] = self.root_view
+        self._attach_pending_views(self.window_id)
         if not message.get("visible", True):
             self.root_view.set_visibility(tg.View.GONE)
         self._flush_pending_renderer_messages(self.window_id)
 
     def _close_child_window(self, window_id):
         self._closed_windows.add(window_id)
+        self._close_embedded_views_for_window(window_id)
+        self._pending_view_events.pop(window_id, None)
         host_window = self._host_windows.pop(window_id, None)
         self._views.pop(window_id, None)
         self._renderer_recoveries.pop(window_id, None)
@@ -913,8 +1125,11 @@ class ElectronRenderer:
         for window_id in tuple(self._host_windows):
             self._close_child_window(window_id)
         self.root_view.close()
+        for contents_id in tuple(self._embedded_views):
+            self._close_embedded_view(contents_id)
         self.host.close()
         self._views.clear()
+        self._pending_view_events.clear()
         self._bridge_ready_windows.clear()
         self._pending_renderer_messages.clear()
         self._closed_windows.clear()
@@ -934,6 +1149,7 @@ class ElectronRenderer:
                 self.host.preload_url, self.host.renderer_visible,
                 background_throttling=_background_throttling(self.host.renderer_options))
             self._views[self.window_id] = self.root_view
+            self._attach_pending_views(self.window_id)
             if not self.host.renderer_visible:
                 self.root_view.set_visibility(tg.View.GONE)
         except Exception as error:
@@ -1017,13 +1233,43 @@ class ElectronRenderer:
                 event = message.get("event")
                 window_id = message.get("windowId")
                 if event == "rendererMessage":
+                    contents_id = message.get("contentsId", window_id)
                     if window_id in self._closed_windows:
                         continue
-                    view = self._views.get(window_id)
-                    if view is not None and window_id in self._bridge_ready_windows:
+                    view = (self._embedded_views.get(contents_id)
+                            or self._views.get(contents_id))
+                    if view is not None and contents_id in self._bridge_ready_windows:
                         view.ipc.emit(message["channel"], *message.get("args", []))
                     else:
-                        self._pending_renderer_messages.setdefault(window_id, []).append(message)
+                        self._pending_renderer_messages.setdefault(contents_id, []).append(message)
+                elif event == "rendererView":
+                    self._create_embedded_view(message)
+                elif event == "rendererViewState":
+                    contents_id = message.get("contentsId")
+                    if window_id not in self._views:
+                        self._pending_view_events.setdefault(window_id, []).append(
+                            ("state", message))
+                    elif contents_id == window_id:
+                        view = self._views.get(window_id)
+                        if view is not None:
+                            if "bounds" in message:
+                                view.set_content_bounds(message["bounds"])
+                            if "visible" in message:
+                                view.set_visibility(
+                                    tg.View.VISIBLE if message["visible"] else tg.View.GONE)
+                            if isinstance(message.get("backgroundThrottling"), bool):
+                                view.set_background_throttling(
+                                    message["backgroundThrottling"])
+                            if "backgroundColor" in message:
+                                color = _android_color(message["backgroundColor"])
+                                if color is not None:
+                                    view.webview.setbackgroundcolor(color)
+                    else:
+                        view = self._embedded_views.get(contents_id)
+                        if view is not None:
+                            view.apply_state(message)
+                elif event == "rendererViewClosed":
+                    self._close_embedded_view(message.get("contentsId"))
                 elif event == "renderer":
                     if window_id in self._closed_windows:
                         continue
@@ -1049,6 +1295,7 @@ class ElectronRenderer:
                         else:
                             self.close()
                         return
+                    self._close_embedded_views_for_window(window_id)
                     self._close_child_window(window_id)
                 elif event == "mainError":
                     print(f"nexa: electron main process: {message.get('error', 'failed')}")
@@ -1076,6 +1323,8 @@ class ElectronRenderer:
         self._closed = True
         for window_id in tuple(self._host_windows):
             self._close_child_window(window_id)
+        for contents_id in tuple(self._embedded_views):
+            self._close_embedded_view(contents_id)
         try:
             self.root_view.close()
         finally:
@@ -1092,3 +1341,30 @@ def _http_origin(url):
             parsed.scheme == "http" and port == 80):
         return f"{parsed.scheme}://{host}"
     return f"{parsed.scheme}://{host}:{port}"
+
+
+def _android_color(value):
+    if not isinstance(value, str):
+        return None
+    color = value.strip().lower()
+    if color == "transparent":
+        return 0
+    if not color.startswith("#"):
+        return None
+    digits = color[1:]
+    try:
+        if len(digits) == 3:
+            red, green, blue = (int(digit * 2, 16) for digit in digits)
+            return 0xFF000000 | red << 16 | green << 8 | blue
+        if len(digits) == 4:
+            alpha, red, green, blue = (int(digit * 2, 16) for digit in digits)
+            return alpha << 24 | red << 16 | green << 8 | blue
+        if len(digits) == 6:
+            return 0xFF000000 | int(digits, 16)
+        if len(digits) == 8:
+            red, green, blue, alpha = (int(digits[index:index + 2], 16)
+                                       for index in range(0, 8, 2))
+            return alpha << 24 | red << 16 | green << 8 | blue
+    except ValueError:
+        return None
+    return None
