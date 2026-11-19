@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 from queue import Empty, Full, Queue
 import secrets
+import shlex
 import shutil
 import signal
 import subprocess
@@ -30,11 +31,14 @@ def _background_throttling(options):
 
 class ElectronHost:
     def __init__(self, app_root, entry="index.html", node=None, main_entry=None,
-                 screen_size=None, scale_factor=1.0):
+                 screen_size=None, scale_factor=1.0, environment=None,
+                 node_runner=None):
         self.app_root = Path(app_root).resolve()
         self.entry = entry
         self.main_entry = main_entry
         self.node = node or shutil.which("node")
+        self.environment = environment or {}
+        self.node_runner = node_runner
         self.screen_size = screen_size or (800, 600)
         self.scale_factor = scale_factor
         self.process = None
@@ -92,6 +96,7 @@ class ElectronHost:
             raise FileNotFoundError(self.app_root)
 
         environment = os.environ.copy()
+        environment.update(self.environment)
         environment["NEXA_ELECTRON_IPC_TOKEN"] = self.ipc_token
         environment["NEXA_ELECTRON_SCREEN_WIDTH"] = str(max(1, int(self.screen_size[0])))
         environment["NEXA_ELECTRON_SCREEN_HEIGHT"] = str(max(1, int(self.screen_size[1])))
@@ -109,9 +114,15 @@ class ElectronHost:
                 name="nexa-electron-events", daemon=True)
             self._renderer_event_worker.start()
         try:
+            command = [*(self.node if isinstance(self.node, (list, tuple)) else [self.node]),
+                       str(HOST_SCRIPT), str(self.app_root), self.entry, "0",
+                       self.main_entry or ""]
+            if self.node_runner:
+                environment.pop("LD_LIBRARY_PATH", None)
+                command = [self.node_runner, "--shell",
+                           "export LD_PRELOAD=libresolv.so.2; exec " + shlex.join(command)]
             self.process = subprocess.Popen(
-                [self.node, str(HOST_SCRIPT), str(self.app_root), self.entry, "0",
-                 self.main_entry or ""],
+                command,
                 cwd=str(self.app_root.parent if self.app_root.is_file() else self.app_root),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
@@ -263,11 +274,11 @@ class ElectronHost:
 
     def _renderer_event_loop(self):
         while not self._renderer_event_stop.is_set():
+            message = self._renderer_event_queue.get()
             try:
-                event_type, value, window_id = self._renderer_event_queue.get(timeout=0.1)
-            except Empty:
-                continue
-            try:
+                if message is None or self._renderer_event_stop.is_set():
+                    return
+                event_type, value, window_id = message
                 self._post_renderer_event(event_type, value, window_id)
             finally:
                 self._renderer_event_queue.task_done()
@@ -343,6 +354,10 @@ class ElectronHost:
                 self._renderer_event_queue.task_done()
             except Empty:
                 break
+        try:
+            self._renderer_event_queue.put_nowait(None)
+        except Full:
+            pass
         renderer_event_worker, self._renderer_event_worker = self._renderer_event_worker, None
         event_stream, self._event_stream = self._event_stream, None
         control_stream, self._control_stream = self._control_stream, None
@@ -548,12 +563,19 @@ class _ElectronWindowView:
     def _preload(self):
         script = ELECTRON_PRELOAD
         if self.host.main_entry:
+            cwd = (self.host.app_root.parent if self.host.app_root.is_file()
+                   else self.host.app_root)
+            home = os.environ.get("HOME", str(Path.home()))
             script = ("window.__NEXA_ELECTRON_SYNC_ENDPOINT__ = " +
                       json.dumps(self.host.sync_ipc_url) + ";\n" +
                       "window.__NEXA_ELECTRON_IPC_TOKEN__ = " +
                       json.dumps(self.host.ipc_token) + ";\n" +
                       "window.__NEXA_ELECTRON_WINDOW_ID__ = " +
-                      json.dumps(self.window_id) + ";\n" + script)
+                      json.dumps(self.window_id) + ";\n" +
+                      "window.__NEXA_ELECTRON_CWD__ = " +
+                      json.dumps(str(cwd)) + ";\n" +
+                      "window.__NEXA_ELECTRON_HOME__ = " +
+                      json.dumps(home) + ";\n" + script)
         return script
 
     def load(self, url):
@@ -659,10 +681,13 @@ class _ElectronWindowView:
 class ElectronRenderer:
     def __init__(self, activity, parent, app_root, entry="index.html", node=None,
                  main_entry=None, app_id="electron", app_name="electron", icon="window",
-                 window_host=None, close_window=None):
+                 window_host=None, close_window=None, host_environment=None,
+                 node_runner=None):
         self.app_root = app_root
         self.entry = entry
         self.node = node
+        self.host_environment = host_environment or {}
+        self.node_runner = node_runner
         self.main_entry = main_entry
         self.activity = activity
         self.parent = parent
@@ -674,7 +699,8 @@ class ElectronRenderer:
         self._screen_metrics = (*self.screen_size, self.scale_factor)
         self.host = ElectronHost(
             self.app_root, self.entry, self.node, self.main_entry,
-            self.screen_size, self.scale_factor)
+            self.screen_size, self.scale_factor, self.host_environment,
+            self.node_runner)
         self.url = self.host.start()
         self.app_id = app_id
         self.app_name = app_name
@@ -883,7 +909,8 @@ class ElectronRenderer:
         try:
             self.host = ElectronHost(
                 self.app_root, self.entry, self.node, self.main_entry,
-                self.screen_size, self.scale_factor)
+                self.screen_size, self.scale_factor, self.host_environment,
+                self.node_runner)
             self.url = self.host.start()
             self.window_id = self.host.window_id
             self._root_hidden = not self.host.renderer_visible
@@ -949,6 +976,11 @@ class ElectronRenderer:
     def _handle_native_call(self, message):
         method = message.get("method")
         args = message.get("args") or []
+        if method == "webFrame.clearCache":
+            view = self._views.get(message.get("windowId"))
+            if view is not None and not view._closed:
+                view.webview.clearcache()
+            return
         if method == "dialog.showErrorBox":
             title = str(args[0]) if args else self.app_name
             detail = str(args[1]) if len(args) > 1 else ""

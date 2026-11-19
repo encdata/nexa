@@ -1,4 +1,5 @@
 import {EventEmitter} from "node:events";
+import {createHash} from "node:crypto";
 import dns from "node:dns/promises";
 import fs from "node:fs";
 import http from "node:http";
@@ -21,6 +22,16 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
     process.resourcesPath = resourcesPath;
     const windows = new Map();
     const contents = new Map();
+    const preloadScriptCache = new Map();
+    let preloadScriptCacheBytes = 0;
+    const maxPreloadScriptCacheBytes = 8 * 1024 * 1024;
+    const nativeModules = new Map();
+    const nativeObjectHandles = new Map();
+    const canonicalFsRoots = new Map();
+    const electronEventSubscriptions = new Map();
+    let nextElectronEventSubscriptionId = 0;
+    let nextNativeModuleId = 0;
+    let nextNativeObjectId = 0;
     const sessions = new Map();
     const handlers = new Map();
     const protocolHandlers = new WeakMap();
@@ -82,6 +93,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.webContents.destroyed = false;
             this.webContents.backgroundThrottling =
                 options.webPreferences?.backgroundThrottling !== false;
+            this.webContents.zoomFactor = 1;
             this.webContents.getURL = () => this.url || "";
             this.webContents.getTitle = () => this.title || "";
             this.webContents.isDestroyed = () => this.webContents.destroyed;
@@ -117,6 +129,14 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                 this.notifyState("backgroundThrottling", {
                     enabled: allowed
                 });
+            };
+            this.webContents.setZoomFactor = factor => {
+                const zoomFactor = Number(factor);
+                if (!Number.isFinite(zoomFactor) || zoomFactor <= 0) {
+                    throw new TypeError("zoom factor must be a positive number");
+                }
+                this.webContents.zoomFactor = zoomFactor;
+                this.webContents.send("__nexa:set-zoom", zoomFactor);
             };
             contents.set(this.id, this.webContents);
             windows.set(this.id, this);
@@ -169,11 +189,34 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             else pending.resolve();
         }
 
-        getPreloadScript() {
+        getPreloadResponse() {
             const paths = [...this.session.getPreloads(), this.preloadPath].filter(Boolean);
-            const preloads = paths.map(readPreload).join("\n");
+            const files = paths.map(preloadFileInfo);
+            const rendererProcess = {
+                arch: process.arch,
+                argv: process.argv,
+                pid: process.pid,
+                versions: {
+                    node: process.versions.node,
+                    electron: process.versions.electron || ""
+                },
+                env: Object.fromEntries(["HOME", "TMPDIR", "XDG_CONFIG_HOME",
+                    "XDG_CACHE_HOME", "LANG", "TERM", "PATH"].filter(name =>
+                    process.env[name] !== undefined).map(name => [name, process.env[name]]))
+            };
+            const schemes = [...privilegedSchemes.keys()];
+            const cacheKey = JSON.stringify([files, schemes, rendererProcess]);
+            const cachedEntry = preloadScriptCache.get(cacheKey);
+            if (cachedEntry !== undefined) {
+                preloadScriptCache.delete(cacheKey);
+                preloadScriptCache.set(cacheKey, cachedEntry);
+                return {source: cachedEntry.script, etag: cachedEntry.etag};
+            }
+            const preloads = paths.map((file, index) =>
+                `window.__NEXA_ELECTRON_PRELOAD_BASE__=${JSON.stringify(files[index].absolute)};\n` +
+                readPreload(file, files[index])).join("\n");
             const bridge = `(() => {
-                const schemes = new Set(${JSON.stringify([...privilegedSchemes.keys()])});
+                const schemes = new Set(${JSON.stringify(schemes)});
                 const ipc = window.nexaElectron?.ipcRenderer;
                 if (!schemes.size || !ipc || typeof window.fetch !== "function") return;
                 const originalFetch = window.fetch.bind(window);
@@ -221,7 +264,24 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                     });
                 };
             })();`;
-            return preloads ? `${preloads}\n${bridge}` : bridge;
+            const processSetup = `window.__NEXA_ELECTRON_PROCESS__=${JSON.stringify(rendererProcess)};` +
+                `if(window.process){Object.assign(window.process,window.__NEXA_ELECTRON_PROCESS__);` +
+                `window.process.env=window.__NEXA_ELECTRON_PROCESS__.env;}`;
+            const script = `${processSetup}\n${preloads}\n${bridge}`;
+            const scriptBytes = Buffer.byteLength(script);
+            const etag = `"${createHash("sha256").update(script).digest("hex")}"`;
+            if (scriptBytes <= maxPreloadScriptCacheBytes) {
+                preloadScriptCache.set(cacheKey, {script, etag, bytes: scriptBytes});
+                preloadScriptCacheBytes += scriptBytes;
+                while (preloadScriptCache.size > 2 ||
+                    preloadScriptCacheBytes > maxPreloadScriptCacheBytes) {
+                    const oldestKey = preloadScriptCache.keys().next().value;
+                    const oldest = preloadScriptCache.get(oldestKey);
+                    preloadScriptCacheBytes -= oldest.bytes;
+                    preloadScriptCache.delete(oldestKey);
+                }
+            }
+            return {source: script, etag};
         }
 
         loadFile(file, options = {}) {
@@ -316,12 +376,38 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         destroy() {
             this.finishLoad(new Error("window was destroyed"));
             this.destroyed = true;
+            const fileHandleFds = new Set();
+            for (const [id, entry] of fsHandles) {
+                if (entry.windowId !== this.id) continue;
+                fsHandles.delete(id);
+                fileHandleFds.add(entry.handle.fd);
+                fsFds.delete(entry.handle.fd);
+                void entry.handle.close().catch(() => {});
+            }
+            for (const [fd, owner] of fsFds) {
+                if (owner !== this.id) continue;
+                fsFds.delete(fd);
+                if (fileHandleFds.has(fd)) continue;
+                try { fs.closeSync(fd); } catch (_) {}
+            }
+            for (const [id, entry] of fsStreams) {
+                if (entry.windowId !== this.id) continue;
+                fsStreams.delete(id);
+                entry.stream.destroy();
+            }
+            for (const [id, entry] of nativeModules) {
+                if (entry.windowId === this.id) nativeModules.delete(id);
+            }
+            for (const [id, entry] of nativeObjectHandles) {
+                if (entry.windowId === this.id) nativeObjectHandles.delete(id);
+            }
             windows.delete(this.id);
             this.webContents.destroyed = true;
             contents.delete(this.id);
             this.webContents.emit("destroyed");
             this.emit("closed");
             emit({event: "windowClosed", windowId: this.id});
+            removeElectronEventSubscriptions(this.id);
             if (activeWindow === this) activeWindow = windows.values().next().value || null;
         }
 
@@ -386,7 +472,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
     let userDataPath = process.env.NEXA_ELECTRON_USER_DATA ||
         path.join(process.env.HOME || appRoot, ".config", "nexa", "apps", appName);
     const pathOverrides = new Map();
-    function readPreload(file) {
+    function preloadFileInfo(file) {
         const absolute = path.resolve(appRoot, file);
         let realFile;
         try {
@@ -394,14 +480,22 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         } catch (_) {
             throw new Error(`Electron preload does not exist: ${file}`);
         }
-        if (isTrustedPath(realFile)) return fs.readFileSync(realFile, "utf8");
-        try {
-            const realUserData = fs.realpathSync(userDataPath);
-            if (realFile.startsWith(realUserData + path.sep)) {
-                return fs.readFileSync(realFile, "utf8");
-            }
-        } catch (_) {}
-        throw new Error(`Electron preload is outside the app and user data directories: ${file}`);
+        let trusted = isTrustedPath(realFile);
+        if (!trusted) {
+            try {
+                const realUserData = fs.realpathSync(userDataPath);
+                trusted = realFile.startsWith(realUserData + path.sep);
+            } catch (_) {}
+        }
+        if (!trusted) {
+            throw new Error(`Electron preload is outside the app and user data directories: ${file}`);
+        }
+        const stat = fs.statSync(realFile);
+        return {absolute, realFile, size: stat.size, mtimeMs: stat.mtimeMs};
+    }
+
+    function readPreload(file, info = preloadFileInfo(file)) {
+        return fs.readFileSync(info.realFile, "utf8");
     }
     let previousCpu = process.cpuUsage();
     let previousCpuTime = process.hrtime.bigint();
@@ -409,7 +503,15 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
     app.whenReady = () => ready ? Promise.resolve(app) : new Promise(resolve => {
         app.once("ready", () => resolve(app));
     });
-    app.quit = () => emit({event: "appQuit"});
+    app.quit = () => {
+        let prevented = false;
+        app.emit("before-quit", {preventDefault() { prevented = true; }});
+        if (prevented) return;
+        app.emit("will-quit", {preventDefault() { prevented = true; }});
+        if (prevented) return;
+        app.emit("quit", 0);
+        emit({event: "appQuit"});
+    };
     app.exit = code => emit({event: "appExit", code});
     app.relaunch = options => emit({event: "appRelaunch", options});
     app.name = appName;
@@ -466,6 +568,39 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         }
         return value;
     };
+    ipcMain.on("nexa:electron:app:getPath", (event, name) => {
+        try { event.returnValue = app.getPath(name); }
+        catch (error) { event.returnValue = encodeFsError(error); }
+    });
+    ipcMain.on("nexa:electron:app:getVersion", event => {
+        event.returnValue = app.getVersion();
+    });
+    ipcMain.on("nexa:electron:app:getName", event => {
+        event.returnValue = app.getName();
+    });
+    ipcMain.on("nexa:electron:app:getAppPath", event => {
+        event.returnValue = app.getAppPath();
+    });
+    ipcMain.on("nexa:electron:webFrame:setZoomFactor", (event, factor) => {
+        try { event.sender?.setZoomFactor(factor); }
+        catch (error) { event.returnValue = encodeFsError(error); }
+    });
+    ipcMain.on("nexa:electron:webFrame:clearCache", event => {
+        emit({event: "nativeCall", windowId: event.sender?.id,
+            method: "webFrame.clearCache", args: []});
+    });
+    ipcMain.on("nexa:electron:crashReporter:getParameters", event => {
+        event.returnValue = crashReporter.getParameters();
+    });
+    ipcMain.on("nexa:electron:crashReporter:addExtraParameter", (event, key, value) => {
+        crashReporter.addExtraParameter(key, value);
+    });
+    ipcMain.on("nexa:electron:crashReporter:removeExtraParameter", (event, key) => {
+        crashReporter.removeExtraParameter(key);
+    });
+    ipcMain.on("nexa:electron:crashReporter:start", (_event, options) => {
+        crashReporter.start(options);
+    });
     app.setPath = (name, value) => {
         if (!Object.hasOwn({home: 1, appData: 1, userData: 1, sessionData: 1,
             cache: 1, downloads: 1, documents: 1, desktop: 1, pictures: 1,
@@ -482,6 +617,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         }
         pathOverrides.set(name, value);
         if (name === "userData") userDataPath = value;
+        canonicalFsRoots.clear();
     };
     app.setName = name => {
         appName = String(name);
@@ -492,6 +628,50 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
     app.setAppUserModelId = () => {};
     app.requestSingleInstanceLock = () => true;
     app.commandLine = {appendSwitch() {}, appendArgument() {}};
+
+    function encodeElectronEventArg(value) {
+        if (value instanceof BrowserWindow) {
+            return {__nexaType: "BrowserWindow", id: value.id, title: value.getTitle()};
+        }
+        if (value && contents.get(value.id) === value) {
+            return {__nexaType: "WebContents", id: value.id, title: value.getTitle()};
+        }
+        return encodeFsValue(value);
+    }
+
+    function removeElectronEventSubscriptions(ownerWindowId) {
+        for (const [id, subscription] of electronEventSubscriptions) {
+            if (subscription.ownerWindowId !== ownerWindowId) continue;
+            subscription.target.removeListener(subscription.eventName, subscription.listener);
+            electronEventSubscriptions.delete(id);
+        }
+    }
+
+    ipcMain.on("nexa:electron:event:subscribe", (event, targetType, targetId, eventName) => {
+        if (typeof eventName !== "string" || eventName.length > 128) return;
+        const ownerWindowId = event.sender?.id;
+        if (!Number.isInteger(ownerWindowId)) return;
+        const target = targetType === "app" ? app
+            : targetType === "window" ? windows.get(targetId)
+            : targetType === "webContents" ? contents.get(targetId) : null;
+        if (!target || typeof target.on !== "function") return;
+        const id = ++nextElectronEventSubscriptionId;
+        const listener = (...args) => event.sender?.send("__nexa:electron:event",
+            targetType, targetId, eventName, args.map(encodeElectronEventArg));
+        electronEventSubscriptions.set(id, {ownerWindowId, target, eventName, listener});
+        target.on(eventName, listener);
+    });
+
+    ipcMain.on("nexa:electron:windows:list", event => {
+        event.returnValue = [...windows.values()].map(window => ({
+            id: window.id, title: window.getTitle()
+        }));
+    });
+    ipcMain.on("nexa:electron:webContents:list", event => {
+        event.returnValue = [...contents.values()].map(webContents => ({
+            id: webContents.id, title: webContents.getTitle()
+        }));
+    });
 
     const shell = {
         openExternal: url => emit({event: "nativeCall", method: "shell.openExternal", args: [url]}),
@@ -747,6 +927,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             return 0;
         }
     };
+    const crashReporter = createCrashReporter();
     const electron = {
         app,
         process,
@@ -771,7 +952,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         Menu: {buildFromTemplate: template => template, setApplicationMenu() {}},
         protocol,
         powerMonitor: new EventEmitter(),
-        crashReporter: createCrashReporter(),
+        crashReporter,
         nativeImage: {createEmpty: () => ({isEmpty: () => true})}
     };
     globalThis[Symbol.for("nexa.electron.runtime")] = electron;
@@ -795,12 +976,685 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             ipcMain.emit(message.channel, event, ...(message.args || []));
             return undefined;
         }
+        if (message.kind === "batch") {
+            if (!Array.isArray(message.messages) || message.messages.length > 128 ||
+                message.messages.some(item => !item || item.kind !== "send" ||
+                    typeof item.channel !== "string" || !Array.isArray(item.args))) {
+                throw new TypeError("invalid Electron IPC send batch");
+            }
+            let firstError;
+            let hasError = false;
+            for (const item of message.messages) {
+                try {
+                    ipcMain.emit(item.channel, event, ...item.args);
+                } catch (error) {
+                    if (!hasError) {
+                        firstError = error instanceof Error ? error : new Error(String(error));
+                        hasError = true;
+                    }
+                }
+            }
+            if (hasError) throw firstError;
+            return undefined;
+        }
         if (message.kind === "sendSync") {
             ipcMain.emit(message.channel, event, ...(message.args || []));
             return event.returnValue;
         }
         throw new Error(`unsupported Electron IPC kind: ${message.kind}`);
     }
+
+    function decodeFsValue(value) {
+        if (Array.isArray(value)) return value.map(decodeFsValue);
+        if (value && typeof value === "object") {
+            if (value.__nexaType === "BigInt") return BigInt(value.value);
+            if (value.__nexaType === "FileURL") return new URL(value.value);
+            if (value.__nexaType === "Buffer") return Buffer.from(value.data, "base64");
+            if (value.__nexaType === "Uint8Array") return Buffer.from(value.data, "base64");
+            const decoded = {};
+            for (const [key, item] of Object.entries(value)) {
+                if (key !== "__proto__") decoded[key] = decodeFsValue(item);
+            }
+            return decoded;
+        }
+        return value;
+    }
+
+    function encodeFsValue(value) {
+        if (typeof value === "bigint") return {__nexaType: "BigInt", value: value.toString()};
+        if (value instanceof Date) return {__nexaType: "Date", value: value.toISOString()};
+        if (Buffer.isBuffer(value)) return {__nexaType: "Buffer", data: value.toString("base64")};
+        if (ArrayBuffer.isView(value)) {
+            return {__nexaType: "Buffer", data: Buffer.from(value.buffer,
+                value.byteOffset, value.byteLength).toString("base64")};
+        }
+        if (Array.isArray(value)) return value.map(encodeFsValue);
+        if (value instanceof fs.Stats) {
+            const stats = {};
+            for (const key of ["dev", "mode", "nlink", "uid", "gid", "rdev", "ino",
+                "size", "blocks", "atimeMs", "mtimeMs", "ctimeMs", "birthtimeMs",
+                "atimeNs", "mtimeNs", "ctimeNs", "birthtimeNs",
+                "atime", "mtime", "ctime", "birthtime"]) {
+                if (value[key] !== undefined) stats[key] = encodeFsValue(value[key]);
+            }
+            for (const key of ["isFile", "isDirectory", "isBlockDevice", "isCharacterDevice",
+                "isSymbolicLink", "isFIFO", "isSocket"]) stats[key] = value[key]();
+            return {__nexaType: "Stats", value: stats};
+        }
+        if (value instanceof fs.Dirent) {
+            const entry = {name: encodeFsValue(value.name), parentPath: value.parentPath};
+            for (const key of ["isFile", "isDirectory", "isBlockDevice", "isCharacterDevice",
+                "isSymbolicLink", "isFIFO", "isSocket"]) entry[key] = value[key]();
+            return {__nexaType: "Dirent", value: entry};
+        }
+        if (value && typeof value === "object") {
+            const encoded = {};
+            for (const [key, item] of Object.entries(value)) encoded[key] = encodeFsValue(item);
+            return encoded;
+        }
+        return value;
+    }
+
+    function encodeFsError(error) {
+        return {
+            __nexaType: "FsError",
+            value: Object.fromEntries(["name", "message", "code", "errno", "syscall", "path", "dest"]
+                .filter(key => error?.[key] !== undefined)
+                .map(key => [key, String(error[key])]))
+        };
+    }
+
+    function fsAllowedRoots() {
+        const home = process.env.HOME || appRoot;
+        const roots = [appRoot, appPath, resourcesPath, userDataPath,
+            process.env.XDG_CONFIG_HOME || path.join(home, ".config"),
+            process.env.XDG_CACHE_HOME || path.join(home, ".cache"),
+            process.env.TMPDIR || "/tmp", ...pathOverrides.values()];
+        const appModulesPath = path.resolve(path.dirname(appPath), "..", "modules");
+        if (isTrustedPath(appModulesPath)) roots.push(appModulesPath);
+        for (const name of ["downloads", "documents", "desktop", "pictures", "videos", "music"]) {
+            roots.push(pathOverrides.get(name) || path.join(home,
+                name[0].toUpperCase() + name.slice(1)));
+        }
+        return [...new Set(roots.map(value => path.resolve(value)))];
+    }
+
+    function canonicalFsRoot(root) {
+        if (canonicalFsRoots.has(root)) return canonicalFsRoots.get(root);
+        let canonical = root;
+        try { canonical = fs.realpathSync(root); }
+        catch (_) {}
+        canonicalFsRoots.set(root, canonical);
+        return canonical;
+    }
+
+    function assertFsPath(value) {
+        const target = value instanceof URL ? fileURLToPath(value)
+            : Buffer.isBuffer(value) ? value.toString() : value;
+        if (typeof target !== "string" || !target) {
+            throw new TypeError("filesystem paths must be strings or buffers");
+        }
+        const absolute = path.resolve(target);
+        const roots = fsAllowedRoots();
+        const within = (candidate, root) => {
+            const relative = path.relative(root, candidate);
+            return relative === "" || (!relative.startsWith(`..${path.sep}`) &&
+                relative !== ".." && !path.isAbsolute(relative));
+        };
+        if (!roots.some(root => within(absolute, root))) {
+            const error = new Error(`filesystem access outside app data is blocked: ${target}`);
+            error.code = "EACCES";
+            error.path = target;
+            throw error;
+        }
+
+        let existing = absolute;
+        while (!fs.existsSync(existing)) {
+            const parent = path.dirname(existing);
+            if (parent === existing) break;
+            existing = parent;
+        }
+        let canonical;
+        try {
+            canonical = path.resolve(fs.realpathSync(existing), path.relative(existing, absolute));
+        } catch (_) {
+            canonical = existing;
+        }
+        const canonicalRoots = roots.map(canonicalFsRoot);
+        if (!canonicalRoots.some(root => within(canonical, root))) {
+            const error = new Error(`filesystem path resolves outside app data: ${target}`);
+            error.code = "EACCES";
+            error.path = target;
+            throw error;
+        }
+        return value;
+    }
+
+    function checkFsPaths(method, args) {
+        const baseMethod = method.replace(/^(?:promises:|callback:)/, "");
+        const pathIndexes = new Set(["copyFile", "copyFileSync", "cp", "cpSync", "link",
+            "linkSync", "rename", "renameSync"].includes(baseMethod) ? [0, 1]
+            : baseMethod === "symlink" || baseMethod === "symlinkSync" ? [1]
+            : ["close", "closeSync", "read", "readSync", "write", "writeSync",
+                "fchmod", "fchmodSync", "fchown", "fchownSync", "fdatasync",
+                "fdatasyncSync", "fstat", "fstatSync", "fsync", "fsyncSync",
+                "ftruncate", "ftruncateSync", "futimes", "futimesSync"].includes(baseMethod)
+                ? [] : [0]);
+        for (const index of pathIndexes) {
+            if (args[index] !== undefined && typeof args[index] !== "number") {
+                args[index] = assertFsPath(args[index]);
+            }
+        }
+        return args;
+    }
+
+    let nextFsHandleId = 0;
+    const fsHandles = new Map();
+    const fsFds = new Map();
+    function trackFsFd(fd, windowId) {
+        fsFds.set(fd, windowId);
+    }
+    function assertFsFd(fd, windowId) {
+        if (!Number.isInteger(fd) || !fsFds.has(fd) || fsFds.get(fd) !== windowId) {
+            const error = new Error("filesystem descriptor is not owned by this window");
+            error.code = "EBADF";
+            throw error;
+        }
+    }
+    const fsFdMethods = new Set(["close", "closeSync", "fchmod", "fchmodSync", "fchown",
+        "fchownSync", "fdatasync", "fdatasyncSync", "fstat", "fstatSync", "fsync",
+        "fsyncSync", "ftruncate", "ftruncateSync", "futimes", "futimesSync", "read",
+        "readSync", "readv", "readvSync", "write", "writeSync", "writev", "writevSync"]);
+    function fsMethod(method, args = [], windowId = null) {
+        if (typeof method === "string" && method.startsWith("callback:")) {
+            const callbackMethod = method.slice("callback:".length);
+            if (callbackMethod === "exists") {
+                return fs.promises.access(...checkFsPaths(method, decodeFsValue(args))).then(
+                    () => ({__nexaType: "CallbackValues", values: [true]}),
+                    () => ({__nexaType: "CallbackValues", values: [false]}));
+            }
+            if (typeof fs[callbackMethod] !== "function") {
+                throw new TypeError(`unsupported Node fs callback method: ${callbackMethod}`);
+            }
+            const decoded = checkFsPaths(method, decodeFsValue(args));
+            if (fsFdMethods.has(callbackMethod)) assertFsFd(decoded[0], windowId);
+            return new Promise((resolve, reject) => {
+                fs[callbackMethod](...decoded, (error, ...values) => {
+                    if (error) reject(error);
+                    else if (callbackMethod === "open") {
+                        trackFsFd(values[0], windowId);
+                        resolve({__nexaType: "CallbackValues", values});
+                    }
+                    else if (callbackMethod === "close") {
+                        fsFds.delete(decoded[0]);
+                        resolve({__nexaType: "CallbackValues", values});
+                    }
+                    else if (callbackMethod === "read") {
+                        resolve({__nexaType: "FsReadResult", value: values[0],
+                            buffer: encodeFsValue(values[1])});
+                    }
+                    else if (callbackMethod === "readv") {
+                        resolve({__nexaType: "FsReadvResult", value: values[0],
+                            buffers: encodeFsValue(decoded[1])});
+                    }
+                    else resolve({__nexaType: "CallbackValues", values});
+                });
+            });
+        }
+        if (typeof method !== "string" || method.startsWith("_") ||
+            method === "promises" || method === "constants") {
+            throw new TypeError(`unsupported Node fs method: ${method}`);
+        }
+        const decoded = checkFsPaths(method, decodeFsValue(args));
+        if (method.startsWith("promises:")) {
+            const promiseMethod = method.slice("promises:".length);
+            if (typeof fs.promises[promiseMethod] !== "function") {
+                throw new TypeError(`unsupported Node fs promise method: ${promiseMethod}`);
+            }
+            if (promiseMethod === "open") {
+                return fs.promises.open(...decoded).then(handle => {
+                    const id = ++nextFsHandleId;
+                    trackFsFd(handle.fd, windowId);
+                    fsHandles.set(id, {handle, windowId});
+                    return {__nexaType: "FileHandle", id, fd: handle.fd};
+                });
+            }
+            return fs.promises[promiseMethod](...decoded);
+        }
+        if (method === "exists") return fs.promises.access(...decoded).then(() => true, () => false);
+        if (typeof fs[method] !== "function") {
+            throw new TypeError(`unsupported Node fs method: ${method}`);
+        }
+        if (fsFdMethods.has(method)) assertFsFd(decoded[0], windowId);
+        const result = fs[method](...decoded);
+        if (method === "openSync") trackFsFd(result, windowId);
+        else if (method === "closeSync") fsFds.delete(decoded[0]);
+        return result;
+    }
+
+    function nativeDescriptor(value, moduleId, windowId, propertyPath = [], depth = 0) {
+        if (typeof value === "function") {
+            let constructable = false;
+            try { Reflect.construct(function() {}, [], value); constructable = true; }
+            catch (_) {}
+            const descriptor = {__nexaType: "NativeFunction", path: propertyPath,
+                async: value.constructor?.name === "AsyncFunction", constructable, entries: {}};
+            if (depth > 4) return descriptor;
+            for (const key of Object.keys(value).slice(0, 256)) {
+                try {
+                    descriptor.entries[key] = nativeDescriptor(value[key], moduleId, windowId,
+                        [...propertyPath, key], depth + 1);
+                } catch (_) {}
+            }
+            return descriptor;
+        }
+        if (value === null || typeof value !== "object") {
+            return encodeFsValue(value);
+        }
+        if (Buffer.isBuffer(value) || value instanceof Date || ArrayBuffer.isView(value)) {
+            return encodeFsValue(value);
+        }
+        if (depth > 4) {
+            const objectId = ++nextNativeObjectId;
+            nativeObjectHandles.set(objectId, {moduleId, windowId, value});
+            return {__nexaType: "NativeRemoteObject", objectId, entries: {}};
+        }
+        if (Array.isArray(value)) {
+            return value.slice(0, 256).map((item, index) =>
+                nativeDescriptor(item, moduleId, windowId,
+                    [...propertyPath, index], depth + 1));
+        }
+        const prototype = Object.getPrototypeOf(value);
+        if (prototype && prototype !== Object.prototype) {
+            const objectId = ++nextNativeObjectId;
+            nativeObjectHandles.set(objectId, {moduleId, windowId, value});
+            const entries = {};
+            const keys = new Set();
+            for (let current = value; current && current !== Object.prototype;
+                 current = Object.getPrototypeOf(current)) {
+                for (const key of Object.getOwnPropertyNames(current)) {
+                    if (key !== "constructor") keys.add(key);
+                }
+            }
+            for (const key of [...keys].slice(0, 256)) {
+                try {
+                    entries[key] = nativeDescriptor(value[key], moduleId, windowId,
+                        [key], depth + 1);
+                } catch (_) {}
+            }
+            return {__nexaType: "NativeRemoteObject", objectId, entries};
+        }
+        const descriptor = {__nexaType: "NativeObject", entries: {}};
+        for (const key of Object.keys(value).slice(0, 256)) {
+            try {
+                descriptor.entries[key] = nativeDescriptor(value[key], moduleId, windowId,
+                    [...propertyPath, key], depth + 1);
+            } catch (_) {}
+        }
+        return descriptor;
+    }
+
+    function nativeArguments(value, event, moduleId, onceCallback = false) {
+        if (Array.isArray(value)) return value.map(item =>
+            nativeArguments(item, event, moduleId, onceCallback));
+        if (value && typeof value === "object" && value.__nexaType === "NativeReference") {
+            const reference = nativeObjectHandles.get(value.objectId);
+            if (!reference || reference.windowId !== event.sender?.id ||
+                reference.moduleId !== value.moduleId) {
+                throw new Error("native object reference is closed");
+            }
+            return reference.value;
+        }
+        if (value && typeof value === "object" && value.__nexaType === "NativeCallback") {
+            return (...args) => {
+                try {
+                    event.sender?.send("__nexa:node:module-callback", moduleId,
+                        value.id, encodeFsValue(args), onceCallback);
+                } catch (_) {}
+            };
+        }
+        if (value && typeof value === "object") {
+            if (value.__nexaType) return decodeFsValue(value);
+            return Object.fromEntries(Object.entries(value).map(([key, item]) =>
+                [key, nativeArguments(item, event, moduleId, onceCallback)]));
+        }
+        return value;
+    }
+
+    function nativeMethod(entry, objectId, propertyPath, windowId) {
+        let owner = null;
+        let value = entry.exports;
+        if (objectId !== null && objectId !== undefined) {
+            const reference = nativeObjectHandles.get(objectId);
+            if (!reference || reference.windowId !== windowId ||
+                reference.moduleId !== entry.id) {
+                throw new Error("native object reference is closed");
+            }
+            value = reference.value;
+        }
+        for (const key of propertyPath) {
+            owner = value;
+            value = value?.[key];
+        }
+        if (typeof value !== "function") throw new TypeError("native module export is not callable");
+        return {owner, value};
+    }
+
+    ipcMain.on("nexa:node:module:load", (event, specifier, baseFile) => {
+        try {
+            if (typeof specifier !== "string" || specifier.length > 4096 ||
+                typeof baseFile !== "string") {
+                throw new TypeError("native module request is invalid");
+            }
+            const resolved = resolveRendererModule(specifier, baseFile);
+            const windowId = event.sender?.id;
+            let id = [...nativeModules].find(([, item]) =>
+                item.windowId === windowId && item.filename === resolved)?.[0];
+            if (id === undefined) {
+                id = ++nextNativeModuleId;
+                nativeModules.set(id, {
+                    id, windowId, filename: resolved, exports: require(resolved)
+                });
+            }
+            event.returnValue = {id, exports: nativeDescriptor(
+                nativeModules.get(id).exports, id, windowId)};
+        } catch (error) {
+            event.returnValue = encodeFsError(error);
+        }
+    });
+
+    function resolveRendererModule(specifier, baseFile) {
+        let base = path.resolve(baseFile);
+        const archiveMatch = /^(.*?\.asar)(?:[\\/](.*))?$/.exec(base);
+        if (archiveMatch && fs.existsSync(archiveMatch[1])) {
+            base = path.join(resolveAsar(archiveMatch[1]), archiveMatch[2] || "");
+        }
+        base = fs.realpathSync(base);
+        if (!isTrustedPath(base)) {
+            throw new Error("renderer module base is outside the installed app");
+        }
+        const requireFrom = Module.createRequire(base);
+        const resolved = requireFrom.resolve(specifier);
+        if (Module.builtinModules.includes(specifier) || specifier.startsWith("node:")) {
+            return specifier;
+        }
+        const realPath = fs.realpathSync(resolved);
+        if (!isTrustedPath(realPath)) {
+            throw new Error("renderer module is outside the installed app");
+        }
+        return realPath;
+    }
+
+    ipcMain.on("nexa:node:module:resolve", (event, specifier, baseFile) => {
+        try {
+            if (typeof specifier !== "string" || specifier.length > 4096 ||
+                typeof baseFile !== "string") {
+                throw new TypeError("module resolution request is invalid");
+            }
+            const resolved = resolveRendererModule(specifier, baseFile);
+            if (Module.builtinModules.includes(resolved) || resolved.startsWith("node:")) {
+                event.returnValue = {builtin: resolved};
+            } else {
+                event.returnValue = {filename: resolved};
+            }
+        } catch (error) {
+            event.returnValue = encodeFsError(error);
+        }
+    });
+
+    ipcMain.on("nexa:node:module:source", (event, filename) => {
+        try {
+            if (typeof filename !== "string" || !isTrustedPath(filename)) {
+                throw new Error("renderer module source is outside the installed app");
+            }
+            const resolved = fs.realpathSync(filename);
+            if (!isTrustedPath(resolved) || !/\.(?:c?js|json)$/i.test(resolved)) {
+                throw new Error("renderer module source type is unsupported");
+            }
+            event.returnValue = fs.readFileSync(resolved, "utf8");
+        } catch (error) {
+            event.returnValue = encodeFsError(error);
+        }
+    });
+
+    ipcMain.on("nexa:node:module:call", (event, id, objectId, propertyPath, args) => {
+        const entry = nativeModules.get(id);
+        if (!entry || entry.windowId !== event.sender?.id) {
+            event.returnValue = encodeFsError(Object.assign(
+                new Error("native module is closed"), {code: "ERR_NATIVE_MODULE_CLOSED"}));
+            return;
+        }
+        try {
+            const {owner, value} = nativeMethod(entry, objectId, propertyPath, event.sender?.id);
+            const onceCallback = propertyPath.at(-1) === "once" ||
+                propertyPath.at(-1) === "prependOnceListener";
+            const result = value.apply(owner,
+                nativeArguments(args, event, id, onceCallback));
+            if (result && typeof result.then === "function") {
+                throw new TypeError("native addon returned a promise from a synchronous export");
+            }
+            event.returnValue = {__nexaType: "NativeResult",
+                value: nativeDescriptor(result, id, entry.windowId)};
+        } catch (error) {
+            event.returnValue = encodeFsError(error);
+        }
+    });
+
+    ipcMain.on("nexa:node:module:release-object", (event, id, objectId) => {
+        const entry = nativeObjectHandles.get(objectId);
+        if (entry?.moduleId === id && entry.windowId === event.sender?.id) {
+            nativeObjectHandles.delete(objectId);
+        }
+    });
+
+    ipcMain.on("nexa:node:module:construct", (event, id, propertyPath, args) => {
+        const entry = nativeModules.get(id);
+        if (!entry || entry.windowId !== event.sender?.id) {
+            event.returnValue = encodeFsError(Object.assign(
+                new Error("native module is closed"), {code: "ERR_NATIVE_MODULE_CLOSED"}));
+            return;
+        }
+        try {
+            const {value} = nativeMethod(entry, null, propertyPath, event.sender?.id);
+            const instance = Reflect.construct(value, nativeArguments(args, event, id));
+            event.returnValue = {__nexaType: "NativeResult",
+                value: nativeDescriptor(instance, id, entry.windowId)};
+        } catch (error) {
+            event.returnValue = encodeFsError(error);
+        }
+    });
+
+    ipcMain.handle("nexa:node:module:invoke", async (event, id, objectId, propertyPath, args) => {
+        const entry = nativeModules.get(id);
+        if (!entry || entry.windowId !== event.sender?.id) {
+            return encodeFsError(Object.assign(
+                new Error("native module is closed"), {code: "ERR_NATIVE_MODULE_CLOSED"}));
+        }
+        try {
+            const {owner, value} = nativeMethod(entry, objectId, propertyPath, event.sender?.id);
+            const onceCallback = propertyPath.at(-1) === "once" ||
+                propertyPath.at(-1) === "prependOnceListener";
+            const result = await value.apply(owner,
+                nativeArguments(args, event, id, onceCallback));
+            return {__nexaType: "NativeResult",
+                value: nativeDescriptor(result, id, entry.windowId)};
+        } catch (error) {
+            return encodeFsError(error);
+        }
+    });
+
+    ipcMain.handle("nexa:node:fs", async (_event, method, args) => {
+        try {
+            return encodeFsValue(await fsMethod(method, args, _event.sender?.id ?? null));
+        } catch (error) {
+            return encodeFsError(error);
+        }
+    });
+    ipcMain.on("nexa:node:fs-handle:release", (event, id) => {
+        const entry = fsHandles.get(id);
+        if (!entry || entry.windowId !== (event.sender?.id ?? null)) return;
+        fsHandles.delete(id);
+        fsFds.delete(entry.handle.fd);
+        void entry.handle.close().catch(() => {});
+    });
+    ipcMain.handle("nexa:node:fs-handle", async (event, id, method, args) => {
+        const entry = fsHandles.get(id);
+        if (!entry || entry.windowId !== (event.sender?.id ?? null)) {
+            return encodeFsError(Object.assign(new Error("filesystem handle is closed"), {
+                code: "EBADF"
+            }));
+        }
+        if (typeof method !== "string" || method.startsWith("_") ||
+            !["appendFile", "chmod", "chown", "close", "datasync", "read", "readFile",
+                "readv", "stat", "sync", "truncate", "utimes", "write",
+                "writeFile", "writev"].includes(method) || typeof entry.handle[method] !== "function") {
+            return encodeFsError(new TypeError(`unsupported Node FileHandle method: ${method}`));
+        }
+        try {
+            const result = encodeFsValue(await entry.handle[method](...decodeFsValue(args)));
+            if (method === "close") {
+                fsHandles.delete(id);
+                fsFds.delete(entry.handle.fd);
+            }
+            return result;
+        } catch (error) {
+            return encodeFsError(error);
+        }
+    });
+    ipcMain.on("nexa:node:fs-sync", (event, method, args) => {
+        if (method === "constants") {
+            event.returnValue = encodeFsValue(fs.constants);
+            return;
+        }
+        if (method === "exists") {
+            event.returnValue = fs.existsSync(...checkFsPaths(method, decodeFsValue(args)));
+            return;
+        }
+        if (method === "readSync") {
+            const decoded = checkFsPaths(method, decodeFsValue(args));
+            try {
+                assertFsFd(decoded[0], event.sender?.id ?? null);
+                const value = fs.readSync(...decoded);
+                event.returnValue = {__nexaType: "FsReadResult", value,
+                    buffer: encodeFsValue(decoded[1])};
+            } catch (error) {
+                event.returnValue = encodeFsError(error);
+            }
+            return;
+        }
+        if (method === "readvSync") {
+            const decoded = checkFsPaths(method, decodeFsValue(args));
+            try {
+                assertFsFd(decoded[0], event.sender?.id ?? null);
+                const value = fs.readvSync(...decoded);
+                event.returnValue = {__nexaType: "FsReadvResult", value,
+                    buffers: encodeFsValue(decoded[1])};
+            } catch (error) {
+                event.returnValue = encodeFsError(error);
+            }
+            return;
+        }
+        if (typeof method !== "string" || !method.endsWith("Sync")) {
+            throw new TypeError(`unsupported synchronous Node fs method: ${method}`);
+        }
+        try {
+            event.returnValue = encodeFsValue(fsMethod(method, args, event.sender?.id ?? null));
+        } catch (error) {
+            event.returnValue = encodeFsError(error);
+        }
+    });
+    let nextFsStreamId = 0;
+    const fsStreams = new Map();
+    ipcMain.handle("nexa:node:fs-stream", async (event, action, id, args) => {
+        if (action === "openRead") {
+            const streamArgs = checkFsPaths("createReadStream", decodeFsValue(args));
+            if (streamArgs[1]?.fd !== undefined) {
+                assertFsFd(streamArgs[1].fd, event.sender?.id ?? null);
+            }
+            const stream = fs.createReadStream(...streamArgs);
+            try {
+                if (streamArgs[1]?.fd === undefined) {
+                await new Promise((resolve, reject) => {
+                    stream.once("open", resolve);
+                    stream.once("error", reject);
+                });
+                }
+            } catch (error) {
+                stream.destroy();
+                throw error;
+            }
+            const streamId = ++nextFsStreamId;
+            fsStreams.set(streamId, {type: "read", stream,
+                windowId: event.sender?.id ?? null,
+                iterator: stream[Symbol.asyncIterator]()});
+            stream.on("error", () => fsStreams.delete(streamId));
+            if (streamArgs[1]?.fd !== undefined && streamArgs[1]?.autoClose !== false) {
+                stream.once("close", () => fsFds.delete(streamArgs[1].fd));
+            }
+            return streamId;
+        }
+        if (action === "openWrite") {
+            const streamArgs = checkFsPaths("createWriteStream", decodeFsValue(args));
+            if (streamArgs[1]?.fd !== undefined) {
+                assertFsFd(streamArgs[1].fd, event.sender?.id ?? null);
+            }
+            const stream = fs.createWriteStream(...streamArgs);
+            try {
+                if (streamArgs[1]?.fd === undefined) {
+                await new Promise((resolve, reject) => {
+                    stream.once("open", resolve);
+                    stream.once("error", reject);
+                });
+                }
+            } catch (error) {
+                stream.destroy();
+                throw error;
+            }
+            const streamId = ++nextFsStreamId;
+            fsStreams.set(streamId, {type: "write", stream,
+                windowId: event.sender?.id ?? null});
+            stream.on("error", () => fsStreams.delete(streamId));
+            if (streamArgs[1]?.fd !== undefined && streamArgs[1]?.autoClose !== false) {
+                stream.once("close", () => fsFds.delete(streamArgs[1].fd));
+            }
+            return streamId;
+        }
+        const entry = fsStreams.get(id);
+        if (!entry) {
+            if (action === "close") return true;
+            throw new Error("filesystem stream is closed");
+        }
+        if (entry.windowId !== (event.sender?.id ?? null)) {
+            throw new Error("filesystem stream belongs to another window");
+        }
+        if (action === "read" && entry.type === "read") {
+            const result = await entry.iterator.next();
+            if (result.done) {
+                fsStreams.delete(id);
+                return {done: true};
+            }
+            return {done: false, value: encodeFsValue(result.value)};
+        }
+        if (action === "write" && entry.type === "write") {
+            await new Promise((resolve, reject) => entry.stream.write(
+                decodeFsValue(args)[0], error => error ? reject(error) : resolve()));
+            return true;
+        }
+        if (action === "end" && entry.type === "write") {
+            await new Promise((resolve, reject) => {
+                entry.stream.once("error", reject);
+                entry.stream.end(error => error ? reject(error) : resolve());
+            });
+            fsStreams.delete(id);
+            return true;
+        }
+        if (action === "close") {
+            fsStreams.delete(id);
+            entry.stream.destroy();
+            return true;
+        }
+        throw new TypeError(`unsupported filesystem stream action: ${action}`);
+    });
 
     async function dispatchProtocolRequest(message) {
         const window = windows.get(message.windowId) || activeWindow;
@@ -936,6 +1790,6 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
 
     return {
         electron, dispatch, dispatchProtocolRequest, dispatchRendererEvent, runMain, windowCommand,
-        getPreload(windowId) { return windows.get(windowId)?.getPreloadScript() ?? null; }
+        getPreload(windowId) { return windows.get(windowId)?.getPreloadResponse() ?? null; }
     };
 }

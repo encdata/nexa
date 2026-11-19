@@ -245,6 +245,7 @@ function linkElectronModules(archivePath, extractedRoot) {
         linkedModuleArchives.add(key);
         return;
     }
+    extractedRoots.add(fs.realpathSync(modulesRoot));
     const nodeModules = path.join(extractedRoot, "node_modules");
     fs.mkdirSync(nodeModules, {recursive: true});
 
@@ -397,24 +398,31 @@ const server = http.createServer((request, response) => {
             response.writeHead(403).end();
             return;
         }
-        let preload;
+        let preloadResponse;
         try {
-            preload = electronHost.getPreload(Number(preloadMatch[1]));
+            preloadResponse = electronHost.getPreload(Number(preloadMatch[1]));
         } catch (error) {
             response.writeHead(500, {"Content-Type": "application/json; charset=utf-8"});
             response.end(JSON.stringify({error: error.message || String(error)}));
             return;
         }
-        if (preload === null) {
+        if (preloadResponse === null) {
             response.writeHead(404).end();
             return;
         }
-        response.writeHead(200, {
+        const {source: preload, etag} = preloadResponse;
+        const headers = {
             "Content-Type": "text/javascript; charset=utf-8",
-            "Content-Length": Buffer.byteLength(preload),
-            "Cache-Control": "no-store",
+            "Cache-Control": "private, no-cache",
+            "ETag": etag,
             "X-Content-Type-Options": "nosniff"
-        });
+        };
+        if (request.headers["if-none-match"] === etag) {
+            response.writeHead(304, headers).end();
+            return;
+        }
+        headers["Content-Length"] = Buffer.byteLength(preload);
+        response.writeHead(200, headers);
         response.end(preload);
         return;
     }

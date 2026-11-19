@@ -15,6 +15,8 @@ from xml.sax.saxutils import escape
 from urllib.parse import urljoin, urlsplit
 from urllib.request import urlopen
 
+from shell.x86_runtime import box64_command, node_runtime_path, runner_shell
+
 
 PACKAGE_ROOT = Path.home() / ".local" / "share" / "nexa" / "deb-packages"
 DEPENDENCY_PREFIX = "nexa-dependency-"
@@ -57,25 +59,76 @@ class DebElectronApp(DebApp):
         self.renderer_entry = entry
         self.main_entry = main_entry
         self.website_url = website_url
+        self._native_addon_cache = None
+
+    def _native_addons(self):
+        if self._native_addon_cache is not None:
+            return self._native_addon_cache
+        if not self.archive:
+            self._native_addon_cache = ()
+            return self._native_addon_cache
+        runtime_directory = Path(self.archive).parent.parent
+        roots = (runtime_directory / "modules",
+                 Path(f"{self.archive}.unpacked"))
+        addons = [addon for root in roots if root.is_dir()
+                  for addon in root.rglob("*.node") if addon.is_file()]
+        validated = []
+        for addon in addons:
+            try:
+                with addon.open("rb") as source:
+                    header = source.read(20)
+                    if (len(header) != 20 or header[:4] != b"\x7fELF"
+                            or header[4] != 2 or header[5] != 1
+                            or int.from_bytes(header[18:20], "little") != 62):
+                        continue
+                    validated.append(addon)
+            except OSError:
+                continue
+        self._native_addon_cache = tuple(validated)
+        return self._native_addon_cache
+
+    @property
+    def requires_x86_node(self):
+        return bool(self._native_addons())
+
+    def _node_runtime(self):
+        node = node_runtime_path()
+        runner = shutil.which("glibc-runner")
+        if not self.requires_x86_node or node is None or runner is None:
+            return None, None, dict(self.launch_spec[2])
+        environment = dict(self.launch_spec[2])
+        library_paths = [str(addon.parent) for addon in self._native_addons()]
+        library_paths.extend(environment.get("BOX64_LD_LIBRARY_PATH", "").split(os.pathsep))
+        environment["BOX64_LD_LIBRARY_PATH"] = os.pathsep.join(
+            dict.fromkeys(path for path in library_paths if path))
+        shell = runner_shell()
+        if shell is not None:
+            environment["SHELL"] = shell
+        return [box64_command(), str(node)], runner, environment
 
     def build(self, activity, parent, context=None):
         from shell.electron_host import ElectronRenderer, ElectronWebsiteRenderer
         if self.website_url:
             return ElectronWebsiteRenderer(activity, parent, self.website_url)
+        node, node_runner, host_environment = self._node_runtime()
         return ElectronRenderer(activity, parent, self.archive,
-                                self.renderer_entry, main_entry=self.main_entry,
-                                app_id=self.app_id, app_name=self.name, icon=self.icon)
+                                self.renderer_entry, node=node, main_entry=self.main_entry,
+                                app_id=self.app_id, app_name=self.name, icon=self.icon,
+                                host_environment=host_environment,
+                                node_runner=node_runner)
 
     def build_with_services(self, activity, parent, context, services):
         from shell.electron_host import ElectronRenderer, ElectronWebsiteRenderer
         if self.website_url:
             return ElectronWebsiteRenderer(activity, parent, self.website_url)
+        node, node_runner, host_environment = self._node_runtime()
         return ElectronRenderer(
-            activity, parent, self.archive, self.renderer_entry,
+            activity, parent, self.archive, self.renderer_entry, node=node,
             main_entry=self.main_entry, app_id=self.app_id,
             app_name=self.name, icon=self.icon,
             window_host=services.get("window_host"),
-            close_window=services.get("close_window"))
+            close_window=services.get("close_window"),
+            host_environment=host_environment, node_runner=node_runner)
 
 
 def _asar_header(archive):

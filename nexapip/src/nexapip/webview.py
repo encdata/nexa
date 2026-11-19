@@ -101,6 +101,11 @@ class WebView(View):
         self.a.c.send_msg({"method": "setElectronBackgroundThrottling", "params": {
             "aid": self.a.aid, "id": self.id, "enabled": enabled}})
 
+    def clearcache(self):
+        """Clears this WebView's in-memory browser cache."""
+        self.a.c.send_msg({"method": "clearWebViewCache", "params": {
+            "aid": self.a.aid, "id": self.id}})
+
     def setdata(self, data: str):
         """Sets the document data."""
         self.a.c.send_msg({"method": "setData", "params": {"aid": self.a.aid, "id": self.id, "doc": data}})
