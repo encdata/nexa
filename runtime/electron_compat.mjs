@@ -356,6 +356,9 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.minimized = false;
             this.maximized = false;
             this.resizable = options.resizable !== false;
+            this.menuBarVisible = options.autoHideMenuBar !== true;
+            this.menu = null;
+            this._menuExplicit = false;
             this.webContents = new EventEmitter();
             this.webContents.id = this.id;
             this.webContents.ownerWindowId = this.id;
@@ -436,6 +439,13 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.contentView.addChildView(this.webContentsView);
             app.emit("browser-window-created", {}, this);
             app.emit("web-contents-created", {}, this.webContents);
+            this._syncMenu();
+        }
+
+        _syncMenu() {
+            const menu = this._menuExplicit ? this.menu : applicationMenu;
+            this.webContents.send("__nexa:menu:application",
+                this.menuBarVisible && menu ? serializeMenuItems(menu.items) : []);
         }
 
         notifyState(action, value = {}) {
@@ -654,8 +664,18 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.notifyState("title", {title: this.title});
         }
         getTitle() { return this.title || ""; }
-        setMenuBarVisibility() {}
-        setMenu() {}
+        setMenuBarVisibility(visible) {
+            this.menuBarVisible = Boolean(visible);
+            this._syncMenu();
+        }
+        setMenu(menu) {
+            if (menu !== null && !(menu instanceof Menu)) {
+                throw new TypeError("window menu must be a Menu or null");
+            }
+            this._menuExplicit = true;
+            this.menu = menu;
+            this._syncMenu();
+        }
         setProgressBar() {}
         setBounds(bounds) {
             Object.assign(this.options, bounds);
@@ -1602,6 +1622,9 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                 throw new TypeError("application menu must be a Menu or null");
             }
             applicationMenu = menu;
+            for (const window of windows.values()) {
+                if (!window._menuExplicit) window._syncMenu();
+            }
         }
         static getApplicationMenu() { return applicationMenu; }
         append(item) { this.insert(this.items.length, item); }
@@ -1647,17 +1670,25 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         }
     }
     ipcMain.on("nexa:electron:menu:click", (event, menuId, itemId) => {
-        const menu = popupMenus.get(menuId);
+        const ownerWindow = windows.get(contentsOwners.get(event.sender?.id));
+        const menu = popupMenus.get(menuId) || (menuId === "application"
+            ? ownerWindow?._menuExplicit ? ownerWindow.menu : applicationMenu : null);
         const item = menu?.getMenuItemById(itemId);
         if (!item || !item.enabled || !item.visible || item.type === "separator") return;
         if (item.type === "checkbox") item.checked = !item.checked;
         if (item.type === "radio") item.checked = true;
-        const window = windows.get(contentsOwners.get(event.sender?.id));
-        item.click?.(item, window || null, {
+        item.click?.(item, ownerWindow || null, {
             preventDefault() { this.defaultPrevented = true; },
             defaultPrevented: false
         });
         menu.closePopup();
+    });
+    ipcMain.on("nexa:electron:menu:open-submenu", (event, itemId, x, y) => {
+        const ownerWindow = windows.get(contentsOwners.get(event.sender?.id));
+        const menu = ownerWindow?._menuExplicit ? ownerWindow.menu : applicationMenu;
+        const item = menu?.getMenuItemById(itemId);
+        if (!item?.enabled || !item.visible || !item.submenu) return;
+        item.submenu.popup({webContents: event.sender, x, y});
     });
     ipcMain.on("nexa:electron:menu:closed", (_event, menuId) => {
         popupMenus.get(menuId)?.closePopup();

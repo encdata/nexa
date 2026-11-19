@@ -92,9 +92,11 @@
             source: String(source || "").slice(0, 500),
             line: Number(line) || 0,
             column: Number(column) || 0,
+            stack: String(message?.stack || "").slice(0, 4000),
             frameUrl: String(location.href || "").slice(0, 500),
             isMainFrame: window.top === window,
-            hasRequire: typeof window.require === "function"
+            hasRequire: typeof window.require === "function",
+            hasRequireIdentifier: typeof require === "function"
         };
         const key = `${detail.type}:${detail.message}:${detail.source}:${detail.line}`;
         if (rendererErrorCount >= 40 || reportedErrors.has(key)) return;
@@ -106,7 +108,7 @@
     }
 
     window.addEventListener("error", event => {
-        reportRendererError("error", event.message, event.filename,
+        reportRendererError("error", event.error || event.message, event.filename,
             event.lineno, event.colno);
     }, true);
     window.addEventListener("unhandledrejection", event => {
@@ -115,6 +117,20 @@
             reason?.stack || reason?.message || reason,
             location.href);
     });
+    for (const WorkerType of [window.Worker, window.SharedWorker]) {
+        if (typeof WorkerType !== "function") continue;
+        const workerProxy = new Proxy(WorkerType, {
+            construct(target, args, newTarget) {
+                const worker = Reflect.construct(target, args, newTarget);
+                worker.addEventListener("error", event => reportRendererError(
+                    "worker-error", event.message || "worker failed",
+                    event.filename || String(args[0] || ""), event.lineno, event.colno));
+                return worker;
+            }
+        });
+        if (WorkerType === window.Worker) window.Worker = workerProxy;
+        else window.SharedWorker = workerProxy;
+    }
 
     let nextId = 1;
     const pending = new Map();
@@ -1281,6 +1297,7 @@
     };
 
     let menuHost = null;
+    let menuBarHost = null;
     let openMenuId = null;
     let menuCleanup = null;
     function closeMenu(notify = false) {
@@ -1400,6 +1417,48 @@
             };
         }, 0);
     }
+    function showApplicationMenu(items = []) {
+        menuBarHost?.remove();
+        menuBarHost = null;
+        if (!items.length || window.top !== window) return;
+        menuBarHost = document.createElement("div");
+        menuBarHost.style.cssText = "position:fixed;left:0;right:0;top:0;z-index:2147483646;pointer-events:none";
+        const root = menuBarHost.attachShadow({mode: "open"});
+        const style = document.createElement("style");
+        style.textContent = `
+            :host { all: initial; }
+            nav { display:flex; align-items:center; min-height:32px; padding:0 5px;
+                box-sizing:border-box; color:#eee; background:#252526ee;
+                border-bottom:1px solid #444448; font:13px system-ui,sans-serif;
+                direction:ltr; pointer-events:auto; }
+            button { border:0; border-radius:4px; padding:6px 11px; color:inherit;
+                background:transparent; font:inherit; }
+            button:hover, button:focus { background:#414145; outline:0; }
+        `;
+        const bar = document.createElement("nav");
+        bar.setAttribute("role", "menubar");
+        for (const item of items) {
+            if (item.visible === false) continue;
+            const button = document.createElement("button");
+            button.type = "button";
+            button.disabled = item.enabled === false;
+            button.textContent = item.label || item.role || "";
+            button.setAttribute("role", "menuitem");
+            if (item.submenu?.length) button.setAttribute("aria-haspopup", "menu");
+            button.addEventListener("click", () => {
+                if (item.submenu?.length) {
+                    const bounds = button.getBoundingClientRect();
+                    ipcRenderer.send("nexa:electron:menu:open-submenu", item.id,
+                        bounds.left, bounds.bottom);
+                } else {
+                    ipcRenderer.send("nexa:electron:menu:click", "application", item.id);
+                }
+            });
+            bar.appendChild(button);
+        }
+        root.append(style, bar);
+        document.documentElement.appendChild(menuBarHost);
+    }
 
     if (native) native.onmessage = event => {
         let message;
@@ -1419,6 +1478,10 @@
         }
 
         if (message.kind !== "event") return;
+        if (message.channel === "__nexa:menu:application") {
+            showApplicationMenu((message.args || [])[0] || []);
+            return;
+        }
         if (message.channel === "__nexa:menu:popup") {
             const [menuId, items, bounds] = message.args || [];
             showPopupMenu(menuId, items, bounds);
@@ -1500,6 +1563,19 @@
                 });
             }
         },
+        remote: {
+            getCurrentWindow: () => {
+                const id = window.__NEXA_ELECTRON_WINDOW_ID__;
+                return id === undefined ? null : remoteElectronTarget("window", id);
+            },
+            getCurrentWebContents: () => {
+                const id = window.__NEXA_ELECTRON_WINDOW_ID__;
+                return id === undefined ? null : remoteElectronTarget("webContents", id);
+            },
+            getGlobal: name => globalThis[String(name)],
+            require: name => loadCommonJsModule(name,
+                window.__NEXA_ELECTRON_PRELOAD_BASE__)
+        },
         shell: {openExternal: url => ipcRenderer.invoke("shell.openExternal", url)},
         clipboard: {
             readText: (type = "clipboard") => ipcRenderer.sendSync("clipboard.readText", type),
@@ -1568,6 +1644,14 @@
             }
         }
     };
+
+    Object.assign(electron.remote, {
+        app: electron.app,
+        BrowserWindow: electron.BrowserWindow,
+        webContents: electron.webContents,
+        shell: electron.shell,
+        clipboard: electron.clipboard
+    });
 
     const appEvents = new NexaEventEmitter();
     const appOn = appEvents.on;
