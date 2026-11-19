@@ -1217,6 +1217,21 @@ class ElectronRenderer:
     def _handle_native_call(self, message):
         method = message.get("method")
         args = message.get("args") or []
+        if method == "webContents.focus":
+            contents_id = message.get("contentsId")
+            view = self._views.get(contents_id) or self._embedded_views.get(contents_id)
+            if view is not None and not view._closed:
+                view.webview.focus()
+            return
+        if method in ("webContents.goBack", "webContents.goForward"):
+            contents_id = message.get("contentsId")
+            view = self._views.get(contents_id) or self._embedded_views.get(contents_id)
+            if view is not None and not view._closed:
+                if method == "webContents.goBack":
+                    view.webview.goback()
+                else:
+                    view.webview.goforward()
+            return
         if method == "webFrame.clearCache":
             view = self._views.get(message.get("windowId"))
             if view is not None and not view._closed:

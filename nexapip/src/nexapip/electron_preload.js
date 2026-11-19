@@ -1491,6 +1491,15 @@
             if ((message.args || [])[0] === openMenuId) closeMenu();
             return;
         }
+        if (message.channel === "__nexa:menu:renderer-click") {
+            const [localId, itemId, checked] = message.args || [];
+            finishRendererMenu(localId, itemId, checked);
+            return;
+        }
+        if (message.channel === "__nexa:menu:renderer-close") {
+            finishRendererMenu((message.args || [])[0]);
+            return;
+        }
         if (message.channel === "__nexa:execute-js") {
             const [requestId, code] = message.args || [];
             Promise.resolve().then(() => window.eval(String(code))).then(value => {
@@ -1552,8 +1561,103 @@
         }
     };
 
+    let nextRendererMenuId = 0;
+    let nextRendererMenuItemId = 0;
+    const rendererMenus = new Map();
+    class MenuItem {
+        constructor(options = {}) {
+            if (typeof options === "string") options = {label: options};
+            this.id = options.id ?? `nexa-menu-item-${++nextRendererMenuItemId}`;
+            this.label = String(options.label || "");
+            this.role = options.role;
+            this.type = options.type || (options.submenu ? "submenu" : "normal");
+            this.accelerator = options.accelerator;
+            this.enabled = options.enabled !== false;
+            this.visible = options.visible !== false;
+            this.checked = Boolean(options.checked);
+            this.click = options.click;
+            this.submenu = options.submenu instanceof Menu ? options.submenu
+                : Array.isArray(options.submenu) ? Menu.buildFromTemplate(options.submenu) : null;
+        }
+    }
+    class Menu extends NexaEventEmitter {
+        constructor() {
+            super();
+            this.items = [];
+            this._rendererMenuId = null;
+            this._popupCallback = null;
+        }
+        static buildFromTemplate(template) {
+            if (!Array.isArray(template)) throw new TypeError("menu template must be an array");
+            const menu = new Menu();
+            for (const item of template) menu.append(item);
+            return menu;
+        }
+        append(item) { this.insert(this.items.length, item); }
+        insert(position, item) {
+            if (!(item instanceof MenuItem)) item = new MenuItem(item);
+            const index = Math.max(0, Math.min(this.items.length, Number(position) || 0));
+            this.items.splice(index, 0, item);
+        }
+        getMenuItemById(id) {
+            for (const item of this.items) {
+                if (item.id === id) return item;
+                const nested = item.submenu?.getMenuItemById(id);
+                if (nested) return nested;
+            }
+            return null;
+        }
+        popup(options = {}) {
+            if (this._rendererMenuId !== null) this.closePopup();
+            this._rendererMenuId = ++nextRendererMenuId;
+            this._popupCallback = options.callback || null;
+            rendererMenus.set(this._rendererMenuId, this);
+            this.emit("menu-will-show");
+            ipcRenderer.send("nexa:electron:menu:renderer-popup", this._rendererMenuId,
+                serializeRendererMenuItems(this.items), {
+                    x: Number.isFinite(options.x) ? options.x : 0,
+                    y: Number.isFinite(options.y) ? options.y : 0
+                });
+        }
+        closePopup() {
+            if (this._rendererMenuId === null) return;
+            ipcRenderer.send("nexa:electron:menu:renderer-close", this._rendererMenuId);
+            finishRendererMenu(this._rendererMenuId);
+        }
+    }
+    function serializeRendererMenuItems(items) {
+        return items.map(item => ({
+            id: item.id,
+            label: item.label,
+            role: item.role,
+            type: item.type,
+            accelerator: item.accelerator,
+            enabled: item.enabled,
+            visible: item.visible,
+            checked: item.checked,
+            submenu: item.submenu ? serializeRendererMenuItems(item.submenu.items) : []
+        }));
+    }
+    function finishRendererMenu(localId, itemId = null, checked = undefined) {
+        const menu = rendererMenus.get(localId);
+        if (!menu) return;
+        rendererMenus.delete(localId);
+        const item = itemId === null ? null : menu.getMenuItemById(itemId);
+        if (item && checked !== undefined) item.checked = checked;
+        if (item) item.click?.(item, electron.remote.getCurrentWindow(), {
+            preventDefault() { this.defaultPrevented = true; }, defaultPrevented: false
+        });
+        menu._rendererMenuId = null;
+        const callback = menu._popupCallback;
+        menu._popupCallback = null;
+        menu.emit("menu-will-close");
+        callback?.();
+    }
+
     const electron = {
         ipcRenderer,
+        Menu,
+        MenuItem,
         contextBridge: {
             exposeInMainWorld(name, value) {
                 Object.defineProperty(window, name, {
@@ -1623,8 +1727,13 @@
                     .find(item => item.id === Number(id));
                 return window ? remoteElectronTarget("window", window.id, window.title) : null;
             },
-            fromWebContents: webContents => webContents?.id
-                ? remoteElectronTarget("window", webContents.id) : null
+            fromWebContents: webContents => {
+                if (!webContents?.id) return null;
+                const id = ipcRenderer.sendSync(
+                    "nexa:electron:windows:fromWebContents", webContents.id);
+                return id === null || id === undefined ? null
+                    : remoteElectronTarget("window", id);
+            }
         },
         webContents: {
             getAllWebContents: () => fsResult(ipcRenderer.sendSync(
@@ -1649,6 +1758,8 @@
         app: electron.app,
         BrowserWindow: electron.BrowserWindow,
         webContents: electron.webContents,
+        Menu: electron.Menu,
+        MenuItem: electron.MenuItem,
         shell: electron.shell,
         clipboard: electron.clipboard
     });
@@ -1672,22 +1783,33 @@
         const target = new NexaEventEmitter();
         target.id = id;
         if (type === "window") target.title = title || "";
-        if (type === "webContents") target.getTitle = () => title || "";
         const call = (method, ...args) => fsResult(ipcRenderer.sendSync(
             "nexa:electron:object:call", type, id, method, encodeFsValue(args)));
         const methods = type === "window" ? [
             "close", "destroy", "show", "hide", "focus", "blur", "minimize", "restore",
             "maximize", "unmaximize", "isMaximized", "isMinimized", "isVisible", "isFocused",
-            "isDestroyed", "isFullScreen", "isNormal", "isResizable", "getBounds", "getSize",
-            "getPosition", "getTitle",
-            "setTitle", "setBounds", "setSize", "setPosition", "setFullScreen", "setResizable",
-            "setMenuBarVisibility"
-        ] : ["getURL", "getTitle", "isDestroyed", "send", "setBackgroundThrottling",
+            "isDestroyed", "isFullScreen", "isNormal", "isResizable", "isMenuBarVisible",
+            "isAutoHideMenuBar", "getBounds", "getContentBounds", "getSize", "getContentSize",
+            "getPosition", "getTitle", "center",
+            "setTitle", "setBounds", "setContentBounds", "setSize", "setContentSize",
+            "setPosition", "setFullScreen", "setResizable", "setMenuBarVisibility",
+            "setAutoHideMenuBar", "setBackgroundColor"
+        ] : ["getURL", "getTitle", "getType", "getProcessId", "getOSProcessId",
+            "getZoomFactor", "focus", "canGoBack", "canGoForward", "getNavigationHistory",
+            "goBack", "goForward", "clearHistory", "isDestroyed", "send", "setBackgroundThrottling",
             "setZoomFactor", "openDevTools", "closeDevTools", "stop"];
         const asyncMethods = type === "window" ? ["loadURL", "loadFile"]
             : ["loadURL", "loadFile", "reload", "reloadIgnoringCache", "executeJavaScript",
-                "executeJavaScriptInIsolatedWorld"];
+                "executeJavaScriptInIsolatedWorld", "insertCSS", "removeInsertedCSS"];
         for (const method of methods) target[method] = (...args) => call(method, ...args);
+        if (type === "webContents") {
+            target.getOwnerBrowserWindow = () => {
+                const windowId = ipcRenderer.sendSync(
+                    "nexa:electron:windows:fromWebContents", id);
+                return windowId === null || windowId === undefined ? null
+                    : remoteElectronTarget("window", windowId);
+            };
+        }
         for (const method of asyncMethods) target[method] = (...args) => ipcRenderer.invoke(
             "nexa:electron:object:invoke", type, id, method, encodeFsValue(args)).then(fsResult);
         if (type === "window") target.webContents = remoteElectronTarget("webContents", id, title);

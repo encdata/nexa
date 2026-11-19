@@ -42,8 +42,16 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
     const protocolHandlers = new WeakMap();
     const privilegedSchemes = new Map();
     const popupMenus = new Map();
+    const rendererPopupMenus = new Map();
     let nextMenuId = 0;
     let nextMenuItemId = 0;
+    let nextRendererPopupId = 0;
+
+    function closeRendererPopupsForContents(contentsId) {
+        for (const [menuId, popup] of rendererPopupMenus) {
+            if (popup.contentsId === contentsId) rendererPopupMenus.delete(menuId);
+        }
+    }
     let applicationMenu = null;
     const dnsLookups = new Map();
     const dnsCacheTtlMs = 30_000;
@@ -101,6 +109,56 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             title: webContents.getTitle(), options: webContents.options,
             visible: view.getVisible(), bounds, backgroundColor: view.backgroundColor,
             protocolSchemes: [...privilegedSchemes.keys()]});
+    }
+
+    function installNavigationHistory(webContents) {
+        webContents._navigationHistory = {entries: [], index: -1, targetIndex: null};
+        webContents.canGoBack = () => {
+            const history = webContents._navigationHistory;
+            return (history.targetIndex ?? history.index) > 0;
+        };
+        webContents.canGoForward = () => {
+            const history = webContents._navigationHistory;
+            return (history.targetIndex ?? history.index) < history.entries.length - 1;
+        };
+        webContents.getNavigationHistory = () => {
+            const history = webContents._navigationHistory;
+            return {entries: history.entries.map(entry => ({...entry})),
+                index: history.targetIndex ?? history.index};
+        };
+        webContents.goBack = () => navigateHistory(webContents, -1);
+        webContents.goForward = () => navigateHistory(webContents, 1);
+        webContents.clearHistory = () => {
+            const url = webContents.getURL?.() || webContents.url || "";
+            const entry = url ? [{id: 0, url, title: webContents.getTitle?.() || ""}] : [];
+            webContents._navigationHistory = {entries: entry, index: entry.length - 1,
+                targetIndex: null};
+        };
+    }
+
+    function navigateHistory(webContents, offset) {
+        const history = webContents._navigationHistory;
+        const current = history.targetIndex ?? history.index;
+        const target = current + offset;
+        if (target < 0 || target >= history.entries.length) return;
+        history.targetIndex = target;
+        emit({event: "nativeCall", method: offset < 0 ? "webContents.goBack"
+            : "webContents.goForward", contentsId: webContents.id});
+    }
+
+    function recordNavigation(webContents, url) {
+        const history = webContents._navigationHistory;
+        if (!history || typeof url !== "string" || !url) return;
+        const targetIndex = history.targetIndex;
+        if (targetIndex !== null && history.entries[targetIndex]?.url === url) {
+            history.index = targetIndex;
+        } else if (history.entries[history.index]?.url !== url) {
+            history.entries.splice(history.index + 1);
+            history.entries.push({id: history.entries.length, url,
+                title: webContents.getTitle?.() || ""});
+            history.index = history.entries.length - 1;
+        }
+        history.targetIndex = null;
     }
 
     function publishEmbeddedTree(view) {
@@ -224,6 +282,15 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         webContents.id = id;
         webContents.url = "";
         webContents.title = options.title || "";
+        webContents.getURL = () => webContents.url;
+        webContents.getTitle = () => webContents.title;
+        webContents.getType = () => "window";
+        webContents.getProcessId = () => process.pid;
+        webContents.getOSProcessId = () => process.pid;
+        webContents.getZoomFactor = () => webContents.zoomFactor || 1;
+        webContents.focus = () => emit({event: "nativeCall", method: "webContents.focus",
+            contentsId: id});
+        installNavigationHistory(webContents);
         webContents.options = options;
         webContents.ownerWindowId = null;
         webContents.session = sessionForPartition(preferences.partition || "default");
@@ -316,6 +383,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                 pending.reject(new Error("webContents was destroyed"));
             }
             contents.delete(id);
+            closeRendererPopupsForContents(id);
             if (webContents.ownerWindowId != null) {
                 emit({event: "rendererViewClosed", windowId: webContents.ownerWindowId,
                     contentsId: id});
@@ -356,7 +424,8 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.minimized = false;
             this.maximized = false;
             this.resizable = options.resizable !== false;
-            this.menuBarVisible = options.autoHideMenuBar !== true;
+            this.autoHideMenuBar = options.autoHideMenuBar === true;
+            this.menuBarVisible = !this.autoHideMenuBar;
             this.menu = null;
             this._menuExplicit = false;
             this.webContents = new EventEmitter();
@@ -369,6 +438,13 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.webContents.zoomFactor = 1;
             this.webContents.getURL = () => this.url || "";
             this.webContents.getTitle = () => this.title || "";
+            this.webContents.getType = () => "window";
+            this.webContents.getProcessId = () => process.pid;
+            this.webContents.getOSProcessId = () => process.pid;
+            this.webContents.getZoomFactor = () => this.webContents.zoomFactor;
+            this.webContents.focus = () => emit({event: "nativeCall", method: "webContents.focus",
+                contentsId: this.webContents.id});
+            installNavigationHistory(this.webContents);
             this.webContents.isDestroyed = () => this.webContents.destroyed;
             this.webContents.loadURL = (...args) => this.loadURL(...args);
             this.webContents.loadFile = (...args) => this.loadFile(...args);
@@ -432,9 +508,10 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             activeWindow = this;
             this.contentView = new View({bounds: {
                 x: 0, y: 0, width: options.width || 800, height: options.height || 600
-            }});
+            }, backgroundColor: options.backgroundColor || "#ffffff"});
             this.contentView._setOwnerWindow(this);
             this.webContentsView = new WebContentsView({webContents: this.webContents,
+                backgroundColor: options.backgroundColor || "#ffffff",
                 bounds: {x: 0, y: 0, width: options.width || 800, height: options.height || 600}});
             this.contentView.addChildView(this.webContentsView);
             app.emit("browser-window-created", {}, this);
@@ -657,13 +734,33 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             return {x: this.options.x || 0, y: this.options.y || 0,
                 width: this.options.width || 800, height: this.options.height || 600};
         }
+        getContentBounds() { return this.getBounds(); }
         getSize() { return [this.options.width || 800, this.options.height || 600]; }
+        getContentSize() { return this.getSize(); }
         getPosition() { return [this.options.x || 0, this.options.y || 0]; }
+        center() {
+            const area = display.workArea;
+            const {width, height} = this.getBounds();
+            this.setPosition(area.x + Math.round((area.width - width) / 2),
+                area.y + Math.round((area.height - height) / 2));
+        }
         setTitle(title) {
             this.title = String(title);
+            this.webContents.title = this.title;
             this.notifyState("title", {title: this.title});
         }
         getTitle() { return this.title || ""; }
+        setBackgroundColor(color) {
+            this.contentView.setBackgroundColor(color);
+            this.webContentsView.setBackgroundColor(color);
+            this.options.backgroundColor = this.webContentsView.backgroundColor;
+        }
+        setAutoHideMenuBar(autoHide) {
+            this.autoHideMenuBar = Boolean(autoHide);
+            this.setMenuBarVisibility(!this.autoHideMenuBar);
+        }
+        isAutoHideMenuBar() { return Boolean(this.autoHideMenuBar); }
+        isMenuBarVisible() { return this.menuBarVisible; }
         setMenuBarVisibility(visible) {
             this.menuBarVisible = Boolean(visible);
             this._syncMenu();
@@ -705,8 +802,8 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.notifyState("resizable", {enabled: this.resizable});
         }
         isResizable() { return this.resizable; }
-        getContentSize() { return this.getSize(); }
         setContentSize(width, height) { this.setSize(width, height); }
+        setContentBounds(bounds) { this.setBounds(bounds); }
         setContentView(view) {
             if (!(view instanceof View)) throw new TypeError("contentView must be an Electron View");
             if (this.contentView === view) return;
@@ -769,6 +866,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             contentsOwners.delete(this.id);
             this.webContents.destroyed = true;
             contents.delete(this.id);
+            closeRendererPopupsForContents(this.id);
             this.webContents.emit("destroyed");
             this.emit("closed");
             emit({event: "windowClosed", windowId: this.id});
@@ -829,17 +927,34 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             isDestroyed: () => target.isDestroyed(), isFullScreen: () => target.isFullScreen(),
             isNormal: () => target.isNormal(), isResizable: () => target.isResizable(),
             getBounds: () => target.getBounds(), getSize: () => target.getSize(),
+            getContentBounds: () => target.getContentBounds(),
+            getContentSize: () => target.getContentSize(),
             getPosition: () => target.getPosition(), getTitle: () => target.getTitle(),
+            center: () => target.center(),
             setTitle: () => target.setTitle(args[0]), setBounds: () => target.setBounds(args[0]),
+            setContentBounds: () => target.setContentBounds(args[0]),
             setSize: () => target.setSize(args[0], args[1]),
+            setContentSize: () => target.setContentSize(args[0], args[1]),
             setPosition: () => target.setPosition(args[0], args[1]),
             setFullScreen: () => target.setFullScreen(args[0]),
             setResizable: () => target.setResizable(args[0]),
             setMenuBarVisibility: () => target.setMenuBarVisibility(args[0]),
+            isMenuBarVisible: () => target.isMenuBarVisible(),
+            setAutoHideMenuBar: () => target.setAutoHideMenuBar(args[0]),
+            isAutoHideMenuBar: () => target.isAutoHideMenuBar(),
+            setBackgroundColor: () => target.setBackgroundColor(args[0]),
             setBackgroundThrottling: () => target.webContents.setBackgroundThrottling(args[0])
         };
         const webContentsCalls = {
             getURL: () => target.getURL(), getTitle: () => target.getTitle(),
+            getType: () => target.getType(), getProcessId: () => target.getProcessId(),
+            getOSProcessId: () => target.getOSProcessId(),
+            getZoomFactor: () => target.getZoomFactor(),
+            focus: () => target.focus(),
+            canGoBack: () => target.canGoBack(), canGoForward: () => target.canGoForward(),
+            getNavigationHistory: () => target.getNavigationHistory(),
+            goBack: () => target.goBack(), goForward: () => target.goForward(),
+            clearHistory: () => target.clearHistory(),
             isDestroyed: () => target.isDestroyed(),
             send: () => target.send(args[0], ...args.slice(1)),
             setBackgroundThrottling: () => target.setBackgroundThrottling(args[0]),
@@ -886,6 +1001,12 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         }
         if (method === "executeJavaScript" && type === "webContents") {
             return target.executeJavaScript(args[0], args[1]);
+        }
+        if (method === "insertCSS" && type === "webContents") {
+            return target.insertCSS(args[0]);
+        }
+        if (method === "removeInsertedCSS" && type === "webContents") {
+            return target.removeInsertedCSS(args[0]);
         }
         if (method === "executeJavaScriptInIsolatedWorld" && type === "webContents") {
             if (args[0] !== 0) throw new Error("isolated JavaScript worlds are unavailable in Nexa WebView");
@@ -1216,6 +1337,10 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             id: window.id, title: window.getTitle(), focused: window.isFocused(),
             visible: window.isVisible()
         }));
+    });
+    ipcMain.on("nexa:electron:windows:fromWebContents", (event, id) => {
+        const window = BrowserWindow.fromWebContents(contents.get(Number(id)));
+        event.returnValue = window?.id ?? null;
     });
     ipcMain.on("nexa:electron:webContents:list", event => {
         event.returnValue = [...contents.values()].map(webContents => ({
@@ -1670,6 +1795,26 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         }
     }
     ipcMain.on("nexa:electron:menu:click", (event, menuId, itemId) => {
+        const rendererPopup = rendererPopupMenus.get(menuId);
+        if (rendererPopup) {
+            const findItem = items => {
+                for (const item of items) {
+                    if (item.id === itemId) return item;
+                    const nested = findItem(item.submenu || []);
+                    if (nested) return nested;
+                }
+                return null;
+            };
+            const item = findItem(rendererPopup.items);
+            if (!item || item.enabled === false || item.visible === false ||
+                item.type === "separator") return;
+            if (item.type === "checkbox") item.checked = !item.checked;
+            if (item.type === "radio") item.checked = true;
+            event.sender?.send("__nexa:menu:renderer-click", rendererPopup.localId,
+                itemId, item.checked);
+            rendererPopupMenus.delete(menuId);
+            return;
+        }
         const ownerWindow = windows.get(contentsOwners.get(event.sender?.id));
         const menu = popupMenus.get(menuId) || (menuId === "application"
             ? ownerWindow?._menuExplicit ? ownerWindow.menu : applicationMenu : null);
@@ -1683,6 +1828,20 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         });
         menu.closePopup();
     });
+    ipcMain.on("nexa:electron:menu:renderer-popup", (event, localId, items, bounds) => {
+        if (!Array.isArray(items) || !items.length || !event.sender) return;
+        const menuId = `renderer-menu-${event.sender.id}-${++nextRendererPopupId}`;
+        const popup = {contentsId: event.sender.id, localId, items};
+        rendererPopupMenus.set(menuId, popup);
+        event.sender.send("__nexa:menu:popup", menuId, items, bounds || {});
+    });
+    ipcMain.on("nexa:electron:menu:renderer-close", (event, localId) => {
+        for (const [menuId, popup] of rendererPopupMenus) {
+            if (popup.contentsId !== event.sender?.id || popup.localId !== localId) continue;
+            rendererPopupMenus.delete(menuId);
+            event.sender.send("__nexa:menu:close", menuId);
+        }
+    });
     ipcMain.on("nexa:electron:menu:open-submenu", (event, itemId, x, y) => {
         const ownerWindow = windows.get(contentsOwners.get(event.sender?.id));
         const menu = ownerWindow?._menuExplicit ? ownerWindow.menu : applicationMenu;
@@ -1690,8 +1849,13 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         if (!item?.enabled || !item.visible || !item.submenu) return;
         item.submenu.popup({webContents: event.sender, x, y});
     });
-    ipcMain.on("nexa:electron:menu:closed", (_event, menuId) => {
+    ipcMain.on("nexa:electron:menu:closed", (event, menuId) => {
         popupMenus.get(menuId)?.closePopup();
+        const rendererPopup = rendererPopupMenus.get(menuId);
+        if (rendererPopup) {
+            rendererPopupMenus.delete(menuId);
+            event.sender?.send("__nexa:menu:renderer-close", rendererPopup.localId);
+        }
     });
     const crashReporter = createCrashReporter();
     const electron = {
@@ -2482,6 +2646,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         if (message.type === "webviewNavigation") {
             rendererContents.url = value.url || rendererContents.url;
             if (rendererContents === window.webContents) window.url = rendererContents.url;
+            recordNavigation(rendererContents, rendererContents.url);
             try {
                 const parsed = new URL(rendererContents.url);
                 if (parsed.protocol === "http:" || parsed.protocol === "https:") {
@@ -2503,6 +2668,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                 window.emit("ready-to-show");
             }
         } else if (message.type === "webviewError") {
+            rendererContents._navigationHistory.targetIndex = null;
             const error = new Error(value.description || value.error || "load failed");
             if (rendererContents === window.webContents) window.finishLoad(error);
             else {
