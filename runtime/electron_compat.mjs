@@ -213,8 +213,9 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                 return {source: cachedEntry.script, etag: cachedEntry.etag};
             }
             const preloads = paths.map((file, index) =>
+                `if (window.top === window) {\n` +
                 `window.__NEXA_ELECTRON_PRELOAD_BASE__=${JSON.stringify(files[index].absolute)};\n` +
-                readPreload(file, files[index])).join("\n");
+                readPreload(file, files[index]) + "\n}").join("\n");
             const bridge = `(() => {
                 const schemes = new Set(${JSON.stringify(schemes)});
                 const ipc = window.nexaElectron?.ipcRenderer;
