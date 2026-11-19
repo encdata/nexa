@@ -1,6 +1,6 @@
 import {EventEmitter} from "node:events";
 import {execFile, execFileSync} from "node:child_process";
-import {createHash} from "node:crypto";
+import {createHash, randomBytes} from "node:crypto";
 import dns from "node:dns/promises";
 import fs from "node:fs";
 import http from "node:http";
@@ -17,7 +17,8 @@ const execFileAsync = promisify(execFile);
 export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath = appRoot,
                                      localUrl, emit, resolveAsar, trustOrigin,
                                      isTrustedPath = () => false,
-                                     executablePath = process.execPath}) {
+                                     executablePath = process.execPath,
+                                     nativeCall = message => emit({event: "nativeCall", ...message})}) {
     if (process.platform === "android") {
         Object.defineProperty(process, "platform", {value: "linux", configurable: true});
         os.platform = () => "linux";
@@ -38,6 +39,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
     let nextNativeModuleId = 0;
     let nextNativeObjectId = 0;
     const sessions = new Map();
+    const sessionWebContents = new WeakMap();
     const handlers = new Map();
     const protocolHandlers = new WeakMap();
     const privilegedSchemes = new Map();
@@ -107,6 +109,11 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         emit({event: "rendererView", windowId, contentsId: webContents.id,
             url: webContents.url, preloadUrl: localUrl(`__nexa/preload/${webContents.id}`),
             title: webContents.getTitle(), options: webContents.options,
+            userAgent: webContents.getUserAgent(),
+            loadOptions: webContents._loadOptions || {headers: {}},
+            profileName: webContents.session.profileName,
+            profileTemporary: webContents.session.temporary,
+            webRequestEnabled: webContents.session.webRequestEnabled,
             visible: view.getVisible(), bounds, backgroundColor: view.backgroundColor,
             protocolSchemes: [...privilegedSchemes.keys()]});
     }
@@ -133,17 +140,313 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             const entry = url ? [{id: 0, url, title: webContents.getTitle?.() || ""}] : [];
             webContents._navigationHistory = {entries: entry, index: entry.length - 1,
                 targetIndex: null};
+            emit({event: "nativeCall", method: "webContents.clearHistory",
+                contentsId: webContents.id});
         };
+        webContents.navigationHistory = {
+            canGoBack: webContents.canGoBack,
+            canGoForward: webContents.canGoForward,
+            canGoToOffset(offset) {
+                const history = webContents._navigationHistory;
+                const current = history.targetIndex ?? history.index;
+                return Number.isInteger(offset) && current + offset >= 0 &&
+                    current + offset < history.entries.length;
+            },
+            clear: webContents.clearHistory,
+            getActiveIndex() {
+                const history = webContents._navigationHistory;
+                return history.targetIndex ?? history.index;
+            },
+            getEntryAtIndex(index) {
+                if (!Number.isInteger(index)) return null;
+                const entry = webContents._navigationHistory.entries[index];
+                return entry ? {url: entry.url, title: entry.title} : null;
+            },
+            goBack: webContents.goBack,
+            goForward: webContents.goForward,
+            goToIndex(index) {
+                if (!Number.isInteger(index)) throw new TypeError("navigation index must be an integer");
+                navigateHistoryTo(webContents, index);
+            },
+            goToOffset(offset) {
+                if (!Number.isInteger(offset)) throw new TypeError("navigation offset must be an integer");
+                const history = webContents._navigationHistory;
+                navigateHistoryTo(webContents,
+                    (history.targetIndex ?? history.index) + offset);
+            },
+            length() { return webContents._navigationHistory.entries.length; },
+            removeEntryAtIndex() {
+                throw new Error("navigationHistory.removeEntryAtIndex is not supported by Android WebView");
+            },
+            getAllEntries() {
+                return webContents._navigationHistory.entries.map(({url, title}) => ({url, title}));
+            },
+            restore() {
+                throw new Error("navigationHistory.restore is not supported by Android WebView");
+            }
+        };
+    }
+
+    function installWebContentsUserAgent(webContents, userAgent) {
+        if (userAgent !== undefined && typeof userAgent !== "string") {
+            throw new TypeError("webPreferences.userAgent must be a string");
+        }
+        webContents._userAgent = userAgent ?? process.env.NEXA_ELECTRON_USER_AGENT ?? "";
+        webContents.getUserAgent = () => webContents._userAgent;
+        webContents.setUserAgent = value => {
+            if (typeof value !== "string") throw new TypeError("Electron user agent must be a string");
+            webContents._userAgent = value;
+            emit({event: "nativeCall", method: "webContents.setUserAgent",
+                contentsId: webContents.id, args: [value]});
+        };
+    }
+
+    function installWebContentsZoom(webContents) {
+        webContents._zoomFactor = 1;
+        webContents.getZoomFactor = () => webContents._zoomFactor;
+        webContents.getZoomLevel = () => Math.log(webContents._zoomFactor) / Math.log(1.2);
+        webContents.setZoomFactor = factor => {
+            if (typeof factor !== "number" || !Number.isFinite(factor) || factor <= 0) {
+                throw new TypeError("zoom factor must be a positive number");
+            }
+            webContents._zoomFactor = Math.min(5, Math.max(0.25, factor));
+            webContents.send("__nexa:set-zoom", webContents._zoomFactor);
+        };
+        webContents.setZoomLevel = level => {
+            if (typeof level !== "number" || !Number.isFinite(level)) {
+                throw new TypeError("zoom level must be a number");
+            }
+            const minimum = Math.log(0.25) / Math.log(1.2);
+            const maximum = Math.log(5) / Math.log(1.2);
+            const boundedLevel = Math.min(maximum, Math.max(minimum, level));
+            webContents.setZoomFactor(Math.pow(1.2, boundedLevel));
+        };
+        Object.defineProperties(webContents, {
+            zoomFactor: {
+                enumerable: true,
+                get: webContents.getZoomFactor,
+                set: webContents.setZoomFactor
+            },
+            zoomLevel: {
+                enumerable: true,
+                get: webContents.getZoomLevel,
+                set: webContents.setZoomLevel
+            }
+        });
+    }
+
+    function installWebContentsPageCommands(webContents) {
+        const edit = (command, value) => webContents.send(
+            "__nexa:edit-command", command, value);
+        for (const command of ["undo", "redo", "cut", "copy", "paste",
+            "pasteAndMatchStyle", "delete", "selectAll", "replace",
+            "replaceMisspelling"]) {
+            webContents[command] = value => {
+                if ((command === "replace" || command === "replaceMisspelling") &&
+                    typeof value !== "string") {
+                    throw new TypeError(`${command} expects a string`);
+                }
+                edit(command, value);
+            };
+        }
+        webContents.unselect = () => edit("unselect");
+        webContents.scrollToTop = () => webContents.send("__nexa:scroll", "top");
+        webContents.scrollToBottom = () => webContents.send("__nexa:scroll", "bottom");
+        webContents.centerSelection = () => webContents.send("__nexa:edit-command", "centerSelection");
+        webContents.insertText = text => {
+            if (typeof text !== "string") throw new TypeError("insertText expects a string");
+            return webContents.executeJavaScript(
+                `document.execCommand("insertText", false, ${JSON.stringify(text)})`
+            ).then(() => undefined);
+        };
+    }
+
+    function normalizeLoadURLOptions(options = {}) {
+        if (options == null || typeof options !== "object" || Array.isArray(options)) {
+            throw new TypeError("loadURL options must be an object");
+        }
+        for (const key of ["postData", "baseURLForDataURL"]) {
+            if (options[key] !== undefined) {
+                throw new Error(`loadURL option ${key} is not supported by Android WebView`);
+            }
+        }
+        const headers = new Map();
+        const setHeader = (name, value) => {
+            if (typeof name !== "string" || !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) ||
+                typeof value !== "string" || /[\r\n\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/.test(value)) {
+                throw new TypeError("loadURL contains an invalid HTTP header");
+            }
+            headers.set(name.toLowerCase(), {name, value});
+        };
+        if (options.extraHeaders !== undefined) {
+            if (typeof options.extraHeaders !== "string") {
+                throw new TypeError("loadURL extraHeaders must be a string");
+            }
+            for (const line of options.extraHeaders.split(/\r?\n/)) {
+                if (!line.trim()) continue;
+                const separator = line.indexOf(":");
+                if (separator < 1) throw new TypeError("loadURL extraHeaders has an invalid line");
+                setHeader(line.slice(0, separator).trim(), line.slice(separator + 1).trim());
+            }
+        }
+        if (options.httpReferrer !== undefined) {
+            const referrer = typeof options.httpReferrer === "string"
+                ? options.httpReferrer : options.httpReferrer?.url;
+            if (typeof referrer !== "string" || !referrer) {
+                throw new TypeError("loadURL httpReferrer must contain a URL");
+            }
+            if (typeof options.httpReferrer === "object" &&
+                options.httpReferrer.policy !== undefined) {
+                throw new Error("loadURL httpReferrer policies are not supported by Android WebView");
+            }
+            setHeader("Referer", referrer);
+        }
+        const userAgent = options.userAgent ?? headers.get("user-agent")?.value;
+        if (userAgent !== undefined && typeof userAgent !== "string") {
+            throw new TypeError("loadURL userAgent must be a string");
+        }
+        headers.delete("user-agent");
+        return {headers: Object.fromEntries([...headers.values()].map(({name, value}) => [name, value])),
+            userAgent};
+    }
+
+    function applyLoadFileOptions(url, options = {}) {
+        if (options == null || typeof options !== "object" || Array.isArray(options)) {
+            throw new TypeError("loadFile options must be an object");
+        }
+        if (options.query !== undefined) {
+            if (options.query == null || typeof options.query !== "object" ||
+                Array.isArray(options.query)) {
+                throw new TypeError("loadFile query must be an object");
+            }
+            for (const [key, value] of Object.entries(options.query)) {
+                url.searchParams.set(key, String(value));
+            }
+        }
+        if (options.search !== undefined) {
+            if (typeof options.search !== "string") {
+                throw new TypeError("loadFile search must be a string");
+            }
+            url.search = options.search;
+        }
+        if (options.hash !== undefined) {
+            if (typeof options.hash !== "string") {
+                throw new TypeError("loadFile hash must be a string");
+            }
+            url.hash = options.hash;
+        }
     }
 
     function navigateHistory(webContents, offset) {
         const history = webContents._navigationHistory;
         const current = history.targetIndex ?? history.index;
-        const target = current + offset;
-        if (target < 0 || target >= history.entries.length) return;
-        history.targetIndex = target;
-        emit({event: "nativeCall", method: offset < 0 ? "webContents.goBack"
-            : "webContents.goForward", contentsId: webContents.id});
+        navigateHistoryTo(webContents, current + offset);
+    }
+
+    function navigateHistoryTo(webContents, index) {
+        const history = webContents._navigationHistory;
+        const current = history.targetIndex ?? history.index;
+        if (!Number.isInteger(index) || index < 0 || index >= history.entries.length) return;
+        const offset = index - current;
+        if (!offset) return;
+        history.targetIndex = index;
+        emit({event: "nativeCall", method: "webContents.goToOffset",
+            contentsId: webContents.id, args: [offset]});
+    }
+
+    function setWebContentsLoading(webContents, loading) {
+        const next = Boolean(loading);
+        if (webContents._isLoading === next) return;
+        webContents._isLoading = next;
+        webContents.emit(next ? "did-start-loading" : "did-stop-loading");
+    }
+
+    function setWebContentsMainFrameLoading(webContents, loading) {
+        webContents._isLoadingMainFrame = Boolean(loading);
+    }
+
+    function setWebContentsWaitingForResponse(webContents, waiting) {
+        webContents._isWaitingForResponse = Boolean(waiting);
+    }
+
+    function emitNavigationStart(webContents, url, isMainFrame) {
+        if (isMainFrame) setWebContentsWaitingForResponse(webContents, true);
+        webContents.emit("did-start-navigation", {}, url, false, isMainFrame);
+    }
+
+    function matchesRequestUrl(pattern, value) {
+        if (pattern === "<all_urls>") return true;
+        const match = /^(\*|https?|file|ftp):\/\/([^/]*)(\/.*)$/.exec(pattern);
+        if (!match) return false;
+        const [, scheme, authority, pathPattern] = match;
+        let url;
+        try { url = new URL(value); } catch (_) { return false; }
+        if (scheme === "*") {
+            if (!new Set(["http:", "https:"]).has(url.protocol)) return false;
+        } else if (url.protocol !== `${scheme}:`) {
+            return false;
+        }
+        const portIndex = authority.lastIndexOf(":");
+        const hostPattern = portIndex > 0 ? authority.slice(0, portIndex) : authority;
+        const portPattern = portIndex > 0 ? authority.slice(portIndex + 1) : "";
+        const hostMatches = hostPattern === "*" ||
+            (hostPattern.startsWith("*.")
+                ? url.hostname === hostPattern.slice(2) ||
+                    url.hostname.endsWith(`.${hostPattern.slice(2)}`)
+                : url.hostname === hostPattern);
+        const actualPort = url.port || (url.protocol === "https:" ? "443"
+            : url.protocol === "ftp:" ? "21" : "80");
+        if (!hostMatches || (portPattern && portPattern !== "*" &&
+            actualPort !== portPattern)) return false;
+        const pathRegex = new RegExp(`^${pathPattern.split("*")
+            .map(part => part.replace(/[|\\{}()[\]^$+?.]/g, "\\$&"))
+            .join(".*")}$`);
+        return pathRegex.test(`${url.pathname}${url.search}`);
+    }
+
+    function installDevTools(webContents, id) {
+        webContents.devToolsOpened = false;
+        webContents._devToolsGeneration = 0;
+        webContents.isDevToolsOpened = () => webContents.devToolsOpened &&
+            !webContents.destroyed;
+        webContents.openDevTools = options => {
+            if (webContents.destroyed || !webContents.devTools) return;
+            const generation = ++webContents._devToolsGeneration;
+            webContents.devToolsOpened = true;
+            Promise.resolve(nativeCall({method: "webContents.openDevTools",
+                contentsId: id, args: [options || {}]})).then(() => {
+                if (webContents._devToolsGeneration !== generation) return;
+                webContents.emit("devtools-opened");
+            }, error => {
+                if (webContents._devToolsGeneration !== generation) return;
+                webContents.devToolsOpened = false;
+                console.warn(`could not open Electron DevTools: ${error.message}`);
+            });
+        };
+        webContents.closeDevTools = () => {
+            if (!webContents.devToolsOpened) return;
+            const generation = ++webContents._devToolsGeneration;
+            webContents.devToolsOpened = false;
+            Promise.resolve(nativeCall({method: "webContents.closeDevTools",
+                contentsId: id})).then(() => {
+                if (webContents._devToolsGeneration === generation) {
+                    webContents.emit("devtools-closed");
+                }
+            }, error => console.warn(`could not close Electron DevTools: ${error.message}`));
+        };
+    }
+
+    function updateDevToolsState(contentsId, opened) {
+        const webContents = contents.get(contentsId);
+        if (!webContents || webContents.destroyed) return false;
+        const wasOpened = webContents.devToolsOpened;
+        webContents.devToolsOpened = Boolean(opened);
+        if (wasOpened !== webContents.devToolsOpened) {
+            webContents._devToolsGeneration++;
+            webContents.emit(webContents.devToolsOpened
+                ? "devtools-opened" : "devtools-closed");
+        }
+        return true;
     }
 
     function recordNavigation(webContents, url) {
@@ -285,22 +588,49 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         webContents.getURL = () => webContents.url;
         webContents.getTitle = () => webContents.title;
         webContents.getType = () => "window";
-        webContents.getProcessId = () => process.pid;
-        webContents.getOSProcessId = () => process.pid;
-        webContents.getZoomFactor = () => webContents.zoomFactor || 1;
+        webContents.getProcessId = () => {
+            throw new Error("WebContents.getProcessId() is unavailable in Android WebView");
+        };
+        webContents.getOSProcessId = () => {
+            throw new Error("WebContents.getOSProcessId() is unavailable in Android WebView");
+        };
+        webContents.isCrashed = () => webContents._isCrashed === true;
+        webContents._isCrashed = false;
+        installWebContentsZoom(webContents);
         webContents.focus = () => emit({event: "nativeCall", method: "webContents.focus",
             contentsId: id});
         installNavigationHistory(webContents);
         webContents.options = options;
+        installWebContentsPageCommands(webContents);
         webContents.ownerWindowId = null;
         webContents.session = sessionForPartition(preferences.partition || "default");
         webContents.preloadPath = preferences.preload || null;
         webContents.destroyed = false;
+        webContents.devTools = preferences.devTools !== false;
+        installWebContentsUserAgent(webContents, preferences.userAgent);
+        sessionWebContents.get(webContents.session).add(webContents);
         webContents.backgroundThrottling = preferences.backgroundThrottling !== false;
+        webContents.getBackgroundThrottling = () => webContents.backgroundThrottling;
         webContents.getURL = () => webContents.url;
         webContents.getTitle = () => webContents.title;
         webContents.isDestroyed = () => webContents.destroyed;
-        webContents.loadURL = url => {
+        webContents._isLoading = false;
+        webContents._isLoadingMainFrame = false;
+        webContents._isWaitingForResponse = false;
+        webContents.isLoading = () => webContents._isLoading;
+        webContents.isLoadingMainFrame = () => webContents._isLoadingMainFrame;
+        webContents.isWaitingForResponse = () => webContents._isWaitingForResponse;
+        webContents.loadURL = (url, options = {}) => {
+            let loadOptions;
+            try {
+                loadOptions = normalizeLoadURLOptions(options);
+            } catch (error) {
+                return Promise.reject(error);
+            }
+            if (loadOptions.userAgent !== undefined) {
+                webContents.setUserAgent(loadOptions.userAgent);
+            }
+            webContents._loadOptions = loadOptions;
             webContents.url = String(url);
             if (webContents.url.startsWith("file:")) {
                 const file = path.resolve(fileURLToPath(webContents.url));
@@ -324,6 +654,9 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             });
             load.catch(() => {});
             webContents.pendingLoad = pending;
+            setWebContentsMainFrameLoading(webContents, true);
+            setWebContentsLoading(webContents, true);
+            emitNavigationStart(webContents, webContents.url, true);
             if (webContents.ownerWindowId !== null) announceEmbeddedContents(webContents);
             return load;
         };
@@ -335,11 +668,34 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             if (!fs.existsSync(absolute)) return Promise.reject(new Error(`renderer file not found: ${file}`));
             const url = new URL(localUrl(path.relative(appRoot, absolute).split(path.sep)
                 .map(encodeURIComponent).join("/")));
-            for (const [key, value] of Object.entries(loadOptions.query || {})) {
-                url.searchParams.set(key, value);
+            try {
+                applyLoadFileOptions(url, loadOptions);
+            } catch (error) {
+                return Promise.reject(error);
             }
-            if (loadOptions.hash) url.hash = loadOptions.hash;
-            return webContents.loadURL(url.href);
+            const {query, search, hash, ...navigationOptions} = loadOptions;
+            return webContents.loadURL(url.href, navigationOptions);
+        };
+        webContents.reload = () => {
+            setWebContentsMainFrameLoading(webContents, true);
+            setWebContentsLoading(webContents, true);
+            emitNavigationStart(webContents, webContents.url, true);
+            emit({event: "nativeCall", method: "webContents.reload", contentsId: id});
+        };
+        webContents.reloadIgnoringCache = () => {
+            setWebContentsMainFrameLoading(webContents, true);
+            setWebContentsLoading(webContents, true);
+            emitNavigationStart(webContents, webContents.url, true);
+            emit({event: "nativeCall", method: "webContents.reloadIgnoringCache", contentsId: id});
+        };
+        webContents.stop = () => {
+            const error = new Error("navigation stopped");
+            webContents.pendingLoad?.reject(error);
+            webContents.pendingLoad = null;
+            setWebContentsMainFrameLoading(webContents, false);
+            setWebContentsLoading(webContents, false);
+            setWebContentsWaitingForResponse(webContents, false);
+            emit({event: "nativeCall", method: "webContents.stop", contentsId: id});
         };
         webContents.send = (channel, ...args) => emit({event: "rendererMessage",
             windowId: webContents.ownerWindowId, contentsId: webContents.id, channel, args});
@@ -359,10 +715,11 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             emit({event: "rendererViewState", windowId: webContents.ownerWindowId,
                 contentsId: id, backgroundThrottling: webContents.backgroundThrottling});
         };
-        webContents.setZoomFactor = factor => {
-            webContents.zoomFactor = Number(factor);
-            webContents.send("__nexa:set-zoom", webContents.zoomFactor);
+        webContents.clearCache = async () => {
+            if (webContents.destroyed) throw new Error("webContents was destroyed");
+            await nativeCall({method: "webContents.clearCache", contentsId: id});
         };
+        installDevTools(webContents, id);
         webContents.insertCSS = css => {
             const key = `nexa-electron-css-${id}-${++nextCssId}`;
             webContents.send("__nexa:insert-css", key, String(css));
@@ -374,7 +731,11 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         };
         webContents.destroy = () => {
             if (webContents.destroyed) return;
+            setWebContentsMainFrameLoading(webContents, false);
+            setWebContentsLoading(webContents, false);
+            setWebContentsWaitingForResponse(webContents, false);
             webContents.destroyed = true;
+            sessionWebContents.get(webContents.session).delete(webContents);
             webContents.pendingLoad?.reject(new Error("webContents was destroyed"));
             webContents.pendingLoad = null;
             for (const [key, pending] of pendingScriptExecutions) {
@@ -423,6 +784,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.focused = this.visible;
             this.minimized = false;
             this.maximized = false;
+            this.nativeGeometryReady = false;
             this.resizable = options.resizable !== false;
             this.autoHideMenuBar = options.autoHideMenuBar === true;
             this.menuBarVisible = !this.autoHideMenuBar;
@@ -432,16 +794,35 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.webContents.id = this.id;
             this.webContents.ownerWindowId = this.id;
             this.webContents.session = this.session;
+            sessionWebContents.get(this.session).add(this.webContents);
             this.webContents.destroyed = false;
+            this.webContents._isLoading = false;
+            this.webContents._isLoadingMainFrame = false;
+            this.webContents._isWaitingForResponse = false;
+            this.webContents.isLoading = () => this.webContents._isLoading;
+            this.webContents.isLoadingMainFrame = () => this.webContents._isLoadingMainFrame;
+            this.webContents.isWaitingForResponse = () =>
+                this.webContents._isWaitingForResponse;
+            installWebContentsPageCommands(this.webContents);
             this.webContents.backgroundThrottling =
                 options.webPreferences?.backgroundThrottling !== false;
-            this.webContents.zoomFactor = 1;
+            this.webContents.getBackgroundThrottling = () =>
+                this.webContents.backgroundThrottling;
+            this.webContents.devTools = options.webPreferences?.devTools !== false;
+            installWebContentsZoom(this.webContents);
+            this.webContents.title = "";
             this.webContents.getURL = () => this.url || "";
-            this.webContents.getTitle = () => this.title || "";
+            this.webContents.getTitle = () => this.webContents.title || "";
             this.webContents.getType = () => "window";
-            this.webContents.getProcessId = () => process.pid;
-            this.webContents.getOSProcessId = () => process.pid;
-            this.webContents.getZoomFactor = () => this.webContents.zoomFactor;
+            this.webContents.getProcessId = () => {
+                throw new Error("WebContents.getProcessId() is unavailable in Android WebView");
+            };
+            this.webContents.getOSProcessId = () => {
+                throw new Error("WebContents.getOSProcessId() is unavailable in Android WebView");
+            };
+            this.webContents.isCrashed = () => this.webContents._isCrashed === true;
+            this.webContents._isCrashed = false;
+            installWebContentsUserAgent(this.webContents, options.webPreferences?.userAgent);
             this.webContents.focus = () => emit({event: "nativeCall", method: "webContents.focus",
                 contentsId: this.webContents.id});
             installNavigationHistory(this.webContents);
@@ -458,9 +839,28 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                     this.webContents.send("__nexa:execute-js", requestId, String(code));
                 });
             };
-            this.webContents.reload = () => this.loadURL(this.url || "about:blank");
-            this.webContents.reloadIgnoringCache = () => this.webContents.reload();
-            this.webContents.stop = () => this.finishLoad(new Error("navigation stopped"));
+            this.webContents.reload = () => {
+                setWebContentsMainFrameLoading(this.webContents, true);
+                setWebContentsLoading(this.webContents, true);
+                emitNavigationStart(this.webContents, this.url, true);
+                emit({event: "nativeCall", method: "webContents.reload",
+                    contentsId: this.webContents.id});
+            };
+            this.webContents.reloadIgnoringCache = () => {
+                setWebContentsMainFrameLoading(this.webContents, true);
+                setWebContentsLoading(this.webContents, true);
+                emitNavigationStart(this.webContents, this.url, true);
+                emit({event: "nativeCall", method: "webContents.reloadIgnoringCache",
+                    contentsId: this.webContents.id});
+            };
+            this.webContents.stop = () => {
+                this.finishLoad(new Error("navigation stopped"));
+                setWebContentsMainFrameLoading(this.webContents, false);
+                setWebContentsLoading(this.webContents, false);
+                setWebContentsWaitingForResponse(this.webContents, false);
+                emit({event: "nativeCall", method: "webContents.stop",
+                    contentsId: this.webContents.id});
+            };
             this.webContents.send = (channel, ...args) => {
                 emit({event: "rendererMessage", windowId: this.id,
                     contentsId: this.webContents.id, channel, args});
@@ -480,8 +880,14 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                 this.webContents.send("__nexa:remove-css", String(key));
                 return Promise.resolve();
             };
-            this.webContents.openDevTools = () => {};
-            this.webContents.closeDevTools = () => {};
+            this.webContents.clearCache = async () => {
+                if (this.webContents.destroyed) {
+                    throw new Error("webContents was destroyed");
+                }
+                await nativeCall({method: "webContents.clearCache",
+                    contentsId: this.webContents.id});
+            };
+            installDevTools(this.webContents, this.webContents.id);
             this.webContents.setWindowOpenHandler = handler => {
                 this.webContents.windowOpenHandler = handler;
                 this.windowOpenHandler = handler;
@@ -493,14 +899,6 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                 this.notifyState("backgroundThrottling", {
                     enabled: allowed
                 });
-            };
-            this.webContents.setZoomFactor = factor => {
-                const zoomFactor = Number(factor);
-                if (!Number.isFinite(zoomFactor) || zoomFactor <= 0) {
-                    throw new TypeError("zoom factor must be a positive number");
-                }
-                this.webContents.zoomFactor = zoomFactor;
-                this.webContents.send("__nexa:set-zoom", zoomFactor);
             };
             contents.set(this.id, this.webContents);
             contentsOwners.set(this.id, this.id);
@@ -529,7 +927,17 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             emit({event: "windowState", windowId: this.id, action, value});
         }
 
-        loadURL(url) {
+        loadURL(url, loadURLOptions = {}) {
+            let loadOptions;
+            try {
+                loadOptions = normalizeLoadURLOptions(loadURLOptions);
+            } catch (error) {
+                return Promise.reject(error);
+            }
+            if (loadOptions.userAgent !== undefined) {
+                this.webContents.setUserAgent(loadOptions.userAgent);
+            }
+            this.webContents._loadOptions = loadOptions;
             this.url = String(url);
             if (this.url.startsWith("file:")) {
                 const file = path.resolve(fileURLToPath(this.url));
@@ -554,10 +962,18 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             });
             load.catch(() => {});
             this.pendingLoad = {resolve: resolveLoad, reject: rejectLoad};
+            setWebContentsMainFrameLoading(this.webContents, true);
+            setWebContentsLoading(this.webContents, true);
+            emitNavigationStart(this.webContents, this.url, true);
             emit({event: "renderer", windowId: this.id, contentsId: this.webContents.id,
                 url: this.url,
                 preloadUrl: localUrl(`__nexa/preload/${this.id}`), title: this.getTitle(),
-                options: this.options, visible: this.visible,
+                options: this.options, profileName: this.session.profileName,
+                profileTemporary: this.session.temporary,
+                webRequestEnabled: this.session.webRequestEnabled,
+                userAgent: this.webContents.getUserAgent(),
+                loadOptions,
+                visible: this.visible,
                 protocolSchemes: [...privilegedSchemes.keys()]});
             return load;
         }
@@ -565,6 +981,9 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         finishLoad(error = null) {
             const pending = this.pendingLoad;
             this.pendingLoad = null;
+            setWebContentsMainFrameLoading(this.webContents, false);
+            setWebContentsLoading(this.webContents, false);
+            if (error) setWebContentsWaitingForResponse(this.webContents, false);
             if (!pending) return;
             if (error) pending.reject(error);
             else pending.resolve();
@@ -673,11 +1092,13 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             if (!fs.existsSync(absolute)) return Promise.reject(new Error(`renderer file not found: ${file}`));
             const relative = path.relative(appRoot, absolute).split(path.sep).map(encodeURIComponent).join("/");
             const url = new URL(localUrl(relative));
-            if (options.query) {
-                for (const [key, value] of Object.entries(options.query)) url.searchParams.set(key, value);
+            try {
+                applyLoadFileOptions(url, options);
+            } catch (error) {
+                return Promise.reject(error);
             }
-            if (options.hash) url.hash = options.hash;
-            return this.loadURL(url.href);
+            const {query, search, hash, ...navigationOptions} = options;
+            return this.loadURL(url.href, navigationOptions);
         }
 
         show() {
@@ -746,7 +1167,6 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         }
         setTitle(title) {
             this.title = String(title);
-            this.webContents.title = this.title;
             this.notifyState("title", {title: this.title});
         }
         getTitle() { return this.title || ""; }
@@ -755,6 +1175,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             this.webContentsView.setBackgroundColor(color);
             this.options.backgroundColor = this.webContentsView.backgroundColor;
         }
+        getBackgroundColor() { return this.webContentsView.getBackgroundColor(); }
         setAutoHideMenuBar(autoHide) {
             this.autoHideMenuBar = Boolean(autoHide);
             this.setMenuBarVisibility(!this.autoHideMenuBar);
@@ -775,26 +1196,36 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         }
         setProgressBar() {}
         setBounds(bounds) {
+            const previous = this.getBounds();
             Object.assign(this.options, bounds);
             this.contentView.setBounds({x: 0, y: 0,
                 width: this.options.width || 800, height: this.options.height || 600});
             this.webContentsView.setBounds({x: 0, y: 0,
                 width: this.options.width || 800, height: this.options.height || 600});
+            const next = this.getBounds();
+            if (previous.width !== next.width || previous.height !== next.height) {
+                this.emit("resize");
+            }
+            if (previous.x !== next.x || previous.y !== next.y) this.emit("move");
             this.notifyState("resize", {
                 width: this.options.width, height: this.options.height,
                 x: this.options.x, y: this.options.y
             });
         }
         setSize(width, height) {
+            const changed = this.options.width !== width || this.options.height !== height;
             this.options.width = width;
             this.options.height = height;
             this.contentView.setBounds({x: 0, y: 0, width, height});
             this.webContentsView.setBounds({x: 0, y: 0, width, height});
+            if (changed) this.emit("resize");
             this.notifyState("resize", {width, height});
         }
         setPosition(x, y) {
+            const changed = this.options.x !== x || this.options.y !== y;
             this.options.x = x;
             this.options.y = y;
+            if (changed) this.emit("move");
             this.notifyState("move", {x, y});
         }
         setResizable(resizable) {
@@ -825,6 +1256,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         }
         destroy() {
             this.finishLoad(new Error("window was destroyed"));
+            setWebContentsWaitingForResponse(this.webContents, false);
             this.destroyed = true;
             for (const webContents of [...contents.values()]) {
                 if (webContents.id !== this.id && contentsOwners.get(webContents.id) === this.id) {
@@ -865,6 +1297,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             windows.delete(this.id);
             contentsOwners.delete(this.id);
             this.webContents.destroyed = true;
+            sessionWebContents.get(this.webContents.session).delete(this.webContents);
             contents.delete(this.id);
             closeRendererPopupsForContents(this.id);
             this.webContents.emit("destroyed");
@@ -889,6 +1322,40 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         if (message.action === "close") window.close();
         else if (message.action === "focus") window.focus();
         else return false;
+        return true;
+    }
+
+    function updateWindowGeometry(message) {
+        const window = windows.get(message.windowId);
+        const {x, y, width, height} = message;
+        const geometry = [x, y, width, height].map(Number);
+        if (!window || window.destroyed ||
+            !geometry.every(Number.isFinite) || geometry[2] <= 0 || geometry[3] <= 0) {
+            return false;
+        }
+        const [nextX, nextY, nextWidth, nextHeight] = geometry;
+        const moved = window.options.x !== nextX || window.options.y !== nextY;
+        const resized = window.options.width !== nextWidth ||
+            window.options.height !== nextHeight;
+        const maximized = typeof message.maximized === "boolean"
+            ? message.maximized : window.maximized;
+        const notifyEvents = window.nativeGeometryReady;
+        const maximizeChanged = window.maximized !== maximized;
+        window.options.x = nextX;
+        window.options.y = nextY;
+        window.options.width = nextWidth;
+        window.options.height = nextHeight;
+        window.maximized = maximized;
+        window.nativeGeometryReady = true;
+        if (resized) {
+            window.contentView.setBounds({x: 0, y: 0, width: nextWidth, height: nextHeight});
+            window.webContentsView.setBounds({x: 0, y: 0, width: nextWidth, height: nextHeight});
+            if (notifyEvents) window.emit("resize");
+        }
+        if (notifyEvents && moved) window.emit("move");
+        if (notifyEvents && maximizeChanged) {
+            window.emit(maximized ? "maximize" : "unmaximize");
+        }
         return true;
     }
 
@@ -930,6 +1397,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             getContentBounds: () => target.getContentBounds(),
             getContentSize: () => target.getContentSize(),
             getPosition: () => target.getPosition(), getTitle: () => target.getTitle(),
+            getBackgroundColor: () => target.getBackgroundColor(),
             center: () => target.center(),
             setTitle: () => target.setTitle(args[0]), setBounds: () => target.setBounds(args[0]),
             setContentBounds: () => target.setContentBounds(args[0]),
@@ -949,17 +1417,53 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             getURL: () => target.getURL(), getTitle: () => target.getTitle(),
             getType: () => target.getType(), getProcessId: () => target.getProcessId(),
             getOSProcessId: () => target.getOSProcessId(),
+            isCrashed: () => target.isCrashed(),
+            getUserAgent: () => target.getUserAgent(),
+            setUserAgent: () => target.setUserAgent(args[0]),
             getZoomFactor: () => target.getZoomFactor(),
+            setZoomFactor: () => target.setZoomFactor(args[0]),
+            getZoomLevel: () => target.getZoomLevel(),
+            setZoomLevel: () => target.setZoomLevel(args[0]),
+            getBackgroundThrottling: () => target.getBackgroundThrottling(),
+            undo: () => target.undo(), redo: () => target.redo(),
+            cut: () => target.cut(), copy: () => target.copy(),
+            paste: () => target.paste(), pasteAndMatchStyle: () => target.pasteAndMatchStyle(),
+            delete: () => target.delete(), selectAll: () => target.selectAll(),
+            unselect: () => target.unselect(), centerSelection: () => target.centerSelection(),
+            scrollToTop: () => target.scrollToTop(),
+            scrollToBottom: () => target.scrollToBottom(),
+            replace: () => target.replace(args[0]),
+            replaceMisspelling: () => target.replaceMisspelling(args[0]),
+            isLoading: () => target.isLoading(),
+            isLoadingMainFrame: () => target.isLoadingMainFrame(),
+            isWaitingForResponse: () => target.isWaitingForResponse(),
+            "navigationHistory.canGoBack": () => target.navigationHistory.canGoBack(),
+            "navigationHistory.canGoForward": () => target.navigationHistory.canGoForward(),
+            "navigationHistory.canGoToOffset": () => target.navigationHistory.canGoToOffset(args[0]),
+            "navigationHistory.clear": () => target.navigationHistory.clear(),
+            "navigationHistory.getActiveIndex": () => target.navigationHistory.getActiveIndex(),
+            "navigationHistory.getEntryAtIndex": () => target.navigationHistory.getEntryAtIndex(args[0]),
+            "navigationHistory.goBack": () => target.navigationHistory.goBack(),
+            "navigationHistory.goForward": () => target.navigationHistory.goForward(),
+            "navigationHistory.goToIndex": () => target.navigationHistory.goToIndex(args[0]),
+            "navigationHistory.goToOffset": () => target.navigationHistory.goToOffset(args[0]),
+            "navigationHistory.length": () => target.navigationHistory.length(),
+            "navigationHistory.removeEntryAtIndex": () => target.navigationHistory.removeEntryAtIndex(args[0]),
+            "navigationHistory.getAllEntries": () => target.navigationHistory.getAllEntries(),
+            "navigationHistory.restore": () => target.navigationHistory.restore(args[0]),
             focus: () => target.focus(),
             canGoBack: () => target.canGoBack(), canGoForward: () => target.canGoForward(),
             getNavigationHistory: () => target.getNavigationHistory(),
             goBack: () => target.goBack(), goForward: () => target.goForward(),
+            isDevToolsOpened: () => target.isDevToolsOpened(),
             clearHistory: () => target.clearHistory(),
             isDestroyed: () => target.isDestroyed(),
             send: () => target.send(args[0], ...args.slice(1)),
+            stop: () => target.stop(),
+            clearCache: () => target.clearCache(),
             setBackgroundThrottling: () => target.setBackgroundThrottling(args[0]),
-            setZoomFactor: () => target.setZoomFactor(args[0]),
-            openDevTools: () => target.openDevTools(), closeDevTools: () => target.closeDevTools()
+            openDevTools: () => target.openDevTools(args[0]),
+            closeDevTools: () => target.closeDevTools()
         };
         const call = (type === "window" ? windowCalls : webContentsCalls)[method];
         if (typeof call !== "function") {
@@ -993,7 +1497,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         if (!target || target.destroyed || !Array.isArray(args)) {
             throw new Error(`Electron ${type} was destroyed`);
         }
-        if (method === "loadURL") return await target.loadURL(args[0]);
+        if (method === "loadURL") return await target.loadURL(args[0], args[1]);
         if (method === "loadFile") return target.loadFile(args[0], args[1]);
         if (method === "reload" && type === "webContents") return target.reload();
         if (method === "reloadIgnoringCache" && type === "webContents") {
@@ -1002,11 +1506,17 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         if (method === "executeJavaScript" && type === "webContents") {
             return target.executeJavaScript(args[0], args[1]);
         }
+        if (method === "insertText" && type === "webContents") {
+            return await target.insertText(args[0]);
+        }
         if (method === "insertCSS" && type === "webContents") {
             return target.insertCSS(args[0]);
         }
         if (method === "removeInsertedCSS" && type === "webContents") {
             return target.removeInsertedCSS(args[0]);
+        }
+        if (method === "clearCache" && type === "webContents") {
+            return await target.clearCache();
         }
         if (method === "executeJavaScriptInIsolatedWorld" && type === "webContents") {
             if (args[0] !== 0) throw new Error("isolated JavaScript worlds are unavailable in Nexa WebView");
@@ -1444,47 +1954,56 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
     ipcMain.on("clipboard.has", (event, format, type) => {
         event.returnValue = clipboard.has(format, type);
     });
-    function createSession() {
+    function createSession(partition = "default") {
         const session = new EventEmitter();
-        const cookies = new Map();
-        const matchesUrl = (cookie, url) => {
-            if (!url) return true;
-            const parsed = new URL(url);
-            const domain = cookie.domain.replace(/^\./, "");
-            return (parsed.hostname === domain || parsed.hostname.endsWith(`.${domain}`)) &&
-                parsed.pathname.startsWith(cookie.path || "/") &&
-                (!cookie.secure || parsed.protocol === "https:");
+        const temporary = partition !== "default" && !partition.startsWith("persist:");
+        const profileKey = createHash("sha256")
+            .update(`${path.resolve(appPath)}\0${partition}`)
+            .digest("hex").slice(0, 32);
+        session.partition = partition;
+        session.temporary = temporary;
+        session.webRequestEnabled = false;
+        session.profileName = `nexa_${profileKey}${temporary
+            ? `_${randomBytes(8).toString("hex")}` : ""}`;
+        sessionWebContents.set(session, new Set());
+        const cookieCall = async (action, values = {}) => {
+            const result = await nativeCall({method: "session.cookies", action,
+                profileName: session.profileName, ...values});
+            if (result && typeof result === "object" && result.error) {
+                throw new Error(result.error);
+            }
+            return result;
         };
         session.cookies = {
-            get: async (filter = {}) => [...cookies.values()].filter(cookie =>
-                (!filter.name || cookie.name === filter.name) &&
-                (!filter.domain || cookie.domain.endsWith(filter.domain)) &&
-                (!filter.path || cookie.path === filter.path) &&
-                (filter.secure === undefined || cookie.secure === filter.secure) &&
-                matchesUrl(cookie, filter.url) &&
-                (!cookie.expirationDate || cookie.expirationDate > Date.now() / 1000)
-            ),
+            get: async (filter = {}) => {
+                if (!filter.url) {
+                    throw new Error("Electron cookie queries need a URL on Nexa WebView");
+                }
+                if (filter.domain || filter.path || filter.secure !== undefined ||
+                    filter.session !== undefined) {
+                    throw new Error("this Android WebView provider cannot filter cookie attributes");
+                }
+                return cookieCall("get", {url: filter.url, name: filter.name});
+            },
             set: async details => {
-                const parsed = new URL(details.url);
-                const cookie = {
-                    name: details.name,
-                    value: details.value,
-                    domain: details.domain || parsed.hostname,
-                    path: details.path || "/",
-                    secure: details.secure ?? parsed.protocol === "https:",
-                    httpOnly: details.httpOnly ?? false,
-                    sameSite: details.sameSite || "unspecified",
-                    session: details.expirationDate === undefined,
-                    expirationDate: details.expirationDate
-                };
-                cookies.set(`${cookie.domain}:${cookie.path}:${cookie.name}`, cookie);
+                if (!details || typeof details !== "object" ||
+                    typeof details.url !== "string") {
+                    throw new TypeError("Electron cookies.set needs a URL");
+                }
+                const supported = new Set(["url", "name", "value", "domain", "path",
+                    "secure", "httpOnly", "sameSite", "expirationDate"]);
+                const unsupported = Object.keys(details).find(key => !supported.has(key));
+                if (unsupported) {
+                    throw new Error(`Electron cookie attribute is not supported: ${unsupported}`);
+                }
+                await cookieCall("set", {url: details.url, details});
             },
             remove: async (url, name) => {
-                for (const [key, cookie] of cookies) {
-                    if (cookie.name === name && matchesUrl(cookie, url)) cookies.delete(key);
-                }
+                await cookieCall("remove", {url, name});
             },
-            getAll: async () => [...cookies.values()]
+            getAll: async () => {
+                throw new Error("enumerating all Electron cookies is not supported by Android WebView");
+            },
         };
         session.resolveHost = resolveHost;
         session.preconnect = ({url}) => {
@@ -1496,25 +2015,92 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             "onHeadersReceived", "onResponseStarted", "onBeforeRedirect",
             "onCompleted", "onErrorOccurred"]) {
             session.webRequest[method] = (filter, listener) => {
+                if (filter === null && listener === undefined) {
+                    listener = null;
+                    filter = undefined;
+                }
                 if (typeof filter === "function") {
                     listener = filter;
                     filter = {};
                 }
                 if (listener === null) {
                     webRequestHandlers.delete(method);
+                    if (method === "onBeforeRequest" && session.webRequestEnabled) {
+                        session.webRequestEnabled = false;
+                        void Promise.resolve(nativeCall({method: "session.setWebRequestEnabled",
+                            profileName: session.profileName, enabled: false})).catch(error =>
+                            console.warn(`could not disable Electron request interception: ${error.message}`));
+                    }
                     return;
+                }
+                if (method !== "onBeforeRequest") {
+                    throw new Error(`Electron webRequest.${method} is not supported by Nexa WebView yet`);
                 }
                 if (typeof listener !== "function") {
                     throw new TypeError(`${method} requires a listener`);
                 }
-                webRequestHandlers.set(method, {filter: filter || {}, listener});
+                const requestFilter = filter || {};
+                if (typeof requestFilter !== "object" || Array.isArray(requestFilter)) {
+                    throw new TypeError("webRequest filter must be an object");
+                }
+                if (requestFilter.resourceTypes !== undefined) {
+                    throw new Error("Android WebView does not expose Electron resource types");
+                }
+                if (requestFilter.urls !== undefined &&
+                    (!Array.isArray(requestFilter.urls) ||
+                        requestFilter.urls.some(pattern => typeof pattern !== "string"))) {
+                    throw new TypeError("webRequest filter urls must be an array of patterns");
+                }
+                webRequestHandlers.set(method, {filter: requestFilter, listener});
+                if (method === "onBeforeRequest" && !session.webRequestEnabled) {
+                    session.webRequestEnabled = true;
+                    void Promise.resolve(nativeCall({method: "session.setWebRequestEnabled",
+                        profileName: session.profileName, enabled: true})).catch(error =>
+                        console.warn(`could not enable Electron request interception: ${error.message}`));
+                }
             };
         }
-        session.webRequest.dispatch = (method, details, callback) => {
+        session.webRequest.dispatch = async (method, details) => {
             const registration = webRequestHandlers.get(method);
-            if (!registration) return;
-            if (callback) registration.listener(details, callback);
-            else registration.listener(details);
+            if (!registration) return {};
+            const patterns = registration.filter.urls || ["<all_urls>"];
+            if (!patterns.some(pattern => matchesRequestUrl(pattern, details.url))) return {};
+            return await new Promise((resolve, reject) => {
+                let settled = false;
+                const timeout = setTimeout(() => {
+                    if (settled) return;
+                    settled = true;
+                    reject(new Error("Electron onBeforeRequest listener did not call its callback"));
+                }, 30_000);
+                const finish = result => {
+                    if (settled) return;
+                    if (result !== undefined && result !== null &&
+                        (typeof result !== "object" || Array.isArray(result))) {
+                        settled = true;
+                        clearTimeout(timeout);
+                        reject(new TypeError("webRequest callback response must be an object"));
+                        return;
+                    }
+                    settled = true;
+                    clearTimeout(timeout);
+                    resolve(result || {});
+                };
+                try {
+                    const result = registration.listener(details, finish);
+                    if (result && typeof result.then === "function") {
+                        result.then(finish, error => {
+                            if (settled) return;
+                            settled = true;
+                            clearTimeout(timeout);
+                            reject(error);
+                        });
+                    }
+                } catch (error) {
+                    settled = true;
+                    clearTimeout(timeout);
+                    reject(error);
+                }
+            });
         };
         const registeredProtocols = new Map();
         protocolHandlers.set(session, registeredProtocols);
@@ -1539,8 +2125,22 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         };
         session.getCacheSize = async () => 0;
         session.getSharedDictionaryUsageInfo = async () => [];
-        session.clearCache = async () => {};
-        session.clearStorageData = async () => {};
+        session.clearCache = async () => {
+            const webContents = [...sessionWebContents.get(session)]
+                .find(contents => !contents.destroyed);
+            if (webContents) await webContents.clearCache();
+        };
+        session.clearStorageData = async options => {
+            if (options !== undefined && options !== null &&
+                (typeof options !== "object" || Array.isArray(options))) {
+                throw new TypeError("Electron session.clearStorageData options must be an object");
+            }
+            if (options && Object.keys(options).length) {
+                throw new Error("filtered Electron session.clearStorageData is not supported yet");
+            }
+            await nativeCall({method: "session.clearStorageData",
+                profileName: session.profileName});
+        };
         // Android WebView owns this cache; clearing it on each launch defeats its warm start.
         session.clearCodeCaches = async () => {};
         session.flushStorageData = async () => {};
@@ -1571,8 +2171,9 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         }
     };
     function sessionForPartition(partition) {
+        if (partition === "persist:default") partition = "default";
         if (!sessions.has(partition)) {
-            const session = createSession();
+            const session = createSession(partition);
             sessions.set(partition, session);
             app.emit("session-created", {}, session);
         }
@@ -2631,6 +3232,16 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         };
     });
 
+    ipcMain.handle("nexa:electron:webRequest", async (event, details) => {
+        const webContents = event.sender;
+        if (!webContents || webContents.destroyed) {
+            throw new Error("Electron WebContents was destroyed during request interception");
+        }
+        details.webContents = webContents;
+        details.webContentsId = webContents.id;
+        return webContents.session.webRequest.dispatch("onBeforeRequest", details);
+    });
+
     function dispatchRendererEvent(message) {
         if (message.type === "screenMetricsChanged") {
             updateScreenMetrics(message.value);
@@ -2643,7 +3254,56 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         if (!window) return;
         const rendererContents = webContents || window.webContents;
         const value = message.value || {};
-        if (message.type === "webviewNavigation") {
+        if (message.type === "webviewTitleChanged") {
+            const title = String(value.title ?? "");
+            const explicitSet = value.explicitSet === true;
+            rendererContents.title = title;
+            const titleEvent = {defaultPrevented: false,
+                preventDefault() { this.defaultPrevented = true; }};
+            rendererContents.emit("page-title-updated", titleEvent, title, explicitSet);
+            if (rendererContents === window.webContents) {
+                window.emit("page-title-updated", titleEvent, title, explicitSet);
+            }
+            if (rendererContents === window.webContents && !titleEvent.defaultPrevented) {
+                window.title = title || window.options.title || "";
+                window.notifyState("title", {title: window.title});
+            }
+        } else if (message.type === "webviewNavigation") {
+            if (value.isMainFrame === true) {
+                setWebContentsMainFrameLoading(rendererContents, true);
+                setWebContentsLoading(rendererContents, true);
+                setWebContentsWaitingForResponse(rendererContents, true);
+            }
+            rendererContents.emit("did-start-navigation", {}, value.url, false,
+                value.isMainFrame ?? null);
+        } else if (message.type === "webviewInPageNavigation") {
+            const url = String(value.url || "");
+            rendererContents.url = url;
+            if (rendererContents === window.webContents) window.url = url;
+            const snapshot = value.navigationHistory;
+            if (Array.isArray(snapshot?.entries) &&
+                Number.isInteger(snapshot.index) && snapshot.index >= 0 &&
+                snapshot.index < snapshot.entries.length &&
+                snapshot.entries[snapshot.index]?.url === url &&
+                snapshot.entries.every(entry => typeof entry?.url === "string")) {
+                rendererContents._navigationHistory = {
+                    entries: snapshot.entries.map((entry, index) => ({
+                        id: index, url: entry.url, title: String(entry.title || "")
+                    })),
+                    index: snapshot.index,
+                    targetIndex: null
+                };
+            } else {
+                recordNavigation(rendererContents, url);
+            }
+            rendererContents.emit("did-start-navigation", {}, url, true, true);
+            rendererContents.emit("did-navigate-in-page", {}, url, true);
+        } else if (message.type === "webviewLoadStarted") {
+            setWebContentsMainFrameLoading(rendererContents, true);
+            setWebContentsLoading(rendererContents, true);
+            setWebContentsWaitingForResponse(rendererContents, true);
+        } else if (message.type === "webviewCommitVisible") {
+            setWebContentsWaitingForResponse(rendererContents, false);
             rendererContents.url = value.url || rendererContents.url;
             if (rendererContents === window.webContents) window.url = rendererContents.url;
             recordNavigation(rendererContents, rendererContents.url);
@@ -2653,21 +3313,36 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                     trustOrigin?.(parsed.origin);
                 }
             } catch (_) {}
-            rendererContents.emit("did-start-navigation", {}, value.url, false, true);
-            rendererContents.emit("did-navigate", {}, value.url);
-        } else if (message.type === "webviewProgress" && value.progress >= 100) {
-            if (rendererContents === window.webContents) window.finishLoad();
-            else {
-                const pending = rendererContents.pendingLoad;
-                rendererContents.pendingLoad = null;
-                pending?.resolve();
-            }
-            rendererContents.emit("did-finish-load");
-            if (rendererContents === window.webContents && !window.readyToShow) {
-                window.readyToShow = true;
-                window.emit("ready-to-show");
+            rendererContents.emit("did-navigate", {}, rendererContents.url);
+        } else if (message.type === "webviewLoadFinished") {
+            setWebContentsMainFrameLoading(rendererContents, false);
+            rendererContents.emit("did-frame-finish-load", {}, true, process.pid,
+                rendererContents.id);
+        } else if (message.type === "webviewProgress") {
+            if (value.progress >= 100) {
+                setWebContentsWaitingForResponse(rendererContents, false);
+                setWebContentsMainFrameLoading(rendererContents, false);
+                setWebContentsLoading(rendererContents, false);
+                if (rendererContents === window.webContents) window.finishLoad();
+                else {
+                    const pending = rendererContents.pendingLoad;
+                    rendererContents.pendingLoad = null;
+                    pending?.resolve();
+                }
+                rendererContents.emit("did-finish-load");
+                if (rendererContents === window.webContents && !window.readyToShow) {
+                    window.readyToShow = true;
+                    window.emit("ready-to-show");
+                }
+            } else {
+                setWebContentsLoading(rendererContents, true);
             }
         } else if (message.type === "webviewError") {
+            if (value.isMainFrame !== false) {
+                setWebContentsWaitingForResponse(rendererContents, false);
+            }
+            setWebContentsMainFrameLoading(rendererContents, false);
+            setWebContentsLoading(rendererContents, false);
             rendererContents._navigationHistory.targetIndex = null;
             const error = new Error(value.description || value.error || "load failed");
             if (rendererContents === window.webContents) window.finishLoad(error);
@@ -2675,16 +3350,27 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                 rendererContents.pendingLoad?.reject(error);
                 rendererContents.pendingLoad = null;
             }
-            rendererContents.emit("did-fail-load", {}, value.code || -1,
-                value.description || value.error || "load failed", value.url || "", true);
+            rendererContents.emit("did-fail-load", {
+                platformErrorCode: value.platformErrorCode
+            }, value.code ?? -2,
+                value.description || value.error || "load failed", value.url || "",
+                value.isMainFrame ?? true);
         } else if (message.type === "webviewDestroyed") {
+            rendererContents._isCrashed = value.crashed === true;
+            setWebContentsWaitingForResponse(rendererContents, false);
+            setWebContentsMainFrameLoading(rendererContents, false);
+            setWebContentsLoading(rendererContents, false);
             const error = new Error("webview renderer was destroyed");
             if (rendererContents === window.webContents) window.finishLoad(error);
             else {
                 rendererContents.pendingLoad?.reject(error);
                 rendererContents.pendingLoad = null;
             }
-            rendererContents.emit("render-process-gone", {}, {reason: "crashed", exitCode: 1});
+            const details = {
+                reason: rendererContents._isCrashed ? "crashed" : "killed"
+            };
+            app.emit("render-process-gone", {}, rendererContents, details);
+            rendererContents.emit("render-process-gone", {}, details);
         }
     }
 
@@ -2755,7 +3441,8 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
     }
 
     return {
-        electron, dispatch, dispatchProtocolRequest, dispatchRendererEvent, runMain, windowCommand,
+        electron, dispatch, dispatchProtocolRequest, dispatchRendererEvent, runMain,
+        updateDevToolsState, updateWindowGeometry, windowCommand,
         getPreload(windowId) {
             return windows.get(windowId)?.getPreloadResponse() ??
                 contents.get(windowId)?.getPreloadResponse?.() ?? null;

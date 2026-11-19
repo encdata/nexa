@@ -60,10 +60,15 @@ class Connection(tg.Connection):
                             a.on_config(e.value)
                         case [tg.Event.click | tg.Event.longClick | tg.Event.focusChange | tg.Event.key |
                               tg.Event.touch | tg.Event.refresh | tg.Event.selected | tg.Event.itemselected |
-                              tg.Event.text | tg.Event.webviewNavigation | tg.Event.webviewHTTPError |
+                              tg.Event.text | tg.Event.webviewNavigation | tg.Event.webviewInPageNavigation |
+                              tg.Event.webviewLoadStarted |
+                              tg.Event.webviewCommitVisible | tg.Event.webviewLoadFinished |
+                              tg.Event.webviewHTTPError |
                               tg.Event.webviewError | tg.Event.webviewDestroyed | tg.Event.webviewProgress |
+                              tg.Event.webviewTitleChanged |
                               tg.Event.webviewConsoleMessage | tg.Event.webviewBridgeMessage |
-                              tg.Event.webviewBridgeError]:
+                              tg.Event.webviewBridgeError | tg.Event.webviewDownload |
+                              tg.Event.webviewDownloadError]:
                             if a.root is not None:
                                 _dispatch_event_recursive(e, a.root)
                         case _:

@@ -107,6 +107,7 @@ class BrowserSession:
             ("address", None, 0),
             ("go", "go", 42),
             ("bookmark", "☆", 38),
+            ("devtools", "dev", 42),
             ("javascript", "js", 38),
         ]
         if self.rtl:
@@ -227,7 +228,7 @@ class BrowserSession:
             return f"https://{value}"
         return SEARCH_URL.format(quote_plus(value))
 
-    def _new_tab(self):
+    def _new_tab(self, initial_url=None, javascript=False):
         self.next_tab_id += 1
         tab_id = self.next_tab_id
         tab_layout = self.tab_template.create(self.tab_list)
@@ -237,18 +238,27 @@ class BrowserSession:
 
         tab = {"id": tab_id, "layout": tab_layout, "row": row_view,
                "button": tab_button, "close": close_button,
-               "url": "", "stack": [], "index": -1, "javascript": False}
+               "url": "", "stack": [], "index": -1, "javascript": javascript,
+               "is_devtools": False, "devtools_target_tab_id": None,
+               "devtools_tab_id": None}
         self.tabs[tab_id] = tab
         self.buttons[tab_button.id] = ("select_tab", tab_id)
         self.buttons[close_button.id] = ("close_tab", tab_id)
-        webview = tg.WebView(self.activity, self.pages)
+        webview = tg.WebView(self.activity, self.pages, enable_javascript=javascript)
         webview.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
         self._set_desktop_mode(webview)
         webview.allownavigation(True)
         tab["webview"] = webview
         self.webviews[webview.id] = tab_id
         self._select_tab(tab_id)
-        self._load_url(tab, "https://www.google.com")
+        if initial_url:
+            tab["url"] = initial_url
+            webview.loaduri(initial_url)
+            if tab_id == self.active_tab:
+                self.address.settext(initial_url)
+                self._update_tab_label(tab)
+        else:
+            self._load_url(tab, "https://www.google.com")
         return tab_id
 
     def _set_desktop_mode(self, webview):
@@ -277,6 +287,13 @@ class BrowserSession:
         tab = self.tabs.get(tab_id)
         if tab is None:
             return
+        if tab["devtools_tab_id"] in self.tabs:
+            self._close_tab(tab["devtools_tab_id"])
+        if tab["is_devtools"]:
+            target = self.tabs.get(tab["devtools_target_tab_id"])
+            if target is not None:
+                target["devtools_tab_id"] = None
+                target["webview"].close_devtools()
         was_active = tab_id == self.active_tab
         self.webviews.pop(tab["webview"].id, None)
         self.buttons.pop(tab["button"].id, None)
@@ -401,6 +418,35 @@ class BrowserSession:
         self.javascript_button.settext("js on" if tab["javascript"] else "js")
         self.status.settext("javascript enabled" if tab["javascript"] else "javascript disabled")
 
+    def _open_devtools(self):
+        tab = self.tabs[self.active_tab]
+        if tab["is_devtools"]:
+            self.status.settext("devtools is already open in this tab")
+            return
+        if tab["devtools_tab_id"] in self.tabs:
+            self._select_tab(tab["devtools_tab_id"])
+            return
+        if not tab["url"]:
+            self.status.settext("open a page before opening devtools")
+            return
+        try:
+            frontend_url = tab["webview"].get_devtools_url()
+        except Exception as error:
+            self.status.settext(f"devtools failed: {error}")
+            return
+        if not frontend_url:
+            self.status.settext("webview devtools is unavailable")
+            return
+        target_tab_id = tab["id"]
+        devtools_id = self._new_tab(initial_url=frontend_url, javascript=True)
+        devtools_tab = self.tabs[devtools_id]
+        devtools_tab["is_devtools"] = True
+        devtools_tab["devtools_target_tab_id"] = target_tab_id
+        devtools_tab["layout"].set("button", text="devtools")
+        tab["devtools_tab_id"] = devtools_id
+        self._select_tab(devtools_id)
+        self.status.settext("webview devtools")
+
     def _update_tab_label(self, tab):
         host = urlsplit(tab["url"]).hostname if tab["url"] else None
         label = host.removeprefix("www.") if host else "new tab"
@@ -494,6 +540,12 @@ a {{ color:#{palette.accent & 0xFFFFFF:06x}; overflow-wrap:anywhere; }} li {{ ma
                           tg.Event.webviewHTTPError, tg.Event.webviewError,
                           tg.Event.webviewDestroyed):
             return self._handle_webview_event(event)
+        if event.type == tg.Event.webviewDownload:
+            self.status.settext(f"download started: {event.value.get('fileName', 'file')}")
+            return True
+        if event.type == tg.Event.webviewDownloadError:
+            self.status.settext(f"download failed: {event.value.get('error', 'unknown error')}")
+            return True
         if event.type != tg.Event.click:
             return False
         if event.id == self.address.id:
@@ -516,6 +568,8 @@ a {{ color:#{palette.accent & 0xFFFFFF:06x}; overflow-wrap:anywhere; }} li {{ ma
             self._toggle_bookmark()
         elif action == "javascript":
             self._toggle_javascript()
+        elif action == "devtools":
+            self._open_devtools()
         elif action == "new_tab":
             self._new_tab()
         elif action == "select_tab":

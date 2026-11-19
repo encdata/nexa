@@ -1,8 +1,10 @@
 import json
 from collections import deque
+from concurrent.futures import Future
 import logging
 import os
 from pathlib import Path
+import re
 from queue import Empty, Full, Queue
 import secrets
 import shlex
@@ -29,6 +31,21 @@ def _background_throttling(options):
     return preferences.get("backgroundThrottling") is not False
 
 
+def _load_headers(options):
+    headers = options.get("headers", {}) if isinstance(options, dict) else {}
+    if not isinstance(headers, dict):
+        raise ValueError("Electron loadURL headers must be an object")
+    validated = {}
+    for name, value in headers.items():
+        if (not isinstance(name, str) or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name)
+                or not isinstance(value, str)
+                or any(ord(char) < 32 and char not in "\t" or ord(char) == 127
+                       for char in value)):
+            raise ValueError("Electron loadURL contains an invalid HTTP header")
+        validated[name] = value
+    return validated or None
+
+
 class ElectronHost:
     def __init__(self, app_root, entry="index.html", node=None, main_entry=None,
                  screen_size=None, scale_factor=1.0, environment=None,
@@ -49,13 +66,19 @@ class ElectronHost:
         self.window_id = None
         self.renderer_options = {}
         self.renderer_title = ""
+        self.renderer_user_agent = None
+        self.renderer_load_options = {"headers": {}}
         self.renderer_visible = True
+        self.renderer_profile_name = None
+        self.renderer_profile_temporary = False
+        self.renderer_web_request_enabled = False
         self._events = Queue(maxsize=HOST_EVENT_QUEUE_SIZE)
         self._pending = deque()
         self._reader = None
         self._event_reader = None
         self._event_stream = None
         self._control_stream = None
+        self._control_lock = Lock()
         self._process_group = False
         self._reader_stop = Event()
         self._renderer_event_queue = Queue(maxsize=64)
@@ -191,7 +214,12 @@ class ElectronHost:
                     self.preload_url = message.get("preloadUrl")
                     self.renderer_options = message.get("options") or {}
                     self.renderer_title = message.get("title") or ""
+                    self.renderer_user_agent = message.get("userAgent")
+                    self.renderer_load_options = message.get("loadOptions") or {"headers": {}}
                     self.renderer_visible = message.get("visible", True)
+                    self.renderer_profile_name = message.get("profileName")
+                    self.renderer_profile_temporary = message.get("profileTemporary") is True
+                    self.renderer_web_request_enabled = message.get("webRequestEnabled") is True
                     logger.info("Electron main process created window %s at %s (visible=%s)",
                                 self.window_id, self.url, self.renderer_visible)
                     break
@@ -305,28 +333,67 @@ class ElectronHost:
             "scaleFactor": scale_factor
         }, None)
 
+    def update_window_geometry(self, window_id, x, y, width, height, maximized):
+        if not self.main_entry:
+            return False
+        return self._send_control_message({
+            "kind": "windowGeometry",
+            "windowId": window_id,
+            "x": x,
+            "y": y,
+            "width": width,
+            "height": height,
+            "maximized": maximized
+        })
+
+    def update_devtools_state(self, contents_id, opened):
+        if not self.main_entry:
+            return False
+        return self._send_control_message({
+            "kind": "devToolsState",
+            "contentsId": contents_id,
+            "opened": bool(opened)
+        })
+
     def _post_renderer_event(self, event_type, value, window_id=None):
-        control_stream = self._control_stream
-        if control_stream is None or not self.main_entry:
+        if not self.main_entry:
             return
         payload = {"kind": "rendererEvent",
                    "windowId": self.window_id if window_id is None else window_id,
                    "type": event_type, "value": value}
+        self._send_control_message(payload)
+
+    def native_call_result(self, request_id, value=None, error=None):
+        payload = {"kind": "nativeCallResult", "requestId": request_id,
+                   "value": value}
+        if error is not None:
+            payload["error"] = str(error)
+        return self._send_control_message(payload)
+
+    def _send_control_message(self, payload):
+        control_stream = self._control_stream
+        if control_stream is None:
+            return False
         try:
             data = (json.dumps(payload, separators=(",", ":")) + "\n").encode()
             if len(data) > 1024 * 1024:
-                logger.warning("Electron renderer event exceeds 1 MiB; dropping it")
-                return
-            offset = 0
-            while offset < len(data):
-                written = control_stream.write(data[offset:])
-                if not written:
-                    raise OSError("renderer event pipe accepted no data")
-                offset += written
+                logger.warning("Electron control message exceeds 1 MiB; dropping it")
+                return False
+            with self._control_lock:
+                if self._control_stream is not control_stream:
+                    return False
+                offset = 0
+                while offset < len(data):
+                    written = control_stream.write(data[offset:])
+                    if not written:
+                        raise OSError("Electron control pipe accepted no data")
+                    offset += written
+            return True
         except (OSError, ValueError) as error:
             if not self._renderer_event_stop.is_set():
-                logger.warning("Electron renderer event pipe failed: %s", error)
+                logger.warning("Electron control pipe failed: %s", error)
                 self._renderer_event_stop.set()
+            return False
 
     def window_command(self, window_id, action):
         if self.server_url is None:
@@ -383,6 +450,8 @@ class ElectronHost:
         self.window_id = None
         self.renderer_options = {}
         self.renderer_title = ""
+        self.renderer_user_agent = None
+        self.renderer_load_options = {"headers": {}}
         self.renderer_visible = True
         self.preload_url = None
         if process is not None and process_group:
@@ -501,14 +570,25 @@ class ElectronWebsiteRenderer:
 
 class _ElectronWindowView:
     def __init__(self, controller, activity, parent, window_id, url, preload_url=None,
-                 window_visible=True, container_visible=True, background_throttling=True):
+                 window_visible=True, container_visible=True, background_throttling=True,
+                 profile_name=None, web_request_enabled=None, user_agent=None,
+                 load_options=None):
         self.controller = controller
         self.host = controller.host
         self.activity = activity
         self.parent = parent
         self.window_id = window_id
         self.url = url
+        self.load_options = load_options or {"headers": {}}
         self.preload_url = preload_url
+        self.user_agent = (self.host.renderer_user_agent
+                           if user_agent is None else user_agent)
+        self.profile_name = profile_name or self.host.renderer_profile_name
+        self.web_request_enabled = (self.host.renderer_web_request_enabled
+                                    if web_request_enabled is None
+                                    else web_request_enabled)
+        if self.profile_name in controller._web_request_profiles:
+            self.web_request_enabled = True
         self.window_visible = window_visible
         self.container_visible = container_visible
         self.background_throttling = bool(background_throttling)
@@ -530,6 +610,8 @@ class _ElectronWindowView:
                 "ipc_endpoint": self.host.sync_ipc_url,
                 "ipc_token": self.host.ipc_token,
                 "window_id": window_id,
+                "profile_name": self.profile_name,
+                "web_request_enabled": self.web_request_enabled,
                 "background_throttling": self.background_throttling
             })
         if not self.visible:
@@ -537,13 +619,15 @@ class _ElectronWindowView:
             self._applied_visible = False
         self.webview.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
         self.webview.setdesktopmode(True)
+        if isinstance(self.user_agent, str):
+            self.webview.setuseragent(self.user_agent)
         self.webview.allownavigation(True)
         self.ipc = tg.ElectronBridge(
             self.webview,
             transport=lambda request: self.host.ipc_request(request, self.window_id),
             on_ready=lambda: controller._bridge_ready(self.window_id))
         self.ipc.handle("__nexa:renderer-error", self._log_renderer_error)
-        self.webview.loaduri(url)
+        self.webview.loaduri(url, _load_headers(self.load_options))
 
     @staticmethod
     def _log_renderer_error(detail):
@@ -596,13 +680,15 @@ class _ElectronWindowView:
                       json.dumps(home) + ";\n" + script)
         return script
 
-    def load(self, url):
+    def load(self, url, load_options=None):
         self.url = url
+        if load_options is not None:
+            self.load_options = load_options
         if self._renderer_dead:
             if self.visible:
                 self.controller._restore_renderer(self)
             return
-        self.webview.loaduri(url)
+        self.webview.loaduri(url, _load_headers(self.load_options))
 
     def handle_event(self, event):
         current = self.controller._views.get(self.window_id)
@@ -618,9 +704,12 @@ class _ElectronWindowView:
             value = event.value
             self._log_console_error(value)
             return True
-        if event.type in (tg.Event.webviewNavigation, tg.Event.webviewProgress,
+        if event.type in (tg.Event.webviewNavigation, tg.Event.webviewInPageNavigation,
+                          tg.Event.webviewLoadStarted,
+                          tg.Event.webviewCommitVisible, tg.Event.webviewLoadFinished,
+                          tg.Event.webviewProgress,
                           tg.Event.webviewHTTPError, tg.Event.webviewError,
-                          tg.Event.webviewDestroyed):
+                          tg.Event.webviewDestroyed, tg.Event.webviewTitleChanged):
             if event.type == tg.Event.webviewProgress:
                 progress = event.value.get("progress")
                 if progress == 100:
@@ -680,6 +769,10 @@ class _ElectronWindowView:
     def on_screen_resize(self, width, height, scale_factor):
         self.controller.on_screen_resize(width, height, scale_factor)
 
+    def on_window_geometry(self, x, y, width, height, maximized):
+        self.controller.host.update_window_geometry(
+            self.window_id, x, y, width, height, maximized)
+
     @property
     def visible(self):
         return self.window_visible and self.container_visible
@@ -716,10 +809,14 @@ class _ElectronEmbeddedView:
         self.activity = controller.activity
         self.parent = parent
         self.url = message.get("url", "about:blank")
+        self.load_options = message.get("loadOptions") or {"headers": {}}
+        self.user_agent = message.get("userAgent")
+        self.profile_name = message.get("profileName")
         self.bounds = {"x": 0, "y": 0, "width": 1, "height": 1}
         options = message.get("options") or {}
         self.background_throttling = _background_throttling(options)
         self._closed = False
+        self._user_agent_ready = False
         self._renderer_console_errors = {}
         self.webview = tg.WebView(
             self.activity, self.parent,
@@ -732,6 +829,8 @@ class _ElectronEmbeddedView:
                 "ipc_endpoint": self.host.sync_ipc_url,
                 "ipc_token": self.host.ipc_token,
                 "window_id": contents_id,
+                "profile_name": self.profile_name,
+                "web_request_enabled": message.get("webRequestEnabled") is True,
                 "background_throttling": self.background_throttling
             })
         self.ipc = tg.ElectronBridge(
@@ -741,8 +840,11 @@ class _ElectronEmbeddedView:
         self.ipc.handle("__nexa:renderer-error", _ElectronWindowView._log_renderer_error)
         self.apply_state(message)
         self.webview.setdesktopmode(True)
+        self._user_agent_ready = True
+        if isinstance(self.user_agent, str):
+            self.webview.setuseragent(self.user_agent)
         self.webview.allownavigation(True)
-        self.webview.loaduri(self.url)
+        self.webview.loaduri(self.url, _load_headers(self.load_options))
 
     def _preload(self):
         script = ELECTRON_PRELOAD
@@ -763,6 +865,11 @@ class _ElectronEmbeddedView:
         return script
 
     def apply_state(self, state):
+        user_agent = state.get("userAgent")
+        if isinstance(user_agent, str) and user_agent != self.user_agent:
+            self.user_agent = user_agent
+            if getattr(self, "_user_agent_ready", False):
+                self.webview.setuseragent(user_agent)
         bounds = state.get("bounds")
         if isinstance(bounds, dict):
             self.bounds.update({key: value for key, value in bounds.items()
@@ -786,9 +893,11 @@ class _ElectronEmbeddedView:
             self.background_throttling = throttling
             self.webview.setbackgroundthrottling(throttling)
 
-    def load(self, url):
+    def load(self, url, load_options=None):
         self.url = url
-        self.webview.loaduri(url)
+        if load_options is not None:
+            self.load_options = load_options
+        self.webview.loaduri(url, _load_headers(self.load_options))
 
     def handle_event(self, event):
         if self._closed or event.id != self.webview.id:
@@ -800,9 +909,12 @@ class _ElectronEmbeddedView:
         if event.type == tg.Event.webviewConsoleMessage:
             _ElectronWindowView._log_console_error(self, event.value)
             return True
-        if event.type in (tg.Event.webviewNavigation, tg.Event.webviewProgress,
+        if event.type in (tg.Event.webviewNavigation, tg.Event.webviewInPageNavigation,
+                          tg.Event.webviewLoadStarted,
+                          tg.Event.webviewCommitVisible, tg.Event.webviewLoadFinished,
+                          tg.Event.webviewProgress,
                           tg.Event.webviewHTTPError, tg.Event.webviewError,
-                          tg.Event.webviewDestroyed):
+                          tg.Event.webviewDestroyed, tg.Event.webviewTitleChanged):
             if event.type == tg.Event.webviewProgress and event.value.get("progress") == 100:
                 logger.info("embedded contents %s finished loading %s",
                             self.contents_id, self.url)
@@ -830,11 +942,19 @@ class ElectronRenderer:
         self.app_root = app_root
         self.entry = entry
         self.node = node
-        self.host_environment = host_environment or {}
         self.node_runner = node_runner
         self.main_entry = main_entry
         self.activity = activity
         self.parent = parent
+        runtime_environment = dict(host_environment or {})
+        user_agent = activity.c.send_read_msg({
+            "method": "getDefaultWebViewUserAgent",
+            "params": {"desktopMode": True}
+        })
+        if not isinstance(user_agent, str) or not user_agent:
+            raise RuntimeError("Android WebView did not provide a default user agent")
+        runtime_environment.setdefault("NEXA_ELECTRON_USER_AGENT", user_agent)
+        self.host_environment = runtime_environment
         screen_manager = getattr(window_host, "windows", None)
         self.screen_size = (
             (screen_manager.screen_width, screen_manager.screen_height)
@@ -843,7 +963,7 @@ class ElectronRenderer:
         self._screen_metrics = (*self.screen_size, self.scale_factor)
         self.host = ElectronHost(
             self.app_root, self.entry, self.node, self.main_entry,
-            self.screen_size, self.scale_factor, self.host_environment,
+            self.screen_size, self.scale_factor, runtime_environment,
             self.node_runner)
         self.url = self.host.start()
         self.app_id = app_id
@@ -854,6 +974,7 @@ class ElectronRenderer:
         self._views = {}
         self._embedded_views = {}
         self._embedded_view_ids = {}
+        self._devtools_windows = {}
         self._pending_view_events = {}
         self._host_windows = {}
         self._bridge_ready_windows = set()
@@ -865,12 +986,21 @@ class ElectronRenderer:
         self._closed = False
         self._tick_lock = Lock()
         self._renderer_recoveries = {}
+        self._web_request_profiles = set()
+        if self.host.renderer_web_request_enabled and self.host.renderer_profile_name:
+            self._web_request_profiles.add(self.host.renderer_profile_name)
+        self._temporary_profile_names = set()
+        if self.host.renderer_profile_temporary and self.host.renderer_profile_name:
+            self._temporary_profile_names.add(self.host.renderer_profile_name)
         try:
             self.window_id = self.host.window_id
             self.root_view = _ElectronWindowView(
                 self, activity, parent, self.window_id, self.url,
                 self.host.preload_url, self.host.renderer_visible,
-                background_throttling=_background_throttling(self.host.renderer_options))
+                background_throttling=_background_throttling(self.host.renderer_options),
+                web_request_enabled=self.host.renderer_web_request_enabled,
+                user_agent=self.host.renderer_user_agent,
+                load_options=self.host.renderer_load_options)
             self._views[self.window_id] = self.root_view
             self._attach_pending_views(self.window_id)
             self._flush_pending_renderer_messages(self.window_id)
@@ -903,6 +1033,10 @@ class ElectronRenderer:
         self.scale_factor = metrics[2]
         self.host.update_screen_metrics(*metrics)
 
+    def on_window_geometry(self, x, y, width, height, maximized):
+        self.host.update_window_geometry(
+            self.window_id, x, y, width, height, maximized)
+
     def _bridge_ready(self, window_id):
         logger.info("Electron WebView bridge ready for contents %s", window_id)
         self._bridge_ready_windows.add(window_id)
@@ -916,10 +1050,16 @@ class ElectronRenderer:
             return
         current = self._embedded_views.get(contents_id)
         if current is not None:
-            if message.get("url") != current.url:
-                current.load(message["url"])
+            load_options = message.get("loadOptions") or {"headers": {}}
+            if (message.get("url") != current.url
+                    or load_options != current.load_options):
+                current.load(message["url"], load_options)
             current.apply_state(message)
             return
+        if message.get("profileTemporary") is True and message.get("profileName"):
+            self._temporary_profile_names.add(message["profileName"])
+        if message.get("webRequestEnabled") is True and message.get("profileName"):
+            self._web_request_profiles.add(message["profileName"])
         if window_id not in self._views:
             self._pending_view_events.setdefault(window_id, []).append(("create", message))
             return
@@ -961,6 +1101,7 @@ class ElectronRenderer:
                     view.apply_state(message)
 
     def _close_embedded_view(self, contents_id):
+        self._close_devtools(contents_id)
         view = self._embedded_views.pop(contents_id, None)
         self._bridge_ready_windows.discard(contents_id)
         self._pending_renderer_messages.pop(contents_id, None)
@@ -976,6 +1117,18 @@ class ElectronRenderer:
         self._embedded_view_ids.pop(view.webview.id, None)
         view.close()
 
+    def _close_devtools(self, contents_id):
+        window = self._devtools_windows.pop(contents_id, None)
+        view = self._views.get(contents_id) or self._embedded_views.get(contents_id)
+        if view is not None:
+            try:
+                view.webview.close_devtools()
+            except Exception:
+                logger.exception("could not release WebView DevTools for %s", contents_id)
+        self.host.update_devtools_state(contents_id, False)
+        if window is not None and not window._closed:
+            window.close()
+
     def _close_embedded_views_for_window(self, window_id):
         for contents_id, view in tuple(self._embedded_views.items()):
             if view.window_id == window_id:
@@ -986,6 +1139,7 @@ class ElectronRenderer:
         if (self._closed or self._views.get(window_id) is not old_view
                 or window_id in self._closed_windows):
             return
+        self._close_devtools(window_id)
         old_view._renderer_dead = True
         old_view._renderer_killed_hidden = not old_view.visible
         old_view.close(renderer_destroyed=True)
@@ -1014,7 +1168,10 @@ class ElectronRenderer:
             self, old_view.activity, old_view.parent, window_id,
             old_view.url, old_view.preload_url,
             old_view.window_visible, old_view.container_visible,
-            old_view.background_throttling)
+            old_view.background_throttling,
+            profile_name=old_view.profile_name,
+            web_request_enabled=old_view.profile_name in self._web_request_profiles,
+            user_agent=old_view.user_agent, load_options=old_view.load_options)
         self._views[window_id] = replacement
         if window_id == self.window_id:
             self.root_view = replacement
@@ -1040,13 +1197,21 @@ class ElectronRenderer:
         if not url:
             return
         logger.info("creating Electron child window %s at %s", window_id, url)
+        if message.get("profileTemporary") is True and message.get("profileName"):
+            self._temporary_profile_names.add(message["profileName"])
+        if message.get("webRequestEnabled") is True and message.get("profileName"):
+            self._web_request_profiles.add(message["profileName"])
 
         def build(activity, parent, _state):
             options = message.get("options") or {}
             view = _ElectronWindowView(
                 self, activity, parent, window_id, url, message.get("preloadUrl"),
                 message.get("visible", True),
-                background_throttling=_background_throttling(options))
+                background_throttling=_background_throttling(options),
+                profile_name=message.get("profileName"),
+                web_request_enabled=message.get("webRequestEnabled") is True,
+                user_agent=message.get("userAgent"),
+                load_options=message.get("loadOptions"))
             self._views[window_id] = view
             self._attach_pending_views(window_id)
             self._flush_pending_renderer_messages(window_id)
@@ -1082,6 +1247,7 @@ class ElectronRenderer:
 
     def _promote_hidden_root(self, message):
         old_window_id = self.window_id
+        self._close_devtools(old_window_id)
         old_view = self.root_view
         self._close_embedded_views_for_window(old_window_id)
         self._views.pop(old_window_id, None)
@@ -1098,13 +1264,26 @@ class ElectronRenderer:
         self.host.preload_url = message.get("preloadUrl")
         self.host.renderer_options = message.get("options") or {}
         self.host.renderer_title = message.get("title") or ""
+        self.host.renderer_user_agent = message.get("userAgent")
+        self.host.renderer_load_options = message.get("loadOptions") or {"headers": {}}
         self.host.renderer_visible = message.get("visible", True)
+        self.host.renderer_profile_name = message.get("profileName")
+        self.host.renderer_profile_temporary = message.get("profileTemporary") is True
+        self.host.renderer_web_request_enabled = message.get("webRequestEnabled") is True
+        if self.host.renderer_web_request_enabled and self.host.renderer_profile_name:
+            self._web_request_profiles.add(self.host.renderer_profile_name)
+        if self.host.renderer_profile_temporary and self.host.renderer_profile_name:
+            self._temporary_profile_names.add(self.host.renderer_profile_name)
         logger.info("promoting Electron window %s to the desktop: %s",
                     self.window_id, self.url)
         self.root_view = _ElectronWindowView(
             self, self.activity, self.parent, self.window_id, self.url,
             message.get("preloadUrl"), message.get("visible", True),
-            background_throttling=_background_throttling(self.host.renderer_options))
+            background_throttling=_background_throttling(self.host.renderer_options),
+            profile_name=self.host.renderer_profile_name,
+            web_request_enabled=self.host.renderer_web_request_enabled,
+            user_agent=self.host.renderer_user_agent,
+            load_options=self.host.renderer_load_options)
         self._views[self.window_id] = self.root_view
         self._attach_pending_views(self.window_id)
         if not message.get("visible", True):
@@ -1113,6 +1292,7 @@ class ElectronRenderer:
 
     def _close_child_window(self, window_id):
         self._closed_windows.add(window_id)
+        self._close_devtools(window_id)
         self._close_embedded_views_for_window(window_id)
         self._pending_view_events.pop(window_id, None)
         host_window = self._host_windows.pop(window_id, None)
@@ -1130,11 +1310,15 @@ class ElectronRenderer:
 
     def _restart_host(self):
         self._restart_requested = False
+        for contents_id in tuple(self._devtools_windows):
+            self._close_devtools(contents_id)
         for window_id in tuple(self._host_windows):
             self._close_child_window(window_id)
         self.root_view.close()
         for contents_id in tuple(self._embedded_views):
             self._close_embedded_view(contents_id)
+        self._delete_temporary_profiles()
+        self._web_request_profiles.clear()
         self.host.close()
         self._views.clear()
         self._pending_view_events.clear()
@@ -1151,11 +1335,18 @@ class ElectronRenderer:
                 self.node_runner)
             self.url = self.host.start()
             self.window_id = self.host.window_id
+            if self.host.renderer_web_request_enabled and self.host.renderer_profile_name:
+                self._web_request_profiles.add(self.host.renderer_profile_name)
+            if self.host.renderer_profile_temporary and self.host.renderer_profile_name:
+                self._temporary_profile_names.add(self.host.renderer_profile_name)
             self._root_hidden = not self.host.renderer_visible
             self.root_view = _ElectronWindowView(
                 self, self.activity, self.parent, self.window_id, self.url,
                 self.host.preload_url, self.host.renderer_visible,
-                background_throttling=_background_throttling(self.host.renderer_options))
+                background_throttling=_background_throttling(self.host.renderer_options),
+                web_request_enabled=self.host.renderer_web_request_enabled,
+                user_agent=self.host.renderer_user_agent,
+                load_options=self.host.renderer_load_options)
             self._views[self.window_id] = self.root_view
             self._attach_pending_views(self.window_id)
             if not self.host.renderer_visible:
@@ -1217,11 +1408,128 @@ class ElectronRenderer:
     def _handle_native_call(self, message):
         method = message.get("method")
         args = message.get("args") or []
+        if method == "webContents.setUserAgent":
+            contents_id = message.get("contentsId")
+            view = self._views.get(contents_id) or self._embedded_views.get(contents_id)
+            if view is not None and not view._closed and args:
+                view.webview.setuseragent(args[0])
+                view.user_agent = args[0]
+            return
         if method == "webContents.focus":
             contents_id = message.get("contentsId")
             view = self._views.get(contents_id) or self._embedded_views.get(contents_id)
             if view is not None and not view._closed:
                 view.webview.focus()
+            return
+        if method in ("webContents.openDevTools", "webContents.closeDevTools"):
+            contents_id = message.get("contentsId")
+            if type(contents_id) is not int:
+                raise ValueError("Electron DevTools needs a numeric WebContents id")
+            if method == "webContents.closeDevTools":
+                self._close_devtools(contents_id)
+                return True
+            options = args[0] if args and isinstance(args[0], dict) else {}
+            mode = options.get("mode")
+            if mode not in (None, "", "detach"):
+                raise RuntimeError("Nexa currently supports detached Electron DevTools only")
+            if options.get("activate") is False:
+                raise RuntimeError("Nexa cannot open Electron DevTools without activating it")
+            view = self._views.get(contents_id) or self._embedded_views.get(contents_id)
+            if view is None or view._closed:
+                raise RuntimeError("Electron WebContents has no live Android WebView")
+            existing = self._devtools_windows.get(contents_id)
+            if existing is not None and not existing._closed:
+                existing.focus()
+                return True
+            if self.window_host is None:
+                raise RuntimeError("Nexa window host is unavailable for DevTools")
+            frontend_url = view.webview.get_devtools_url()
+
+            def build(activity, parent, _state):
+                devtools = tg.WebView(activity, parent, enable_javascript=True)
+                devtools.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
+                devtools.setdesktopmode(True)
+                devtools.allownavigation(True)
+                devtools.loaduri(frontend_url)
+                return devtools
+
+            window = None
+
+            def on_close():
+                if self._devtools_windows.pop(contents_id, None) is window:
+                    try:
+                        view.webview.close_devtools()
+                    except Exception:
+                        logger.exception(
+                            "could not release WebView DevTools for %s", contents_id)
+                    self.host.update_devtools_state(contents_id, False)
+
+            try:
+                window = self.window_host.open_window(
+                    self.app_id, str(options.get("title") or "Developer Tools"),
+                    build, icon=self.icon,
+                    on_close=on_close, size=(800, 600))
+            except Exception:
+                view.webview.close_devtools()
+                raise
+            self._devtools_windows[contents_id] = window
+            return True
+        if method == "session.setWebRequestEnabled":
+            profile_name = message.get("profileName")
+            enabled = message.get("enabled")
+            if (not isinstance(profile_name, str) or not re.fullmatch(
+                    r"nexa_[a-f0-9]{32}(?:_[a-f0-9]{16})?", profile_name)
+                    or not isinstance(enabled, bool)):
+                raise ValueError("Electron webRequest state is invalid")
+            if enabled:
+                self._web_request_profiles.add(profile_name)
+            else:
+                self._web_request_profiles.discard(profile_name)
+            self.activity.c.send_msg({
+                "method": "setElectronWebRequestEnabled",
+                "params": {"aid": self.activity.aid, "profileName": profile_name,
+                           "enabled": enabled}})
+            return True
+        if method == "webContents.clearCache":
+            contents_id = message.get("contentsId")
+            view = self._views.get(contents_id) or self._embedded_views.get(contents_id)
+            if view is None or view._closed:
+                raise RuntimeError("Electron WebContents has no live Android WebView")
+            return view.webview.clearcache()
+        if method == "session.clearStorageData":
+            profile_name = message.get("profileName")
+            if not isinstance(profile_name, str) or not re.fullmatch(
+                    r"nexa_[a-f0-9]{32}(?:_[a-f0-9]{16})?", profile_name):
+                raise ValueError("Electron session has no Nexa WebView profile")
+            return self.activity.c.send_read_msg_async({
+                "method": "clearElectronStorage",
+                "params": {"aid": self.activity.aid, "profileName": profile_name}})
+        if method == "session.cookies":
+            profile_name = message.get("profileName")
+            if not isinstance(profile_name, str) or not re.fullmatch(
+                    r"nexa_[a-f0-9]{32}(?:_[a-f0-9]{16})?", profile_name):
+                raise ValueError("Electron session has no Nexa WebView profile")
+            params = {"aid": self.activity.aid, "profileName": profile_name,
+                      "action": message.get("action")}
+            for key in ("url", "name", "details"):
+                if key in message:
+                    params[key] = message[key]
+            return self.activity.c.send_read_msg_async({
+                "method": "electronCookies", "params": params})
+        if method in ("webContents.reload", "webContents.reloadIgnoringCache"):
+            contents_id = message.get("contentsId")
+            view = self._views.get(contents_id) or self._embedded_views.get(contents_id)
+            if view is not None and not view._closed:
+                if method == "webContents.reloadIgnoringCache":
+                    view.webview.reloadignoringcache()
+                else:
+                    view.webview.reload()
+            return
+        if method == "webContents.stop":
+            contents_id = message.get("contentsId")
+            view = self._views.get(contents_id) or self._embedded_views.get(contents_id)
+            if view is not None and not view._closed:
+                view.webview.stoploading()
             return
         if method in ("webContents.goBack", "webContents.goForward"):
             contents_id = message.get("contentsId")
@@ -1231,6 +1539,19 @@ class ElectronRenderer:
                     view.webview.goback()
                 else:
                     view.webview.goforward()
+            return
+        if method == "webContents.goToOffset":
+            contents_id = message.get("contentsId")
+            view = self._views.get(contents_id) or self._embedded_views.get(contents_id)
+            args = message.get("args") or []
+            if view is not None and not view._closed and args:
+                view.webview.gobackorforward(args[0])
+            return
+        if method == "webContents.clearHistory":
+            contents_id = message.get("contentsId")
+            view = self._views.get(contents_id) or self._embedded_views.get(contents_id)
+            if view is not None and not view._closed:
+                view.webview.clearhistory()
             return
         if method == "webFrame.clearCache":
             view = self._views.get(message.get("windowId"))
@@ -1299,13 +1620,17 @@ class ElectronRenderer:
                     if window_id in self._closed_windows:
                         continue
                     if window_id == self.window_id:
-                        if message.get("url") != self.url:
+                        load_options = message.get("loadOptions") or {"headers": {}}
+                        if (message.get("url") != self.url
+                                or load_options != self.root_view.load_options):
                             self.url = message["url"]
-                            self.root_view.load(self.url)
+                            self.root_view.load(self.url, load_options)
                     elif window_id in self._host_windows:
                         view = self._views.get(window_id)
-                        if view is not None and message.get("url") != view.url:
-                            view.load(message["url"])
+                        load_options = message.get("loadOptions") or {"headers": {}}
+                        if (view is not None and (message.get("url") != view.url
+                                or load_options != view.load_options)):
+                            view.load(message["url"], load_options)
                     else:
                         self._open_child_window(message)
                 elif event == "windowState":
@@ -1325,7 +1650,31 @@ class ElectronRenderer:
                 elif event == "mainError":
                     print(f"nexa: electron main process: {message.get('error', 'failed')}")
                 elif event == "nativeCall":
-                    self._handle_native_call(message)
+                    request_id = message.get("requestId")
+                    try:
+                        result = self._handle_native_call(message)
+                    except Exception as error:
+                        if type(request_id) is int:
+                            self.host.native_call_result(request_id, error=error)
+                        else:
+                            logger.exception("Electron native call failed: %s",
+                                             message.get("method"))
+                    else:
+                        if type(request_id) is int:
+                            if isinstance(result, Future):
+                                def reply(future, request_id=request_id):
+                                    try:
+                                        value = future.result()
+                                        if value is False:
+                                            raise RuntimeError(
+                                                "Android WebView rejected the Electron operation")
+                                    except Exception as error:
+                                        self.host.native_call_result(request_id, error=error)
+                                    else:
+                                        self.host.native_call_result(request_id, value=value)
+                                result.add_done_callback(reply)
+                            else:
+                                self.host.native_call_result(request_id, value=result)
                 elif event == "appRelaunch":
                     self._restart_requested = True
                 elif event in ("appQuit", "appExit"):
@@ -1342,10 +1691,33 @@ class ElectronRenderer:
     def should_tick(self):
         return self.host.has_pending_events()
 
+    def _delete_temporary_profiles(self):
+        for profile_name in self._temporary_profile_names:
+            try:
+                result = self.activity.c.send_read_msg_async({
+                    "method": "deleteElectronProfile",
+                    "params": {"aid": self.activity.aid, "profileName": profile_name}})
+            except Exception:
+                logger.exception("could not request cleanup for temporary Electron profile %s",
+                                 profile_name)
+                continue
+
+            def report_cleanup(future, name=profile_name):
+                try:
+                    if future.result() is not True:
+                        logger.warning("temporary Electron profile cleanup failed: %s", name)
+                except Exception:
+                    logger.exception("temporary Electron profile cleanup failed: %s", name)
+
+            result.add_done_callback(report_cleanup)
+        self._temporary_profile_names.clear()
+
     def close(self):
         if self._closed:
             return
         self._closed = True
+        for contents_id in tuple(self._devtools_windows):
+            self._close_devtools(contents_id)
         for window_id in tuple(self._host_windows):
             self._close_child_window(window_id)
         for contents_id in tuple(self._embedded_views):
@@ -1353,6 +1725,7 @@ class ElectronRenderer:
         try:
             self.root_view.close()
         finally:
+            self._delete_temporary_profiles()
             self.host.close()
 
 

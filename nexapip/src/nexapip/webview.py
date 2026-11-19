@@ -1,4 +1,5 @@
 from pathlib import Path
+import re
 from typing import Optional, Literal
 from urllib.parse import urlsplit
 
@@ -16,6 +17,7 @@ class WebView(View):
                  electron_bridge: Optional[dict] = None,
                  enable_javascript: bool = False):
         args = {"aid": activity.aid, "visibility": visibility}
+        profile_name = None
         if enable_javascript:
             args["enableJavascript"] = True
         if parent is not None:
@@ -30,6 +32,12 @@ class WebView(View):
             if not isinstance(preload, str) or not preload.strip():
                 raise ValueError("electron_bridge needs a preload script")
             args["electronBridge"] = {"origins": list(origins), "preload": preload}
+            profile_name = electron_bridge.get("profile_name")
+            if profile_name is not None:
+                if not isinstance(profile_name, str) or not re.fullmatch(
+                        r"nexa_[a-f0-9]{32}(?:_[a-f0-9]{16})?", profile_name):
+                    raise ValueError("electron profile name must be a Nexa profile")
+                args["electronBridge"]["profileName"] = profile_name
             preload_url = electron_bridge.get("preload_url")
             if preload_url is not None:
                 parsed_preload = urlsplit(preload_url) if isinstance(preload_url, str) else None
@@ -75,14 +83,18 @@ class WebView(View):
                 if not isinstance(background_throttling, bool):
                     raise TypeError("electron background_throttling must be a bool")
                 args["electronBridge"]["backgroundThrottling"] = background_throttling
-        View.__init__(self, activity, activity.c.send_read_msg({"method": "createWebView", "params": args}))
+        view_id = activity.c.send_read_msg({"method": "createWebView", "params": args})
+        if profile_name is not None and view_id == -1:
+            raise RuntimeError("Electron sessions need Android WebView MULTI_PROFILE support")
+        View.__init__(self, activity, view_id)
 
     def allowjavascript(self, allow: bool):
         """Sets whether Javascript execution is allowed in the WebView.
         If requesting to allow, the user is prompted and can deny the request.
         Blocks until the user responded.
         Returns wheter Javascript is enabled after the call."""
-        self.a.c.send_read_msg({"method": "allowJavascript", "params": {"aid": self.a.aid, "id": self.id, "allow": allow}})
+        return self.a.c.send_read_msg({"method": "allowJavascript", "params": {
+            "aid": self.a.aid, "id": self.id, "allow": allow}})
 
     def allowcontenturi(self, allow: bool):
         """Sets whether it is allowed to load content from a content:// URI."""
@@ -97,22 +109,50 @@ class WebView(View):
         self.a.c.send_msg({"method": "setDesktopMode", "params": {
             "aid": self.a.aid, "id": self.id, "enabled": enabled}})
 
+    def setuseragent(self, user_agent: str):
+        self.a.c.send_msg({"method": "setWebViewUserAgent", "params": {
+            "aid": self.a.aid, "id": self.id, "userAgent": user_agent}})
+
     def setbackgroundthrottling(self, enabled: bool):
         self.a.c.send_msg({"method": "setElectronBackgroundThrottling", "params": {
             "aid": self.a.aid, "id": self.id, "enabled": enabled}})
 
     def clearcache(self):
-        """Clears this WebView's in-memory browser cache."""
-        self.a.c.send_msg({"method": "clearWebViewCache", "params": {
+        """Clears the Android app's shared WebView cache."""
+        return self.a.c.send_read_msg_async({"method": "clearWebViewCache", "params": {
+            "aid": self.a.aid, "id": self.id}})
+
+    def reload(self):
+        self.a.c.send_msg({"method": "reloadWebView", "params": {
+            "aid": self.a.aid, "id": self.id}})
+
+    def reloadignoringcache(self):
+        self.a.c.send_msg({"method": "reloadWebViewIgnoringCache", "params": {
+            "aid": self.a.aid, "id": self.id}})
+
+    def get_devtools_url(self):
+        """Returns the Android WebView DevTools frontend URL for this page."""
+        return self.a.c.send_read_msg({"method": "getWebViewDevToolsUrl", "params": {
+            "aid": self.a.aid, "id": self.id}})
+
+    def close_devtools(self):
+        self.a.c.send_msg({"method": "closeWebViewDevTools", "params": {
+            "aid": self.a.aid, "id": self.id}})
+
+    def stoploading(self):
+        self.a.c.send_msg({"method": "stopWebViewLoading", "params": {
             "aid": self.a.aid, "id": self.id}})
 
     def setdata(self, data: str):
         """Sets the document data."""
         self.a.c.send_msg({"method": "setData", "params": {"aid": self.a.aid, "id": self.id, "doc": data}})
 
-    def loaduri(self, uri: str):
+    def loaduri(self, uri: str, headers=None):
         """Loads a URI."""
-        self.a.c.send_msg({"method": "loadURI", "params": {"aid": self.a.aid, "id": self.id, "uri": uri}})
+        params = {"aid": self.a.aid, "id": self.id, "uri": uri}
+        if headers:
+            params["headers"] = headers
+        self.a.c.send_msg({"method": "loadURI", "params": params})
 
     def goback(self):
         """Goes back in the history."""
@@ -121,6 +161,14 @@ class WebView(View):
     def goforward(self):
         """Goes forward in the history."""
         self.a.c.send_msg({"method": "goForward", "params": {"aid": self.a.aid, "id": self.id}})
+
+    def gobackorforward(self, steps: int):
+        self.a.c.send_msg({"method": "goBackOrForward", "params": {
+            "aid": self.a.aid, "id": self.id, "steps": int(steps)}})
+
+    def clearhistory(self):
+        self.a.c.send_msg({"method": "clearHistory", "params": {
+            "aid": self.a.aid, "id": self.id}})
 
     def evaluatejs(self, code: str):
         """Runs Javascript in the WebView, if Javascript is enabled."""

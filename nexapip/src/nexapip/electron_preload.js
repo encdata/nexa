@@ -1541,6 +1541,29 @@
             }
             return;
         }
+        if (message.channel === "__nexa:scroll") {
+            const direction = (message.args || [])[0];
+            const scrollingElement = document.scrollingElement || document.documentElement;
+            window.scrollTo(window.scrollX,
+                direction === "top" ? 0 : scrollingElement.scrollHeight);
+            return;
+        }
+        if (message.channel === "__nexa:edit-command") {
+            const [command, value] = message.args || [];
+            if (command === "centerSelection") {
+                const selection = window.getSelection();
+                if (selection?.rangeCount) {
+                    const rect = selection.getRangeAt(0).getBoundingClientRect();
+                    window.scrollBy(0, rect.top + rect.height / 2 - window.innerHeight / 2);
+                }
+            } else if (command === "unselect") {
+                window.getSelection()?.removeAllRanges();
+            } else if (["undo", "redo", "cut", "copy", "paste", "pasteAndMatchStyle",
+                "delete", "selectAll", "replace", "replaceMisspelling"].includes(command)) {
+                document.execCommand(command, false, value);
+            }
+            return;
+        }
         const entries = listeners.get(message.channel);
         if (!entries) return;
         const ipcEvent = {
@@ -1790,19 +1813,45 @@
             "maximize", "unmaximize", "isMaximized", "isMinimized", "isVisible", "isFocused",
             "isDestroyed", "isFullScreen", "isNormal", "isResizable", "isMenuBarVisible",
             "isAutoHideMenuBar", "getBounds", "getContentBounds", "getSize", "getContentSize",
-            "getPosition", "getTitle", "center",
+            "getPosition", "getTitle", "getBackgroundColor", "center",
             "setTitle", "setBounds", "setContentBounds", "setSize", "setContentSize",
             "setPosition", "setFullScreen", "setResizable", "setMenuBarVisibility",
             "setAutoHideMenuBar", "setBackgroundColor"
-        ] : ["getURL", "getTitle", "getType", "getProcessId", "getOSProcessId",
-            "getZoomFactor", "focus", "canGoBack", "canGoForward", "getNavigationHistory",
-            "goBack", "goForward", "clearHistory", "isDestroyed", "send", "setBackgroundThrottling",
-            "setZoomFactor", "openDevTools", "closeDevTools", "stop"];
+        ] : ["getURL", "getTitle", "getType", "getProcessId", "getOSProcessId", "isCrashed",
+            "getUserAgent", "setUserAgent", "getZoomFactor", "setZoomFactor",
+            "getZoomLevel", "setZoomLevel", "isLoading", "isLoadingMainFrame",
+            "isWaitingForResponse",
+            "getBackgroundThrottling",
+            "undo", "redo", "cut", "copy", "paste", "pasteAndMatchStyle", "delete",
+            "selectAll", "unselect", "centerSelection", "scrollToTop", "scrollToBottom",
+            "replace", "replaceMisspelling",
+            "focus", "canGoBack", "canGoForward", "getNavigationHistory",
+            "goBack", "goForward", "isDevToolsOpened", "clearHistory", "isDestroyed", "send", "setBackgroundThrottling",
+            "openDevTools", "closeDevTools", "stop"];
         const asyncMethods = type === "window" ? ["loadURL", "loadFile"]
             : ["loadURL", "loadFile", "reload", "reloadIgnoringCache", "executeJavaScript",
-                "executeJavaScriptInIsolatedWorld", "insertCSS", "removeInsertedCSS"];
+                "executeJavaScriptInIsolatedWorld", "insertCSS", "removeInsertedCSS", "clearCache"];
+        if (type === "webContents") asyncMethods.push("insertText");
         for (const method of methods) target[method] = (...args) => call(method, ...args);
         if (type === "webContents") {
+            Object.defineProperties(target, {
+                zoomFactor: {
+                    enumerable: true,
+                    get: () => call("getZoomFactor"),
+                    set: value => call("setZoomFactor", value)
+                },
+                zoomLevel: {
+                    enumerable: true,
+                    get: () => call("getZoomLevel"),
+                    set: value => call("setZoomLevel", value)
+                }
+            });
+            target.navigationHistory = Object.fromEntries([
+                "canGoBack", "canGoForward", "canGoToOffset", "clear",
+                "getActiveIndex", "getEntryAtIndex", "goBack", "goForward",
+                "goToIndex", "goToOffset", "length", "removeEntryAtIndex",
+                "getAllEntries", "restore"
+            ].map(method => [method, (...args) => call(`navigationHistory.${method}`, ...args)]));
             target.getOwnerBrowserWindow = () => {
                 const windowId = ipcRenderer.sendSync(
                     "nexa:electron:windows:fromWebContents", id);

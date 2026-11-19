@@ -13,6 +13,31 @@ const eventFd = Number(process.env.NEXA_ELECTRON_EVENT_FD);
 if (!Number.isInteger(eventFd) || eventFd < 3) throw new Error("Nexa event pipe is unavailable");
 const parentFd = Number(process.env.NEXA_ELECTRON_PARENT_FD);
 let electronHost = null;
+let nextNativeCallId = 0;
+const pendingNativeCalls = new Map();
+
+function requestNativeCall(message) {
+    const requestId = ++nextNativeCallId;
+    return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+            pendingNativeCalls.delete(requestId);
+            reject(new Error(`native Electron call timed out: ${message.method}`));
+        }, 30000);
+        pendingNativeCalls.set(requestId, {resolve, reject, timeout});
+        emit({event: "nativeCall", ...message, requestId});
+    });
+}
+
+function dispatchNativeCallResult(message) {
+    const pending = pendingNativeCalls.get(message.requestId);
+    if (!pending) return false;
+    pendingNativeCalls.delete(message.requestId);
+    clearTimeout(pending.timeout);
+    if (message.error) pending.reject(new Error(String(message.error)));
+    else pending.resolve(message.value);
+    return true;
+}
+
 if (Number.isInteger(parentFd) && parentFd >= 3) {
     const parentControl = fs.createReadStream(null, {fd: parentFd});
     let controlBuffer = "";
@@ -28,6 +53,13 @@ if (Number.isInteger(parentFd) && parentFd >= 3) {
                 const message = JSON.parse(line);
                 if (message.kind === "rendererEvent") {
                     electronHost?.dispatchRendererEvent(message);
+                } else if (message.kind === "nativeCallResult") {
+                    dispatchNativeCallResult(message);
+                } else if (message.kind === "windowGeometry") {
+                    electronHost?.updateWindowGeometry(message);
+                } else if (message.kind === "devToolsState") {
+                    electronHost?.updateDevToolsState(
+                        message.contentsId, message.opened);
                 }
             } catch (error) {
                 process.stderr.write(`nexa electron: invalid parent control message: ${error.message}\n`);
@@ -339,6 +371,7 @@ electronHost = mainArg && !archive
         resourcesPath: path.dirname(sourceRoot),
         localUrl,
         emit,
+        nativeCall: requestNativeCall,
         resolveAsar: extractElectronArchive,
         trustOrigin: origin => trustedOrigins.add(origin),
         isTrustedPath,

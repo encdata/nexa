@@ -259,6 +259,8 @@ class WindowManager:
             window["event_handler"] = event_handler
             self._notify_window_resize(event_handler, panel_width,
                                        panel_height - self.titlebar_height, window)
+            if not prewarm:
+                self._notify_window_geometry(window)
         self.windows[window_id] = window
         self.window_order.append(window_id)
         # termux:gui sometimes needs a location update after child views are added to lay them out.
@@ -394,6 +396,8 @@ class WindowManager:
             handler, max(1, window["width"] - self.border_width * 2),
             max(1, window["height"] - self.border_width * 2 - self.titlebar_height),
             window)
+        if not window.get("prewarming"):
+            self._notify_window_geometry(window)
         if self.active_window == window["id"]:
             self._activate_window_handler(window)
 
@@ -701,6 +705,20 @@ class WindowManager:
                 window["app_executor"].submit(
                     self._run_app_callback, window, callback, *args)
 
+    def _notify_window_geometry(self, window):
+        if window.get("prewarming") or window.get("prewarm_position"):
+            return
+        callback = getattr(window["event_handler"], "on_window_geometry", None)
+        if callback is None:
+            return
+        width = window["width"] - self.border_width * 2
+        height = window["height"] - self.border_width * 2 - self.titlebar_height
+        window["app_executor"].submit(
+            self._run_app_callback, window, callback,
+            round(window["x"]), round(window["y"]),
+            round(width), round(max(1, height)),
+            bool(window["maximized"]))
+
     def _cancel_drag(self, window_id):
         if self.drag is None or self.drag["window_id"] != window_id:
             return
@@ -791,6 +809,7 @@ class WindowManager:
         place(window["content_surface"], self.border_width, self.border_width)
         place(window["border_surface"], 0, 0)
         self._place_window(window, top=top)
+        self._notify_window_geometry(window)
 
     @staticmethod
     def _place_window(window, top=True):
@@ -896,6 +915,8 @@ class WindowManager:
         if action in (tg.Event.touch_up, tg.Event.touch_cancel):
             if self.drag["mode"].startswith("resize-"):
                 self._apply_window_geometry(window)
+            elif self.drag["moved"]:
+                self._notify_window_geometry(window)
             self.pointer.hide()
             self.drag = None
             return True
