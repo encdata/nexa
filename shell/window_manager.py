@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import logging
 from threading import Lock
 from time import monotonic
 
@@ -372,7 +373,8 @@ class WindowManager:
         try:
             handler = future.result()
         except Exception as error:
-            print(f"nexa: couldn't open {window['title']}: {error}")
+            logging.getLogger("nexa.windows").exception(
+                "couldn't open %s: %s", window["title"], error)
             message = tg.TextView(self.activity, f"couldn't open {window['title']}: {error}",
                                   window["content"])
             message.setdimensions(tg.View.MATCH_PARENT, 64)

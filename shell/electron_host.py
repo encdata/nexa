@@ -155,7 +155,11 @@ class ElectronHost:
         self._event_reader.start()
         ready = self._next_event(10)
         if ready is None:
+            exit_code = self.process.poll()
             self.close()
+            if exit_code is not None:
+                raise RuntimeError(
+                    f"Node renderer host exited before ready (status {exit_code})")
             raise TimeoutError("Node renderer host did not start within 10 seconds")
         if ready.get("event") != "ready" or not ready.get("url"):
             self.close()
@@ -186,6 +190,8 @@ class ElectronHost:
                     self.close()
                     raise RuntimeError(message.get("error", "Electron main process failed"))
                 if message.get("event") in ("appQuit", "appExit"):
+                    logger.error("Electron app exited before its first window (event=%s, code=%s)",
+                                 message["event"], message.get("code", 0))
                     self.close()
                     raise RuntimeError("Electron app exited before creating a window")
                 self._pending.append(message)
