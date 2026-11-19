@@ -76,6 +76,9 @@
     }
 
     const native = window.nexaElectronNative;
+    if (native) {
+        native.postMessage(JSON.stringify({kind: "preload-start"}));
+    }
     if (!native) {
         console.error("nexa electron preload: native WebView bridge is missing");
     }
@@ -197,10 +200,36 @@
         postBridgeMessage(JSON.stringify({kind, channel, args}));
     }
 
-    function addListener(channel, listener, once = false) {
-        const entries = listeners.get(channel) || new Map();
-        entries.set(listener, {once});
+    function addListener(channel, listener, once = false, prepend = false) {
+        if (typeof listener !== "function") throw new TypeError("listener must be a function");
+        const entries = listeners.get(channel) || [];
+        const entry = {listener, once};
+        ipcRenderer.emit("newListener", channel, listener);
+        if (prepend) entries.unshift(entry);
+        else entries.push(entry);
         listeners.set(channel, entries);
+        return ipcRenderer;
+    }
+
+    function removeListener(channel, listener) {
+        const entries = listeners.get(channel);
+        if (!entries) return ipcRenderer;
+        for (let index = entries.length - 1; index >= 0; index--) {
+            if (entries[index].listener !== listener) continue;
+            return removeListenerEntry(channel, entries[index]);
+        }
+        return ipcRenderer;
+    }
+
+    function removeListenerEntry(channel, entry) {
+        const entries = listeners.get(channel);
+        const index = entries?.indexOf(entry) ?? -1;
+        if (index === -1) return ipcRenderer;
+        entries.splice(index, 1);
+        if (channel !== "removeListener") {
+            ipcRenderer.emit("removeListener", channel, entry.listener);
+        }
+        if (!entries.length) listeners.delete(channel);
         return ipcRenderer;
     }
 
@@ -232,17 +261,64 @@
         on(channel, listener) {
             return addListener(channel, listener);
         },
+        addListener(channel, listener) {
+            return addListener(channel, listener);
+        },
         once(channel, listener) {
             return addListener(channel, listener, true);
         },
+        prependListener(channel, listener) {
+            return addListener(channel, listener, false, true);
+        },
+        prependOnceListener(channel, listener) {
+            return addListener(channel, listener, true, true);
+        },
+        off(channel, listener) {
+            return removeListener(channel, listener);
+        },
         removeListener(channel, listener) {
-            listeners.get(channel)?.delete(listener);
-            return ipcRenderer;
+            return removeListener(channel, listener);
         },
         removeAllListeners(channel) {
-            if (channel === undefined) listeners.clear();
-            else listeners.delete(channel);
+            const channels = channel === undefined ? [...listeners.keys()] : [channel];
+            for (const name of channels) {
+                for (const entry of [...(listeners.get(name) || [])].reverse()) {
+                    if (name !== "removeListener") {
+                        ipcRenderer.emit("removeListener", name, entry.listener);
+                    }
+                }
+                listeners.delete(name);
+            }
             return ipcRenderer;
+        },
+        emit(channel, ...args) {
+            const entries = listeners.get(channel);
+            if (!entries?.length) return false;
+            for (const entry of [...entries]) {
+                if (entry.once) removeListenerEntry(channel, entry);
+                entry.listener(...args);
+            }
+            return true;
+        },
+        listenerCount(channel, listener) {
+            const entries = listeners.get(channel) || [];
+            return listener === undefined ? entries.length
+                : entries.filter(entry => entry.listener === listener).length;
+        },
+        eventNames() {
+            return [...listeners.keys()];
+        },
+        listeners(channel) {
+            return (listeners.get(channel) || []).map(entry => entry.listener);
+        },
+        rawListeners(channel) {
+            return ipcRenderer.listeners(channel);
+        },
+        setMaxListeners() {
+            return ipcRenderer;
+        },
+        getMaxListeners() {
+            return 10;
         }
     };
 
@@ -1262,9 +1338,21 @@
         }
         const entries = listeners.get(message.channel);
         if (!entries) return;
-        for (const [listener, options] of [...entries]) {
-            listener({sender: null}, ...(message.args || []));
-            if (options.once) entries.delete(listener);
+        const ipcEvent = {
+            sender: window.__NEXA_ELECTRON_WINDOW_ID__ === undefined ? null
+                : remoteElectronTarget("webContents", window.__NEXA_ELECTRON_WINDOW_ID__),
+            senderFrame: {url: location.href},
+            frameId: 0,
+            processId: window.process.pid,
+            ports: [],
+            returnValue: undefined,
+            reply(channel, ...args) { ipcRenderer.send(channel, ...args); }
+        };
+        for (const entry of [...entries]) {
+            if (entry.once) {
+                removeListenerEntry(message.channel, entry);
+            }
+            entry.listener(ipcEvent, ...(message.args || []));
         }
     };
 
@@ -1546,5 +1634,9 @@
     }
     if (typeof window.Buffer === "undefined") {
         Object.defineProperty(window, "Buffer", {configurable: true, value: NexaBuffer});
+    }
+    if (native) {
+        native.postMessage(JSON.stringify({kind: "preload-ready",
+            hasRequire: typeof window.require === "function"}));
     }
 })();

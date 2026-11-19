@@ -1159,8 +1159,21 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         const id = ++nextElectronEventSubscriptionId;
         const listener = (...args) => event.sender?.send("__nexa:electron:event",
             targetType, targetId, eventName, args.map(encodeElectronEventArg));
-        electronEventSubscriptions.set(id, {ownerWindowId, target, eventName, listener});
+        electronEventSubscriptions.set(id, {
+            ownerWindowId, targetType, targetId, target, eventName, listener
+        });
         target.on(eventName, listener);
+    });
+
+    ipcMain.on("nexa:electron:event:unsubscribe", (event, targetType, targetId, eventName) => {
+        const ownerWindowId = event.sender?.id;
+        for (const [id, subscription] of electronEventSubscriptions) {
+            if (subscription.ownerWindowId !== ownerWindowId ||
+                subscription.targetType !== targetType || subscription.targetId !== targetId ||
+                subscription.eventName !== eventName) continue;
+            subscription.target.removeListener(eventName, subscription.listener);
+            electronEventSubscriptions.delete(id);
+        }
     });
 
     ipcMain.on("nexa:electron:windows:list", event => {

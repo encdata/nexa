@@ -45,6 +45,13 @@ class ElectronBridge:
         if not isinstance(request, dict):
             return False
         kind = request.get("kind")
+        if kind == "preload-start":
+            logger.info("Electron renderer preload started for WebView %s", self.webview.id)
+            return True
+        if kind == "preload-ready":
+            logger.info("Electron renderer preload finished for WebView %s (require=%s)",
+                        self.webview.id, request.get("hasRequire") is True)
+            return True
         if kind == "ready":
             if self.on_ready is not None:
                 self.on_ready()
