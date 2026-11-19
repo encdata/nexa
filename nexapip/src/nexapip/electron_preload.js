@@ -1,6 +1,4 @@
 (() => {
-    if (window.top !== window) return;
-
     if (typeof window.process === "undefined") {
         const listeners = new Map();
         const emitProcessEvent = (name, ...args) => {
