@@ -41,6 +41,10 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
     const handlers = new Map();
     const protocolHandlers = new WeakMap();
     const privilegedSchemes = new Map();
+    const popupMenus = new Map();
+    let nextMenuId = 0;
+    let nextMenuItemId = 0;
+    let applicationMenu = null;
     const dnsLookups = new Map();
     const dnsCacheTtlMs = 30_000;
     const maxDnsCacheEntries = 128;
@@ -1545,6 +1549,119 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             return 0;
         }
     };
+    function normalizeMenuItem(option) {
+        return option instanceof MenuItem ? option : new MenuItem(option);
+    }
+    function serializeMenuItems(items) {
+        return items.map(item => ({
+            id: item._nexaId, label: item.label, type: item.type,
+            enabled: item.enabled, visible: item.visible, checked: item.checked,
+            accelerator: item.accelerator,
+            submenu: item.submenu ? serializeMenuItems(item.submenu.items) : []
+        }));
+    }
+    class MenuItem {
+        constructor(options = {}) {
+            if (!options || typeof options !== "object") {
+                throw new TypeError("MenuItem options must be an object");
+            }
+            this._nexaId = ++nextMenuItemId;
+            this.id = options.id;
+            this.label = String(options.label || "");
+            this.type = options.type || "normal";
+            this.role = options.role;
+            this.enabled = options.enabled !== false;
+            this.visible = options.visible !== false;
+            this.checked = Boolean(options.checked);
+            this.accelerator = options.accelerator || "";
+            this.toolTip = options.toolTip || "";
+            this.click = typeof options.click === "function" ? options.click : null;
+            this.submenu = options.submenu
+                ? options.submenu instanceof Menu ? options.submenu
+                    : Menu.buildFromTemplate(options.submenu)
+                : null;
+            this.registerAccelerator = options.registerAccelerator !== false;
+        }
+    }
+    class Menu extends EventEmitter {
+        constructor() {
+            super();
+            this.items = [];
+            this.popupContents = null;
+            this.popupId = null;
+            this.popupCallback = null;
+        }
+        static buildFromTemplate(template) {
+            if (!Array.isArray(template)) throw new TypeError("menu template must be an array");
+            const menu = new Menu();
+            for (const item of template) menu.append(normalizeMenuItem(item));
+            return menu;
+        }
+        static setApplicationMenu(menu) {
+            if (menu !== null && !(menu instanceof Menu)) {
+                throw new TypeError("application menu must be a Menu or null");
+            }
+            applicationMenu = menu;
+        }
+        static getApplicationMenu() { return applicationMenu; }
+        append(item) { this.insert(this.items.length, item); }
+        insert(position, item) {
+            if (!(item instanceof MenuItem)) item = normalizeMenuItem(item);
+            const index = Math.max(0, Math.min(this.items.length, Number(position) || 0));
+            this.items.splice(index, 0, item);
+        }
+        getMenuItemById(id) {
+            for (const item of this.items) {
+                if (item.id === id || item._nexaId === id) return item;
+                const nested = item.submenu?.getMenuItemById(id);
+                if (nested) return nested;
+            }
+            return null;
+        }
+        popup(options = {}) {
+            const target = options.webContents || options.window?.webContents ||
+                activeWindow?.webContents;
+            if (!target || target.isDestroyed?.()) return;
+            this.closePopup();
+            this.popupContents = target;
+            this.popupId = ++nextMenuId;
+            this.popupCallback = options.callback || null;
+            popupMenus.set(this.popupId, this);
+            target.send("__nexa:menu:popup", this.popupId,
+                serializeMenuItems(this.items), {
+                    x: Number.isFinite(options.x) ? options.x : 0,
+                    y: Number.isFinite(options.y) ? options.y : 0
+                });
+            this.emit("menu-will-show");
+        }
+        closePopup() {
+            if (this.popupId === null) return;
+            this.popupContents?.send("__nexa:menu:close", this.popupId);
+            popupMenus.delete(this.popupId);
+            this.popupContents = null;
+            this.popupId = null;
+            const callback = this.popupCallback;
+            this.popupCallback = null;
+            this.emit("menu-will-close");
+            callback?.();
+        }
+    }
+    ipcMain.on("nexa:electron:menu:click", (event, menuId, itemId) => {
+        const menu = popupMenus.get(menuId);
+        const item = menu?.getMenuItemById(itemId);
+        if (!item || !item.enabled || !item.visible || item.type === "separator") return;
+        if (item.type === "checkbox") item.checked = !item.checked;
+        if (item.type === "radio") item.checked = true;
+        const window = windows.get(contentsOwners.get(event.sender?.id));
+        item.click?.(item, window || null, {
+            preventDefault() { this.defaultPrevented = true; },
+            defaultPrevented: false
+        });
+        menu.closePopup();
+    });
+    ipcMain.on("nexa:electron:menu:closed", (_event, menuId) => {
+        popupMenus.get(menuId)?.closePopup();
+    });
     const crashReporter = createCrashReporter();
     const electron = {
         app,
@@ -1570,7 +1687,8 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         },
         dialog,
         clipboard,
-        Menu: {buildFromTemplate: template => template, setApplicationMenu() {}},
+        Menu,
+        MenuItem,
         protocol,
         powerMonitor: new EventEmitter(),
         crashReporter,

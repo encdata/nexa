@@ -1280,6 +1280,127 @@
         };
     };
 
+    let menuHost = null;
+    let openMenuId = null;
+    let menuCleanup = null;
+    function closeMenu(notify = false) {
+        menuCleanup?.();
+        menuCleanup = null;
+        if (menuHost) menuHost.remove();
+        menuHost = null;
+        const menuId = openMenuId;
+        openMenuId = null;
+        if (notify && menuId !== null) ipcRenderer.send("nexa:electron:menu:closed", menuId);
+    }
+    function showPopupMenu(menuId, items, bounds = {}) {
+        closeMenu(true);
+        openMenuId = menuId;
+        menuHost = document.createElement("div");
+        menuHost.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none";
+        const root = menuHost.attachShadow({mode: "open"});
+        const style = document.createElement("style");
+        style.textContent = `
+            :host { all: initial; }
+            .menu { position:fixed; min-width:210px; max-width:320px; padding:5px;
+                color:#f4f4f5; background:#252526; border:1px solid #444448;
+                border-radius:7px; box-shadow:0 8px 24px #0008; font:14px system-ui,sans-serif;
+                direction:ltr; pointer-events:auto; }
+            .item { position:relative; display:flex; align-items:center; gap:12px;
+                box-sizing:border-box; min-height:34px; padding:6px 10px; border:0;
+                border-radius:4px; color:inherit; background:transparent; text-align:left;
+                font:inherit; width:100%; white-space:nowrap; }
+            .item:not(:disabled):hover, .item:not(:disabled):focus { background:#3c3c3f; outline:0; }
+            .item:disabled { color:#888; }
+            .label { flex:1; overflow:hidden; text-overflow:ellipsis; }
+            .accelerator, .arrow { color:#aaa; font-size:12px; }
+            .separator { height:1px; margin:4px 6px; background:#444448; }
+            .submenu { display:none; position:absolute; top:-5px; left:calc(100% + 5px);
+                min-width:205px; padding:5px; background:#252526; border:1px solid #444448;
+                border-radius:7px; box-shadow:0 8px 24px #0008; }
+            .has-submenu:hover > .submenu, .has-submenu:focus-within > .submenu { display:block; }
+        `;
+        root.appendChild(style);
+        const panel = document.createElement("div");
+        panel.className = "menu";
+        panel.setAttribute("role", "menu");
+        const x = Number.isFinite(bounds.x) ? bounds.x : 0;
+        const y = Number.isFinite(bounds.y) ? bounds.y : 0;
+        panel.style.left = `${Math.max(0, Math.min(x, innerWidth - 220))}px`;
+        panel.style.top = `${Math.max(0, Math.min(y, innerHeight - 80))}px`;
+        const appendItems = (entries, parent) => {
+            for (const item of entries || []) {
+                if (item.visible === false) continue;
+                if (item.type === "separator") {
+                    const separator = document.createElement("div");
+                    separator.className = "separator";
+                    parent.appendChild(separator);
+                    continue;
+                }
+                const row = document.createElement("div");
+                if (item.submenu?.length) row.className = "has-submenu";
+                const button = document.createElement("button");
+                button.className = "item";
+                button.type = "button";
+                button.disabled = item.enabled === false;
+                button.setAttribute("role", item.type === "checkbox" || item.type === "radio"
+                    ? "menuitemcheckbox" : "menuitem");
+                if (item.checked) button.setAttribute("aria-checked", "true");
+                const label = document.createElement("span");
+                label.className = "label";
+                label.textContent = `${item.type === "checkbox" || item.type === "radio"
+                    ? (item.checked ? "✓ " : "　") : ""}${item.label || item.role || ""}`;
+                button.appendChild(label);
+                if (item.accelerator) {
+                    const accelerator = document.createElement("span");
+                    accelerator.className = "accelerator";
+                    accelerator.textContent = item.accelerator;
+                    button.appendChild(accelerator);
+                }
+                if (item.submenu?.length) {
+                    const arrow = document.createElement("span");
+                    arrow.className = "arrow";
+                    arrow.textContent = "›";
+                    button.appendChild(arrow);
+                }
+                button.addEventListener("click", () => {
+                    if (item.submenu?.length) return;
+                    ipcRenderer.send("nexa:electron:menu:click", menuId, item.id);
+                    closeMenu();
+                });
+                row.appendChild(button);
+                if (item.submenu?.length) {
+                    const submenu = document.createElement("div");
+                    submenu.className = "submenu";
+                    submenu.setAttribute("role", "menu");
+                    appendItems(item.submenu, submenu);
+                    row.appendChild(submenu);
+                }
+                parent.appendChild(row);
+            }
+        };
+        appendItems(items, panel);
+        root.appendChild(panel);
+        document.documentElement.appendChild(menuHost);
+        const outsideClick = event => {
+            if (menuHost && !menuHost.contains(event.target)) closeMenu(true);
+        };
+        const escape = event => {
+            if (event.key === "Escape" && menuHost) {
+                event.stopPropagation();
+                closeMenu(true);
+            }
+        };
+        setTimeout(() => {
+            if (!menuHost) return;
+            document.addEventListener("pointerdown", outsideClick, true);
+            document.addEventListener("keydown", escape, true);
+            menuCleanup = () => {
+                document.removeEventListener("pointerdown", outsideClick, true);
+                document.removeEventListener("keydown", escape, true);
+            };
+        }, 0);
+    }
+
     if (native) native.onmessage = event => {
         let message;
         try {
@@ -1298,6 +1419,15 @@
         }
 
         if (message.kind !== "event") return;
+        if (message.channel === "__nexa:menu:popup") {
+            const [menuId, items, bounds] = message.args || [];
+            showPopupMenu(menuId, items, bounds);
+            return;
+        }
+        if (message.channel === "__nexa:menu:close") {
+            if ((message.args || [])[0] === openMenuId) closeMenu();
+            return;
+        }
         if (message.channel === "__nexa:execute-js") {
             const [requestId, code] = message.args || [];
             Promise.resolve().then(() => window.eval(String(code))).then(value => {
@@ -1646,8 +1776,14 @@
     if (typeof window.Buffer === "undefined") {
         Object.defineProperty(window, "Buffer", {configurable: true, value: NexaBuffer});
     }
-    if (native) {
-        native.postMessage(JSON.stringify({kind: "preload-ready",
-            hasRequire: typeof window.require === "function"}));
-    }
 })();
+
+// Chromium-backed Electron apps often use the free `require` identifier directly.
+var require = window.require;
+if (window.nexaElectronNative) {
+    window.nexaElectronNative.postMessage(JSON.stringify({kind: "preload-ready",
+        hasRequire: typeof window.require === "function",
+        hasRequireIdentifier: typeof require === "function",
+        frameUrl: location.href,
+        isMainFrame: window.top === window}));
+}
