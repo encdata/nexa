@@ -1033,6 +1033,17 @@ class ElectronRenderer:
     def on_window_visibility_changed(self, visible):
         self.root_view.on_window_visibility_changed(visible)
 
+    def on_window_resize(self, width, height):
+        view = self.root_view
+        width = max(1, int(width))
+        height = max(1, int(height))
+        logger.info("resizing Electron root window %s content to %sx%s",
+                    self.window_id, width, height)
+        view.webview.setdimensions(width, height)
+        if view.visible and not view._renderer_dead:
+            view.webview.setvisibility(tg.View.VISIBLE)
+            view._applied_visible = True
+
     def on_screen_resize(self, width, height, scale_factor):
         metrics = (max(1, int(width)), max(1, int(height)), max(0.1, float(scale_factor)))
         if metrics == self._screen_metrics:
