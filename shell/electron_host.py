@@ -634,12 +634,14 @@ class _ElectronWindowView:
         if not isinstance(detail, dict):
             logger.error("renderer error: %s", detail)
             return
-        logger.error("renderer %s: %s (%s:%s:%s; frame=%s; main=%s; require=%s; identifier=%s)%s",
-                     detail.get("type", "error"), detail.get("message", ""),
+        logger.error("renderer %s in %s: %s (%s:%s:%s; frame=%s; main=%s; require=%s; identifier=%s; global=%s)%s",
+                     detail.get("type", "error"), detail.get("context", "window"),
+                     detail.get("message", ""),
                      detail.get("source", ""), detail.get("line", 0),
                      detail.get("column", 0), detail.get("frameUrl", ""),
                      detail.get("isMainFrame"), detail.get("hasRequire"),
                      detail.get("hasRequireIdentifier"),
+                     detail.get("hasGlobalRequire"),
                      "\n" + detail["stack"] if detail.get("stack") else "")
 
     def _log_console_error(self, detail):

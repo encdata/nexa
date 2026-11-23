@@ -85,9 +85,15 @@
 
     let rendererErrorCount = 0;
     const reportedErrors = new Set();
-    function reportRendererError(type, message, source = "", line = 0, column = 0) {
+    function reportRendererError(type, message, source = "", line = 0, column = 0,
+        context = "window") {
+        let hasGlobalRequire = false;
+        try {
+            hasGlobalRequire = (0, eval)("typeof require === 'function'");
+        } catch (_) {}
         const detail = {
             type,
+            context,
             message: String(message || type).slice(0, 1000),
             source: String(source || "").slice(0, 500),
             line: Number(line) || 0,
@@ -96,7 +102,8 @@
             frameUrl: String(location.href || "").slice(0, 500),
             isMainFrame: window.top === window,
             hasRequire: typeof window.require === "function",
-            hasRequireIdentifier: typeof require === "function"
+            hasRequireIdentifier: typeof require === "function",
+            hasGlobalRequire
         };
         const key = `${detail.type}:${detail.message}:${detail.source}:${detail.line}`;
         if (rendererErrorCount >= 40 || reportedErrors.has(key)) return;
@@ -124,7 +131,8 @@
                 const worker = Reflect.construct(target, args, newTarget);
                 worker.addEventListener("error", event => reportRendererError(
                     "worker-error", event.message || "worker failed",
-                    event.filename || String(args[0] || ""), event.lineno, event.colno));
+                    event.filename || String(args[0] || ""), event.lineno, event.colno,
+                    `${target.name || "worker"}:${String(args[0] || "")}`));
                 return worker;
             }
         });
@@ -2053,4 +2061,32 @@ if (window.nexaElectronNative) {
         hasGlobalRequire,
         frameUrl: location.href,
         isMainFrame: window.top === window}));
+}
+
+if (window === window.top) {
+    let frameProbeCount = 0;
+    document.addEventListener("load", event => {
+        const frame = event.target;
+        if (!(frame instanceof HTMLIFrameElement) || frameProbeCount >= 40) return;
+        frameProbeCount++;
+        const detail = {
+            kind: "frame-probe",
+            frameUrl: String(frame.src || "about:blank").slice(0, 500),
+            name: String(frame.name || "").slice(0, 100),
+            id: String(frame.id || "").slice(0, 100),
+            sameOrigin: false,
+            hasRequire: false,
+            hasGlobalRequire: false
+        };
+        try {
+            const child = frame.contentWindow;
+            detail.sameOrigin = child.location.origin === location.origin;
+            if (detail.sameOrigin) {
+                detail.hasRequire = typeof child.require === "function";
+                detail.hasGlobalRequire = child.eval(
+                    "typeof require === 'function'") === true;
+            }
+        } catch (_) {}
+        window.nexaElectronNative?.postMessage(JSON.stringify(detail));
+    }, true);
 }

@@ -57,6 +57,13 @@ class ElectronBridge:
                         request.get("isMainFrame"),
                         request.get("frameUrl", ""))
             return True
+        if kind == "frame-probe":
+            logger.info("Electron renderer frame probe for WebView %s "
+                        "(same_origin=%s, require=%s, global=%s, frame=%s)",
+                        self.webview.id, request.get("sameOrigin"),
+                        request.get("hasRequire"), request.get("hasGlobalRequire"),
+                        request.get("frameUrl", ""))
+            return True
         if kind == "ready":
             if self.on_ready is not None:
                 self.on_ready()
