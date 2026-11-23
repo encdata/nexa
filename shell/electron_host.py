@@ -721,6 +721,7 @@ class _ElectronWindowView:
                 if progress == 100:
                     logger.info("window %s finished loading %s",
                                 self.window_id, self.url)
+                    self.controller._root_renderer_loaded(self)
             elif event.type in (tg.Event.webviewHTTPError, tg.Event.webviewError,
                                 tg.Event.webviewDestroyed):
                 logger.error("window %s WebView %s: %s",
@@ -989,6 +990,7 @@ class ElectronRenderer:
         self._closed_windows = set()
         self._remote_closing = set()
         self._root_hidden = not self.host.renderer_visible
+        self._root_visibility_managed = False
         self._restart_requested = False
         self._closed = False
         self._tick_lock = Lock()
@@ -1369,11 +1371,14 @@ class ElectronRenderer:
     def _handle_window_state(self, message):
         if message.get("windowId") == self.window_id:
             if message.get("action") in ("hide", "minimize"):
+                self._root_visibility_managed = True
                 logger.info("hiding Electron root window %s", self.window_id)
                 self.root_view.set_visibility(tg.View.GONE)
             elif message.get("action") in ("show", "restore"):
+                self._root_visibility_managed = True
                 logger.info("showing Electron root window %s", self.window_id)
                 self.root_view.set_visibility(tg.View.VISIBLE)
+                self._root_hidden = False
             elif message.get("action") == "backgroundThrottling":
                 self.root_view.set_background_throttling(
                     (message.get("value") or {}).get("enabled", True))
@@ -1411,6 +1416,17 @@ class ElectronRenderer:
             window = self.window_host.windows.windows.get(host_window.window_id)
             if window is not None and window["maximized"] != (action == "maximize"):
                 self.window_host.windows.toggle_maximize(host_window.window_id)
+
+    def _root_renderer_loaded(self, view):
+        if (view is not self.root_view or not self._root_hidden
+                or self._root_visibility_managed or self._host_windows):
+            return
+        # Some Linux Electron apps wait for an updater splash that isn't created here.
+        logger.info("showing hidden Electron root window %s after its renderer loaded",
+                    self.window_id)
+        self._root_hidden = False
+        self._root_visibility_managed = True
+        self.root_view.set_visibility(tg.View.VISIBLE)
 
     def _handle_native_call(self, message):
         method = message.get("method")
