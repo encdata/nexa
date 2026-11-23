@@ -1037,6 +1037,7 @@ class ElectronRenderer:
         view = self.root_view
         width = max(1, int(width))
         height = max(1, int(height))
+        self._show_hidden_root(view, "window received its initial size")
         logger.info("resizing Electron root window %s content to %sx%s",
                     self.window_id, width, height)
         view.webview.setdimensions(width, height)
@@ -1383,6 +1384,7 @@ class ElectronRenderer:
         if message.get("windowId") == self.window_id:
             if message.get("action") in ("hide", "minimize"):
                 self._root_visibility_managed = True
+                self._root_hidden = True
                 logger.info("hiding Electron root window %s", self.window_id)
                 self.root_view.set_visibility(tg.View.GONE)
             elif message.get("action") in ("show", "restore"):
@@ -1429,12 +1431,15 @@ class ElectronRenderer:
                 self.window_host.windows.toggle_maximize(host_window.window_id)
 
     def _root_renderer_loaded(self, view):
+        self._show_hidden_root(view, "renderer finished loading")
+
+    def _show_hidden_root(self, view, reason):
         if (view is not self.root_view or not self._root_hidden
                 or self._root_visibility_managed or self._host_windows):
             return
         # Some Linux Electron apps wait for an updater splash that isn't created here.
-        logger.info("showing hidden Electron root window %s after its renderer loaded",
-                    self.window_id)
+        logger.info("showing hidden Electron root window %s: %s",
+                    self.window_id, reason)
         self._root_hidden = False
         self._root_visibility_managed = True
         self.root_view.set_visibility(tg.View.VISIBLE)
