@@ -46,21 +46,24 @@ class ElectronBridge:
             return False
         kind = request.get("kind")
         if kind == "preload-start":
-            logger.info("Electron renderer preload started for WebView %s", self.webview.id)
+            logger.info("Electron renderer preload started for window %s WebView %s",
+                        request.get("windowId"), self.webview.id)
             return True
         if kind == "preload-ready":
-            logger.info("Electron renderer preload finished for WebView %s "
+            logger.info("Electron renderer preload finished for window %s WebView %s "
                         "(require=%s, identifier=%s, global=%s, main=%s, frame=%s)",
-                        self.webview.id, request.get("hasRequire") is True,
+                        request.get("windowId"), self.webview.id,
+                        request.get("hasRequire") is True,
                         request.get("hasRequireIdentifier") is True,
                         request.get("hasGlobalRequire") is True,
                         request.get("isMainFrame"),
                         request.get("frameUrl", ""))
             return True
         if kind == "frame-probe":
-            logger.info("Electron renderer frame probe for WebView %s "
+            logger.info("Electron renderer frame probe for window %s WebView %s "
                         "(same_origin=%s, require=%s, global=%s, frame=%s)",
-                        self.webview.id, request.get("sameOrigin"),
+                        request.get("windowId"), self.webview.id,
+                        request.get("sameOrigin"),
                         request.get("hasRequire"), request.get("hasGlobalRequire"),
                         request.get("frameUrl", ""))
             return True

@@ -99,6 +99,7 @@
             line: Number(line) || 0,
             column: Number(column) || 0,
             stack: String(message?.stack || "").slice(0, 4000),
+            windowId: window.__NEXA_ELECTRON_WINDOW_ID__ ?? null,
             frameUrl: String(location.href || "").slice(0, 500),
             isMainFrame: window.top === window,
             hasRequire: typeof window.require === "function",
@@ -2056,6 +2057,7 @@ if (window.nexaElectronNative) {
         hasGlobalRequire = (0, eval)("typeof require === 'function'");
     } catch (_) {}
     window.nexaElectronNative.postMessage(JSON.stringify({kind: "preload-ready",
+        windowId: window.__NEXA_ELECTRON_WINDOW_ID__ ?? null,
         hasRequire: typeof window.require === "function",
         hasRequireIdentifier: typeof require === "function",
         hasGlobalRequire,
@@ -2071,6 +2073,7 @@ if (window === window.top) {
         frameProbeCount++;
         const detail = {
             kind: "frame-probe",
+            windowId: window.__NEXA_ELECTRON_WINDOW_ID__ ?? null,
             frameUrl: String(frame.src || "about:blank").slice(0, 500),
             name: String(frame.name || "").slice(0, 100),
             id: String(frame.id || "").slice(0, 100),

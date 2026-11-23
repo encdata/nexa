@@ -634,7 +634,8 @@ class _ElectronWindowView:
         if not isinstance(detail, dict):
             logger.error("renderer error: %s", detail)
             return
-        logger.error("renderer %s in %s: %s (%s:%s:%s; frame=%s; main=%s; require=%s; identifier=%s; global=%s)%s",
+        logger.error("renderer window=%s %s in %s: %s (%s:%s:%s; frame=%s; main=%s; require=%s; identifier=%s; global=%s)%s",
+                     detail.get("windowId"),
                      detail.get("type", "error"), detail.get("context", "window"),
                      detail.get("message", ""),
                      detail.get("source", ""), detail.get("line", 0),
@@ -650,7 +651,8 @@ class _ElectronWindowView:
         line = detail.get("line", "?")
         repeat_count = detail.get("repeatCount")
         if isinstance(repeat_count, int) and repeat_count > 0:
-            logger.error("renderer console: %s (%s:%s; repeated %s times)",
+            logger.error("renderer console window=%s: %s (%s:%s; repeated %s times)",
+                         self.window_id,
                          message, source, line, repeat_count)
             return
         key = (message, source, line)
@@ -661,7 +663,8 @@ class _ElectronWindowView:
         count = self._renderer_console_errors[key] + 1
         self._renderer_console_errors[key] = count
         if count & (count - 1) == 0:
-            logger.error("renderer console: %s (%s:%s; repeated %s times)",
+            logger.error("renderer console window=%s: %s (%s:%s; repeated %s times)",
+                         self.window_id,
                          message, source, line, count)
 
     def _preload(self):
