@@ -2043,9 +2043,14 @@ if (typeof globalThis.require !== "function") {
     });
 }
 if (window.nexaElectronNative) {
+    let hasGlobalRequire = false;
+    try {
+        hasGlobalRequire = (0, eval)("typeof require === 'function'");
+    } catch (_) {}
     window.nexaElectronNative.postMessage(JSON.stringify({kind: "preload-ready",
         hasRequire: typeof window.require === "function",
         hasRequireIdentifier: typeof require === "function",
+        hasGlobalRequire,
         frameUrl: location.href,
         isMainFrame: window.top === window}));
 }

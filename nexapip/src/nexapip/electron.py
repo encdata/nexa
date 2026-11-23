@@ -50,9 +50,10 @@ class ElectronBridge:
             return True
         if kind == "preload-ready":
             logger.info("Electron renderer preload finished for WebView %s "
-                        "(require=%s, identifier=%s, main=%s, frame=%s)",
+                        "(require=%s, identifier=%s, global=%s, main=%s, frame=%s)",
                         self.webview.id, request.get("hasRequire") is True,
                         request.get("hasRequireIdentifier") is True,
+                        request.get("hasGlobalRequire") is True,
                         request.get("isMainFrame"),
                         request.get("frameUrl", ""))
             return True
