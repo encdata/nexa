@@ -44,7 +44,7 @@ class AppStoreApp:
             for name, label in (("discover", "discover"),
                                 ("installed", "installed"), ("sources", "sources"))
         }
-        self._button(tabs, "refresh", "refresh", 68)
+        self.refresh_button = self._button(tabs, "refresh", "refresh", 68)
 
         self.search_frame = tg.LinearLayout(activity, self.root, vertical=False)
         self.search_frame.setdimensions(tg.View.MATCH_PARENT, 42)
@@ -72,6 +72,8 @@ class AppStoreApp:
         self.status.setmargin(12, "left")
         self.status.setmargin(12, "right")
         self.status.settextcolor(palette.muted)
+        self.refresh_button.setbackgroundcolor(palette.surface)
+        self.refresh_button.settextcolor(palette.text)
         self.status.setvisibility(tg.View.GONE)
         self.rows_scroll = tg.NestedScrollView(activity, self.root, fillviewport=True, nobar=True)
         self.rows_scroll.setheight(0)
@@ -454,6 +456,20 @@ class AppStoreApp:
         self.tab = "sources"
         self._render()
         self._load_catalogs()
+
+    def refresh_theme(self):
+        self.root.setbackgroundcolor(palette.window_content)
+        self.search_frame.setbackgroundcolor(palette.surface)
+        self.search.settextcolor(palette.text)
+        self.rows.setbackgroundcolor(palette.window_content)
+        self.status.settextcolor(palette.muted)
+        self.refresh_button.setbackgroundcolor(palette.surface)
+        self.refresh_button.settextcolor(palette.text)
+        for button in self.tab_buttons.values():
+            button.settextcolor(palette.text)
+        self.prompt.refresh_theme()
+        self.confirm_menu.refresh_theme()
+        self._render()
 
     def close(self):
         self.closed = True

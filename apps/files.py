@@ -89,6 +89,9 @@ class FilesApp:
         path_label.setgravity(0, 1)
         refresh = add_button(toolbar, "↻", 36)
 
+        hidden_button = add_button(toolbar, ".*", 36)
+        hidden_button.settextsize(14)
+
         search_bar = tg.LinearLayout(activity, root)
         search_bar.setdimensions(tg.View.MATCH_PARENT, 44)
         search_bar.setlinearlayoutparams(0)
@@ -146,6 +149,7 @@ class FilesApp:
             on_association_change, lambda path_value: install_package(path_value))
         state = {"path": path, "back_id": back.id, "forward_id": forward.id,
                  "up_id": up.id, "refresh_id": refresh.id, "search_id": search.id,
+                 "hidden_id": hidden_button.id, "show_hidden": False,
                  "path_id": path_label.id, "rows": rows,
                  "display_entries": [], "display_by_path": {},
                  "menu": menu, "open_with": open_with,
@@ -197,7 +201,8 @@ class FilesApp:
                 return
 
             entries = [entry for entry in state["entries"]
-                       if not state["query"] or state["query"] in entry[1].casefold()]
+                       if (state["show_hidden"] or not entry[1].startswith("."))
+                       and (not state["query"] or state["query"] in entry[1].casefold())]
             state["display_entries"] = entries
             state["display_by_path"] = {entry[0]: entry for entry in entries}
             status.settext(f"preparing {len(entries)} items…")
@@ -419,6 +424,12 @@ class FilesApp:
                 state["query"] = search.gettext().strip().casefold()
                 render()
                 return True
+            if event.type == tg.Event.click and event.id == state["hidden_id"]:
+                state["show_hidden"] = not state["show_hidden"]
+                hidden_button.setbackgroundcolor(
+                    palette.accent if state["show_hidden"] else palette.surface)
+                render()
+                return True
             if event.type == tg.Event.longClick:
                 if event.id == state["path_id"]:
                     show_menu()
@@ -480,6 +491,9 @@ class FilesApp:
             for button in (back, forward, up, refresh):
                 button.setbackgroundcolor(palette.surface)
                 button.settextcolor(palette.text)
+            hidden_button.setbackgroundcolor(
+                palette.accent if state["show_hidden"] else palette.surface)
+            hidden_button.settextcolor(palette.text)
             for label in nav_labels:
                 label.settextcolor(palette.text)
             state["menu"].refresh_theme()

@@ -202,6 +202,27 @@ class TaskManagerApp:
         performance_page.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
         performance_page.setvisibility(tg.View.GONE)
 
+        search_label = tg.TextView(activity, "search by process name or pid", process_page)
+        search_label.setdimensions(tg.View.MATCH_PARENT, 24)
+        search_label.setlinearlayoutparams(0)
+        search_label.setmargin(10, "left")
+        search_label.settextsize(11)
+        search_label.settextcolor(palette.muted)
+        search_label.setgravity(0, 1)
+
+        process_search = tg.EditText(activity, "", process_page, singleline=True,
+                                     line=False, inputtype="text")
+        process_search.setdimensions(tg.View.MATCH_PARENT, 40)
+        process_search.setlinearlayoutparams(0)
+        process_search.setmargin(8, "left")
+        process_search.setmargin(8, "right")
+        process_search.setmargin(4, "top")
+        process_search.setmargin(4, "bottom")
+        process_search.setbackgroundcolor(palette.surface)
+        process_search.settextcolor(palette.text)
+        process_search.settextsize(13)
+        process_search.sendtextevent(True)
+
         columns = tg.LinearLayout(activity, process_page, vertical=False)
         columns.setdimensions(tg.View.MATCH_PARENT, 34)
         columns.setlinearlayoutparams(0)
@@ -318,7 +339,10 @@ class TaskManagerApp:
             for sort_key, header in sort_headers.items():
                 arrow = (" ↓" if state["sort_descending"] else " ↑") if sort_key == key else ""
                 header.settext(sort_key + arrow)
-            visible = processes
+            query = process_search.gettext().strip().casefold()
+            visible = [process for process in processes
+                       if not query or query in process["name"].casefold()
+                       or query in str(process["pid"])]
             display_processes = {}
             items = []
             for process in visible:
@@ -340,7 +364,7 @@ class TaskManagerApp:
             total = snapshot["total_memory"]
             used = snapshot["used_memory"]
             set_gauge(cpu_gauge, cpu_percent, cpu)
-            cpu_summary.settext(f"{len(processes)} processes")
+            cpu_summary.settext(f"{len(visible)} of {len(processes)} processes")
             memory_percent_used = used / total * 100 if total else 0
             set_gauge(memory_gauge, memory_percent, memory_percent_used)
             memory_summary.settext(_format_size(used))
@@ -369,6 +393,10 @@ class TaskManagerApp:
                 return True
             if event.type == tg.Event.back and menu.visible:
                 menu.hide()
+                return True
+            if event.type == tg.Event.text and event.id == process_search.id:
+                if state["snapshot"] is not None:
+                    render(state["snapshot"])
                 return True
             if event.type == tg.Event.click:
                 if event.id == process_rows.id:
@@ -443,11 +471,13 @@ class TaskManagerApp:
         def theme_refresh_state():
             return {"sort_by": state["sort_by"],
                     "sort_descending": state["sort_descending"],
-                    "active_page": state["active_page"] == performance_page}
+                    "active_page": state["active_page"] == performance_page,
+                    "query": process_search.gettext()}
 
         def restore_theme_state(saved):
             state["sort_by"] = saved["sort_by"]
             state["sort_descending"] = saved["sort_descending"]
+            process_search.settext(saved["query"])
             page = performance_page if saved["active_page"] else process_page
             state["active_page"] = page
             process_page.setvisibility(tg.View.VISIBLE if page == process_page else tg.View.GONE)

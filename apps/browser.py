@@ -35,7 +35,7 @@ class BrowserSession:
         self.tabs = {}
         self.next_tab_id = 0
         self.active_tab = None
-        self.history, self.bookmarks = self._load_data()
+        self.history, self.bookmarks, saved_tabs, saved_active = self._load_data()
 
         self.root = tg.LinearLayout(activity, parent)
         self.root.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
@@ -80,7 +80,11 @@ class BrowserSession:
         self.status.settextcolor(palette.muted)
         self.status.setgravity(0, 1)
 
-        self._new_tab()
+        if saved_tabs:
+            tab_ids = [self._new_tab(url) for url in saved_tabs]
+            self._select_tab(tab_ids[saved_active])
+        else:
+            self._new_tab()
 
     def refresh_theme(self):
         self.root.setbackgroundcolor(palette.window_content)
@@ -173,13 +177,13 @@ class BrowserSession:
             with open(DATA_PATH, encoding="utf-8") as data_file:
                 data = json.load(data_file)
         except FileNotFoundError:
-            return [], []
+            return [], [], [], 0
         except (OSError, json.JSONDecodeError) as error:
             print(f"nexa browser: couldn't read saved data: {error}")
-            return [], []
+            return [], [], [], 0
 
         if not isinstance(data, dict):
-            return [], []
+            return [], [], [], 0
         saved_history = data.get("history", [])
         saved_bookmarks = data.get("bookmarks", [])
         if not isinstance(saved_history, list):
@@ -189,7 +193,24 @@ class BrowserSession:
         history = [url for url in saved_history if self._is_web_url(url)][:100]
         bookmarks = list(dict.fromkeys(
             url for url in saved_bookmarks if self._is_web_url(url)))
-        return history, bookmarks
+        session = data.get("session", {})
+        session = session if isinstance(session, dict) else {}
+        saved_tabs = session.get("tabs", [])
+        if not isinstance(saved_tabs, list):
+            saved_tabs = []
+        active = session.get("active", 0)
+        if type(active) is not int:
+            active = 0
+        tabs = []
+        selected = None
+        for index, url in enumerate(saved_tabs):
+            if not self._is_web_url(url):
+                continue
+            if index == active:
+                selected = len(tabs)
+            tabs.append(url)
+        active = selected if selected is not None else 0
+        return history, bookmarks, tabs, active
 
     def _save_data(self):
         directory = os.path.dirname(DATA_PATH)
@@ -197,7 +218,16 @@ class BrowserSession:
             os.makedirs(directory, exist_ok=True)
             temporary = f"{DATA_PATH}.tmp"
             with open(temporary, "w", encoding="utf-8") as data_file:
-                json.dump({"history": self.history[:100], "bookmarks": self.bookmarks},
+                tabs = [tab for tab in self.tabs.values()
+                        if not tab["is_devtools"] and self._is_web_url(tab["url"])]
+                active_tab = self.tabs.get(self.active_tab)
+                if active_tab is not None and active_tab["is_devtools"]:
+                    active_tab = self.tabs.get(active_tab["devtools_target_tab_id"])
+                active = next((index for index, tab in enumerate(tabs)
+                               if tab is active_tab), 0)
+                json.dump({"history": self.history[:100], "bookmarks": self.bookmarks,
+                           "session": {"tabs": [tab["url"] for tab in tabs],
+                                       "active": active}},
                           data_file, ensure_ascii=False, separators=(",", ":"))
             os.replace(temporary, DATA_PATH)
         except OSError as error:
@@ -253,6 +283,7 @@ class BrowserSession:
         self._select_tab(tab_id)
         if initial_url:
             tab["url"] = initial_url
+            self._push_url(tab, initial_url)
             webview.loaduri(initial_url)
             if tab_id == self.active_tab:
                 self.address.settext(initial_url)
@@ -338,8 +369,9 @@ class BrowserSession:
             self._push_url(tab, url)
             self.history.insert(0, url)
             self.history = self.history[:100]
-            self._save_data()
         tab["url"] = url
+        if record:
+            self._save_data()
         tab["webview"].loaduri(url)
         if tab["id"] == self.active_tab:
             self.address.settext(url)
@@ -356,6 +388,7 @@ class BrowserSession:
             return
         tab["index"] -= 1
         self._load_url(tab, tab["stack"][tab["index"]], record=False)
+        self._save_data()
 
     def _forward(self):
         tab = self.tabs[self.active_tab]
@@ -363,6 +396,7 @@ class BrowserSession:
             return
         tab["index"] += 1
         self._load_url(tab, tab["stack"][tab["index"]], record=False)
+        self._save_data()
 
     def _reload(self):
         tab = self.tabs[self.active_tab]
@@ -382,6 +416,7 @@ class BrowserSession:
         self._update_tab_label(tab)
         self._update_navigation_buttons(tab)
         self.status.settext("new tab")
+        self._save_data()
 
     def _toggle_bookmark(self):
         url = self.tabs[self.active_tab]["url"]
@@ -572,10 +607,13 @@ a {{ color:#{palette.accent & 0xFFFFFF:06x}; overflow-wrap:anywhere; }} li {{ ma
             self._open_devtools()
         elif action == "new_tab":
             self._new_tab()
+            self._save_data()
         elif action == "select_tab":
             self._select_tab(value)
+            self._save_data()
         elif action == "close_tab":
             self._close_tab(value)
+            self._save_data()
         return True
 
 

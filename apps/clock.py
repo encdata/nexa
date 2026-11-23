@@ -151,6 +151,12 @@ class ClockApp:
         timer_input.settextcolor(palette.text)
         timer_input.settextsize(18)
         timer_input.setgravity(1, 1)
+        timer_presets = tg.LinearLayout(activity, timer_page, vertical=False)
+        timer_presets.setdimensions(tg.View.MATCH_PARENT, 48)
+        timer_presets.setlinearlayoutparams(0)
+        for label, seconds in (("1 min", 60), ("5 min", 300),
+                               ("25 min", 1500), ("1 hour", 3600)):
+            make_button(timer_presets, label, ("timer_preset", seconds), height=42)
         timer_controls = tg.LinearLayout(activity, timer_page, vertical=False)
         timer_controls.setdimensions(tg.View.MATCH_PARENT, 56)
         timer_controls.setlinearlayoutparams(0)
@@ -279,6 +285,9 @@ class ClockApp:
                 timer_running = True
                 timer_status.settext("counting down")
                 persist()
+            elif action[0] == "timer_preset":
+                timer_input.settext(str(action[1]))
+                timer_status.settext(f"{action[1]} seconds selected")
             elif action[0] == "timer_pause":
                 if timer_running:
                     state["timer_remaining"] = remaining()

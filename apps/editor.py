@@ -108,16 +108,33 @@ class EditorApp:
         editor.setgravity(0, 0)
         editor.sendtextevent(True)
 
-        status = tg.TextView(activity, "ready", root)
-        status.setdimensions(tg.View.MATCH_PARENT, 24)
-        status.setlinearlayoutparams(0)
+        status_bar = tg.LinearLayout(activity, root, vertical=False)
+        status_bar.setdimensions(tg.View.MATCH_PARENT, 24)
+        status_bar.setlinearlayoutparams(0)
+        status = tg.TextView(activity, "ready", status_bar)
+        status.setdimensions(0, tg.View.MATCH_PARENT)
+        status.setlinearlayoutparams(1)
         status.setmargin(8, "left")
         status.settextsize(11)
         status.settextcolor(palette.muted)
         status.setgravity(0, 1)
 
+        document_info = tg.TextView(activity, "1 line · 0 words · 0 chars", status_bar)
+        document_info.setdimensions(0, tg.View.MATCH_PARENT)
+        document_info.setlinearlayoutparams(1)
+        document_info.setmargin(8, "right")
+        document_info.settextsize(11)
+        document_info.settextcolor(palette.muted)
+        document_info.setgravity(2, 1)
+
         state = {"saved_text": "", "busy": False, "closed": False, "preview": False,
                  "preview_view": None}
+
+        def update_document_info(text=None):
+            text = editor.gettext() if text is None else text
+            lines = text.count("\n") + 1
+            words = len(text.split())
+            document_info.settext(f"{lines} lines · {words} words · {len(text)} chars")
 
         def is_markdown(path):
             return os.path.splitext(path.lower())[1] in (".md", ".markdown")
@@ -175,6 +192,7 @@ class EditorApp:
         def set_document(path, text):
             path_field.settext(path)
             editor.settext(text)
+            update_document_info(text)
             syntax_highlighting.highlight(activity, editor, path, text)
             if state["preview"] and not is_markdown(path):
                 state["preview"] = False
@@ -253,6 +271,7 @@ class EditorApp:
                 return True
             if event.type == tg.Event.text and event.id == editor.id:
                 text = event.value.get("text", "")
+                update_document_info(text)
                 syntax_highlighting.highlight(activity, editor, path_field.gettext(), text)
                 if state["preview"]:
                     show_preview()
@@ -288,6 +307,7 @@ class EditorApp:
             editor.setbackgroundcolor(palette.window_content)
             editor.settextcolor(palette.text)
             status.settextcolor(palette.muted)
+            document_info.settextcolor(palette.muted)
             for button in button_views.values():
                 button.setbackgroundcolor(palette.surface)
                 button.settextcolor(palette.text)

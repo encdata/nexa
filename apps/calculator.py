@@ -182,6 +182,33 @@ class CalculatorApp:
                     key_actions[view.id] = ("function", action)
                     function_buttons[action] = view
 
+        history_panel = tg.LinearLayout(activity, keypad)
+        history_panel.setdimensions(tg.View.MATCH_PARENT, tg.View.WRAP_CONTENT)
+        history_panel.setlinearlayoutparams(0)
+        history_rows = {}
+
+        def render_history():
+            history_panel.clearchildren()
+            history_rows.clear()
+            heading = tg.TextView(activity, "history", history_panel)
+            heading.setdimensions(tg.View.MATCH_PARENT, 36)
+            heading.setmargin(10, "left")
+            heading.settextsize(12)
+            heading.settextcolor(palette.muted)
+            heading.setgravity(0, 1)
+            for entry in reversed(history):
+                view = tg.TextView(activity, entry, history_panel)
+                view.setdimensions(tg.View.MATCH_PARENT, 40)
+                view.setmargin(8, "left")
+                view.setmargin(8, "right")
+                view.setbackgroundcolor(palette.surface)
+                view.settextsize(13)
+                view.settextcolor(palette.text)
+                view.setgravity(2, 1)
+                view.sendclickevent(True)
+                history_rows[view.id] = entry.partition(" = ")[0].replace("π", "pi")
+        render_history()
+
         def render_expression():
             shown = expression.replace("pi", "π").replace("**", "^")
             expression_view.settext(shown[-42:])
@@ -257,6 +284,7 @@ class CalculatorApp:
                 return
             history.append(f"{expression.replace('pi', 'π')} = {answer}")
             history[:] = history[-20:]
+            render_history()
             expression_view.settext(history[-1][-42:])
             result_view.settext(answer)
             expression = answer
@@ -266,6 +294,11 @@ class CalculatorApp:
             nonlocal degree_mode, inverse_mode, expression, just_evaluated
             if event.type != tg.Event.click:
                 return False
+            if event.id in history_rows:
+                expression = history_rows[event.id]
+                just_evaluated = False
+                render_expression()
+                return True
             action = key_actions.get(event.id)
             if action is None:
                 return False
@@ -314,6 +347,7 @@ class CalculatorApp:
             inverse_mode = saved["inverse_mode"]
             degree_mode = saved["degree_mode"]
             history[:] = saved["history"]
+            render_history()
             expression_view.settext(saved["shown"])
             result_view.settext(saved["result"])
             mode_button.settext("DEG" if degree_mode else "RAD")
