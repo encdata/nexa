@@ -649,10 +649,13 @@ class _ElectronWindowView:
         message = str(detail.get("msg", ""))[:1000]
         source = str(detail.get("source", ""))[:500]
         line = detail.get("line", "?")
+        contents_id = getattr(self, "contents_id", self.window_id)
+        webview_id = getattr(getattr(self, "webview", None), "id", None)
         repeat_count = detail.get("repeatCount")
         if isinstance(repeat_count, int) and repeat_count > 0:
-            logger.error("renderer console window=%s: %s (%s:%s; repeated %s times)",
+            logger.error("renderer console window=%s contents=%s webview=%s: %s (%s:%s; repeated %s times)",
                          self.window_id,
+                         contents_id, webview_id,
                          message, source, line, repeat_count)
             return
         key = (message, source, line)
@@ -663,8 +666,9 @@ class _ElectronWindowView:
         count = self._renderer_console_errors[key] + 1
         self._renderer_console_errors[key] = count
         if count & (count - 1) == 0:
-            logger.error("renderer console window=%s: %s (%s:%s; repeated %s times)",
+            logger.error("renderer console window=%s contents=%s webview=%s: %s (%s:%s; repeated %s times)",
                          self.window_id,
+                         contents_id, webview_id,
                          message, source, line, count)
 
     def _preload(self):

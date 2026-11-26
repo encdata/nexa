@@ -2030,9 +2030,24 @@
             throw error;
         }
     }
+    function createCommonJsRequire(parentFile) {
+        const localRequire = specifier => loadCommonJsModule(specifier, parentFile);
+        localRequire.resolve = specifier => {
+            if (builtinModule(specifier, parentFile) !== null) return specifier;
+            const resolved = resolveCommonJsModule(specifier, parentFile);
+            return resolved.filename || resolved.builtin;
+        };
+        localRequire.cache = commonJsModules;
+        localRequire.main = null;
+        return localRequire;
+    }
+    Object.defineProperty(window, "__NEXA_ELECTRON_CREATE_REQUIRE__", {
+        configurable: true,
+        value: createCommonJsRequire
+    });
     if (typeof window.require !== "function") {
         Object.defineProperty(window, "require", {
-            configurable: false,
+            configurable: true,
             writable: false,
             value: name => loadCommonJsModule(name, window.__NEXA_ELECTRON_PRELOAD_BASE__)
         });
@@ -2043,10 +2058,9 @@
 })();
 
 // Chromium-backed Electron apps often use the free `require` identifier directly.
-var require = window.require;
 if (typeof globalThis.require !== "function") {
     Object.defineProperty(globalThis, "require", {
-        configurable: false,
+        configurable: true,
         writable: false,
         value: window.require
     });

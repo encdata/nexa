@@ -999,6 +999,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         getPreloadResponse() {
             const paths = [...this.session.getPreloads(), this.preloadPath].filter(Boolean);
             const files = paths.map(preloadFileInfo);
+            const contextIsolation = this.options?.webPreferences?.contextIsolation !== false;
             const rendererProcess = {
                 arch: process.arch,
                 argv: process.argv,
@@ -1012,16 +1013,44 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
                     process.env[name] !== undefined).map(name => [name, process.env[name]]))
             };
             const schemes = [...privilegedSchemes.keys()];
-            const cacheKey = JSON.stringify([files, schemes, rendererProcess]);
+            const cacheKey = JSON.stringify([files, schemes, rendererProcess,
+                contextIsolation]);
             const cachedEntry = preloadScriptCache.get(cacheKey);
             if (cachedEntry !== undefined) {
                 preloadScriptCache.delete(cacheKey);
                 preloadScriptCache.set(cacheKey, cachedEntry);
                 return {source: cachedEntry.script, etag: cachedEntry.etag};
             }
-            const preloads = paths.map((file, index) =>
-                `window.__NEXA_ELECTRON_PRELOAD_BASE__=${JSON.stringify(files[index].absolute)};\n` +
-                readPreload(file, files[index])).join("\n");
+            const preloads = paths.map((file, index) => {
+                const info = files[index];
+                const filename = JSON.stringify(info.absolute);
+                const dirname = JSON.stringify(path.dirname(info.absolute));
+                const source = readPreload(file, info).replace(/^#!.*(?:\r?\n|$)/, "");
+                const extension = path.extname(info.absolute).toLowerCase();
+                const commonJs = extension === ".cjs" ||
+                    (extension === ".js" && packageData.type !== "module");
+                const script = commonJs
+                    ? `(() => {
+                        const process = window.process;
+                        const global = window.global;
+                        const Buffer = window.Buffer;
+                        const require = window.__NEXA_ELECTRON_CREATE_REQUIRE__(${filename});
+                        const module = {id: ${filename}, filename: ${filename},
+                            exports: {}, loaded: false};
+                        module.require = require;
+                        const exports = module.exports;
+                        try {
+                            (function(exports, require, module, __filename, __dirname) {
+${source}\n                        }).call(module.exports, exports, require, module,
+                            ${filename}, ${dirname});
+                            module.loaded = true;
+                        } catch (error) {
+                            console.error("nexa electron preload failed:", ${filename}, error);
+                        }
+                    })();`
+                    : source;
+                return `window.__NEXA_ELECTRON_PRELOAD_BASE__=${filename};\n${script}`;
+            }).join("\n");
             const bridge = `(() => {
                 const schemes = new Set(${JSON.stringify(schemes)});
                 const ipc = window.nexaElectron?.ipcRenderer;
@@ -1074,7 +1103,14 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             const processSetup = `window.__NEXA_ELECTRON_PROCESS__=${JSON.stringify(rendererProcess)};` +
                 `if(window.process){Object.assign(window.process,window.__NEXA_ELECTRON_PROCESS__);` +
                 `window.process.env=window.__NEXA_ELECTRON_PROCESS__.env;}`;
-            const script = `${processSetup}\n${preloads}\n${bridge}`;
+            const pageShimCleanup = contextIsolation ? `(() => {
+                for (const name of ["require", "process", "global", "Buffer", "electron",
+                    "nexaElectron", "__NEXA_ELECTRON_PROCESS__",
+                    "__NEXA_ELECTRON_CREATE_REQUIRE__"]) {
+                    try { delete window[name]; } catch (_) {}
+                }
+            })();` : "";
+            const script = `${processSetup}\n${preloads}\n${bridge}\n${pageShimCleanup}`;
             const scriptBytes = Buffer.byteLength(script);
             const etag = `"${createHash("sha256").update(script).digest("hex")}"`;
             if (scriptBytes <= maxPreloadScriptCacheBytes) {
