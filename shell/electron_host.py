@@ -716,7 +716,17 @@ class _ElectronWindowView:
                           tg.Event.webviewHTTPError, tg.Event.webviewError,
                           tg.Event.webviewRequestError,
                           tg.Event.webviewDestroyed, tg.Event.webviewTitleChanged):
-            if event.type == tg.Event.webviewProgress:
+            if event.type == tg.Event.webviewNavigation:
+                logger.info("window %s navigation started: %s (main_frame=%s)",
+                            self.window_id, event.value.get("url"),
+                            event.value.get("isMainFrame"))
+            elif event.type == tg.Event.webviewLoadStarted:
+                logger.info("window %s document load started: %s",
+                            self.window_id, event.value.get("url"))
+            elif event.type == tg.Event.webviewCommitVisible:
+                logger.info("window %s document committed: %s",
+                            self.window_id, event.value.get("url"))
+            elif event.type == tg.Event.webviewProgress:
                 progress = event.value.get("progress")
                 if progress == 100:
                     logger.info("window %s finished loading %s",

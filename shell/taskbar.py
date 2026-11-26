@@ -267,7 +267,10 @@ class Taskbar:
             self.menu_entries.append((title, "label"))
             summary = (getattr(app, "summary", "")
                        or getattr(app, "description", ""))
-            description = tg.TextView(self.activity, str(summary or ""), labels)
+            summary = str(summary or "").strip()
+            if len(summary) > 48:
+                summary = summary[:45].rsplit(" ", 1)[0].rstrip(" ,.;:") + "…"
+            description = tg.TextView(self.activity, summary, labels)
             description.setdimensions(tg.View.MATCH_PARENT, 23)
             description.setlinearlayoutparams(0)
             description.settextsize(11)
@@ -301,9 +304,10 @@ class Taskbar:
         visible_by_letter = {}
         visible_count = 0
         for app, button in self.app_entries:
-            matches = (not query or query in app.name.casefold()
-                       or query in app.app_id.casefold()
-                       or query in str(getattr(app, "description", "")).casefold())
+            searchable = " ".join((app.name, app.app_id,
+                                   str(getattr(app, "summary", "")),
+                                   str(getattr(app, "description", "")))).casefold()
+            matches = not query or query in searchable
             button.setvisibility(tg.View.VISIBLE if matches else tg.View.GONE)
             if matches:
                 visible_by_letter[app.name[:1].upper()] = True

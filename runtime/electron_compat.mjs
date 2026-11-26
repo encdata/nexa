@@ -14,6 +14,13 @@ import {promisify} from "node:util";
 
 const execFileAsync = promisify(execFile);
 
+function termuxCommandEnvironment() {
+    const environment = {...process.env};
+    delete environment.LD_PRELOAD;
+    delete environment.LD_LIBRARY_PATH;
+    return environment;
+}
+
 export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath = appRoot,
                                      localUrl, emit, resolveAsar, trustOrigin,
                                      isTrustedPath = () => false,
@@ -1871,7 +1878,8 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         }
         return execFileAsync("am", ["start", "-a", "android.intent.action.VIEW", "-d", parsed.href], {
             timeout: 10000,
-            maxBuffer: 64 * 1024
+            maxBuffer: 64 * 1024,
+            env: termuxCommandEnvironment()
         }).then(() => undefined);
     }
 
@@ -1891,7 +1899,8 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             return execFileSync("termux-clipboard-get", [], {
                 timeout: 5000,
                 maxBuffer: 2 * 1024 * 1024,
-                encoding: "utf8"
+                encoding: "utf8",
+                env: termuxCommandEnvironment()
             });
         } catch (error) {
             if (error.code === "ENOENT") {
@@ -1904,7 +1913,8 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
     function writeClipboardText(text) {
         try {
             execFileSync("termux-clipboard-set", [], {
-                input: String(text), timeout: 5000, maxBuffer: 64 * 1024
+                input: String(text), timeout: 5000, maxBuffer: 64 * 1024,
+                env: termuxCommandEnvironment()
             });
         } catch (error) {
             if (error.code === "ENOENT") {
