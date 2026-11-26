@@ -15,6 +15,7 @@ class Taskbar:
     content_height = 48
     menu_button_width = 56
     clock_width = 72
+    show_desktop_width = 32
     window_width = 56
 
     def __init__(self, activity, root, apps, open_app, activate_window, screen_width,
@@ -32,6 +33,9 @@ class Taskbar:
         self.buttons = {}
         self.window_views = {}
         self.window_spacer = None
+        self.window_content_width = 0
+        self.window_viewport_width = 0
+        self.show_desktop_line = None
         self.menu_visible = False
         self.active_window = None
         self.clock_text = None
@@ -49,6 +53,7 @@ class Taskbar:
         self.view.sendlongclickevent(True)
         place(self.view, 8, 4)
         if rtl:
+            self._add_show_desktop()
             self._add_clock()
             self._add_window_scroll()
             self._add_menu_button()
@@ -56,6 +61,7 @@ class Taskbar:
             self._add_menu_button()
             self._add_window_scroll()
             self._add_clock()
+            self._add_show_desktop()
 
         menu_height = min(500, max(160, screen_height - self.height - 24))
         self.menu_height = menu_height
@@ -137,6 +143,7 @@ class Taskbar:
         set_rounded_color(self.menu_surface, self.app_menu_width, self.menu_height,
                           palette.surface, 14)
         self.clock.settextcolor(palette.text)
+        self.show_desktop_line.setbackgroundcolor(palette.accent)
         self.context_menu.refresh_theme()
         self.menu.setbackgroundcolor(palette.surface)
         self.heading.settextcolor(palette.text)
@@ -165,6 +172,7 @@ class Taskbar:
         place(self.surface, 8, 4)
         place(self.view, 8, 4)
         self._layout_window_buttons()
+        self._reveal_window(self.active_window)
 
         self.app_menu_width = min(380, max(1, self.screen_width - 16))
         self.menu_height = min(500, max(160, self.screen_height - self.height - 24))
@@ -188,8 +196,11 @@ class Taskbar:
             self.window_spacer.setlinearlayoutparams(0, 0)
 
     def _layout_window_buttons(self):
-        viewport_width = max(0, self.screen_width - 16 - self.clock_width - self.menu_button_width)
+        viewport_width = max(0, self.screen_width - 16 - self.clock_width
+                             - self.menu_button_width - self.show_desktop_width)
         content_width = max(viewport_width, len(self.window_views) * self.window_width)
+        self.window_viewport_width = viewport_width
+        self.window_content_width = content_width
         self.window_list.setdimensions(content_width, self.content_height)
         if self.window_spacer is not None:
             self.window_spacer.setdimensions(
@@ -197,14 +208,52 @@ class Taskbar:
             offset = round(max(0, content_width - viewport_width) * self.density)
             self.window_scroll.setscrollposition(offset, 0, smooth=False)
 
+    def _reveal_window(self, window_id):
+        window_ids = tuple(self.window_views)
+        if window_id not in self.window_views:
+            return
+        index = window_ids.index(window_id)
+        spacer_width = (max(0, self.window_content_width
+                            - len(window_ids) * self.window_width)
+                        if self.window_spacer is not None else 0)
+        start = round((spacer_width + index * self.window_width) * self.density)
+        end = start + round(self.window_width * self.density)
+        viewport = round(self.window_viewport_width * self.density)
+        current = self.window_scroll.getscrollposition()[0]
+        target = current
+        if start < current:
+            target = start
+        elif end > current + viewport:
+            target = end - viewport
+        max_scroll = round(max(0, self.window_content_width
+                               - self.window_viewport_width) * self.density)
+        target = max(0, min(max_scroll, target))
+        if target != current:
+            self.window_scroll.setscrollposition(target, 0, smooth=False)
+
     def _add_clock(self):
         self.clock_text = datetime.now().strftime("%H:%M")
         self.clock = tg.TextView(self.activity, self.clock_text, self.view)
+        self.clock.sendclickevent(True)
         self.clock.sendlongclickevent(True)
         self.clock.settextcolor(palette.text)
         self.clock.setgravity(1, 1)
         self.clock.setdimensions(self.clock_width, self.content_height)
         self.clock.setlinearlayoutparams(0)
+        self.buttons[self.clock.id] = ("clock", None)
+
+    def _add_show_desktop(self):
+        button = tg.FrameLayout(self.activity, self.view)
+        button.setdimensions(self.show_desktop_width, self.content_height)
+        button.setlinearlayoutparams(0)
+        button.sendclickevent(True)
+        line = tg.LinearLayout(self.activity, button)
+        line.setdimensions(2, 32)
+        line.setbackgroundcolor(palette.accent)
+        line.setmargin((self.show_desktop_width - 2) // 2, "left")
+        line.setmargin(8, "top")
+        self.show_desktop_line = line
+        self.buttons[button.id] = ("show_desktop", None)
 
     def tick(self):
         now = monotonic()
@@ -359,11 +408,14 @@ class Taskbar:
         self.buttons[button.id] = ("window", window_id)
         self.window_views[window_id] = button
         self._layout_window_buttons()
+        self._reveal_window(window_id)
 
     def set_active_window(self, window_id):
         self.active_window = window_id
         for current_id, button in self.window_views.items():
             button.setbackgroundcolor(palette.surface_light if current_id == window_id else palette.surface)
+        if window_id is not None:
+            self._reveal_window(window_id)
 
     def remove_window(self, window_id):
         view = self.window_views.pop(window_id, None)
@@ -374,6 +426,7 @@ class Taskbar:
         self.buttons.pop(view.id, None)
         view.delete()
         self._layout_window_buttons()
+        self._reveal_window(self.active_window)
 
     def dismiss_menu(self):
         if not self.menu_visible:
@@ -397,7 +450,14 @@ class Taskbar:
             window_ids = tuple(self.window_views)
             index = window_ids.index(window_id) if window_id in self.window_views else 0
             scroll_x = self.window_scroll.getscrollposition()[0] / self.density
-            x = (8 + self.menu_button_width + index * self.window_width - scroll_x
+            if self.rtl:
+                origin = 8 + self.show_desktop_width + self.clock_width
+                spacer = max(0, self.window_content_width
+                             - len(window_ids) * self.window_width)
+            else:
+                origin = 8 + self.menu_button_width
+                spacer = 0
+            x = (origin + spacer + index * self.window_width - scroll_x
                  + self.window_width / 2 - self.context_menu.width / 2)
         height = len(actions) * self.context_menu.row_height + 8
         if not actions:
@@ -450,6 +510,12 @@ class Taskbar:
         self.dismiss_menu()
         if action == "app":
             self.open_app(value)
+        elif action == "clock":
+            if "clock" in self.apps:
+                self.open_app("clock")
+        elif action == "show_desktop":
+            if self.context_action is not None:
+                self.context_action(None, "show_desktop")
         else:
             self.activate_window(value)
         return True

@@ -21,6 +21,7 @@ class WindowManager:
     drag_threshold = 10
     resize_corner_size = 44
     resize_update_interval = 0.016
+    snap_edge_size = 28
     minimum_width = 280
     minimum_height = 220
 
@@ -44,6 +45,7 @@ class WindowManager:
         self.next_id = 0
         self.id_lock = Lock()
         self.drag = None
+        self.last_titlebar_tap = None
         self.active_window = None
         self.show_desktop_windows = None
         self.on_active_change = None
@@ -58,6 +60,11 @@ class WindowManager:
         self.personalization = None
         self.theme_revision = 0
         self.theme_refresh_pending = False
+        self.snap_preview = tg.FrameLayout(activity, root)
+        self.snap_preview.setdimensions(1, 1)
+        self.snap_preview.setbackgroundcolor((0x55 << 24) | (palette.accent & 0xFFFFFF))
+        self.snap_preview.setvisibility(tg.View.GONE)
+        self.snap_preview_edge = None
         self.titlebar_template = ReusableObject(
             activity, f"nexa.titlebar.{int(self.rtl)}", self._titlebar_specifications())
 
@@ -241,6 +248,7 @@ class WindowManager:
             "height": height,
             "restore_geometry": None,
             "maximized": False,
+            "snap": None,
             "minimized": False,
             "resizable": True,
             "prewarming": prewarm,
@@ -613,6 +621,7 @@ class WindowManager:
         window["x"], window["y"] = x, y
         window["width"], window["height"] = width, height
         window["maximized"] = False
+        window["snap"] = None
         window["restore_geometry"] = None
         self._apply_window_geometry(window, top=True)
         return True
@@ -623,6 +632,9 @@ class WindowManager:
             return False
         window["x"], window["y"], _, _ = self._fit_geometry(
             x, y, window["width"], window["height"])
+        window["maximized"] = False
+        window["snap"] = None
+        window["restore_geometry"] = None
         self._apply_window_geometry(window, top=True)
         return True
 
@@ -632,7 +644,7 @@ class WindowManager:
             return ()
         if window["minimized"]:
             return ("restore", "close_window")
-        if window["maximized"]:
+        if window["maximized"] or window["snap"] is not None:
             return ("restore", "minimize", "close_window")
         return ("open", "maximize", "minimize", "close_window")
 
@@ -643,8 +655,9 @@ class WindowManager:
         if action == "open":
             self.restore(window_id)
         elif action == "restore":
-            if window["maximized"]:
-                self.toggle_maximize(window_id)
+            if not window["minimized"]:
+                self._restore_window_geometry(window)
+                self._apply_window_geometry(window, top=True)
             self.restore(window_id)
         elif action == "maximize":
             if not window["maximized"]:
@@ -723,6 +736,7 @@ class WindowManager:
         if self.drag is None or self.drag["window_id"] != window_id:
             return
         self.drag = None
+        self._hide_snap_preview()
         self.pointer.hide()
 
     def resize(self, screen_width, screen_height):
@@ -737,6 +751,14 @@ class WindowManager:
                 window["x"], window["y"] = 0, 0
                 window["width"] = self.screen_width
                 window["height"] = max(1, self.screen_height - self.taskbar_height)
+            elif window["snap"] in ("left", "right"):
+                if self.screen_width < self.minimum_width * 2:
+                    self._restore_window_geometry(window)
+                else:
+                    if window["restore_geometry"] is not None:
+                        window["restore_geometry"] = self._fit_geometry(
+                            *window["restore_geometry"])
+                    self._set_side_snap_geometry(window, window["snap"])
             else:
                 window["x"], window["y"], window["width"], window["height"] = self._fit_geometry(
                     window["x"], window["y"], window["width"], window["height"])
@@ -765,19 +787,122 @@ class WindowManager:
     def toggle_maximize(self, window_id):
         window = self.windows[window_id]
         if window["maximized"]:
-            window["x"], window["y"], window["width"], window["height"] = self._fit_geometry(
-                *window["restore_geometry"])
-            window["maximized"] = False
+            self._restore_window_geometry(window)
         else:
-            window["restore_geometry"] = (window["x"], window["y"], window["width"], window["height"])
+            if window["snap"] is None:
+                window["restore_geometry"] = (
+                    window["x"], window["y"], window["width"], window["height"])
             window["x"], window["y"] = 0, 0
             window["width"] = self.screen_width
             window["height"] = max(1, self.screen_height - self.taskbar_height)
             window["maximized"] = True
+            window["snap"] = None
         self._apply_window_geometry(window, top=True)
         if window_id in self.window_order:
             self.window_order.remove(window_id)
         self.window_order.append(window_id)
+
+    def _restore_window_geometry(self, window):
+        geometry = window.get("restore_geometry")
+        if geometry is not None:
+            window["x"], window["y"], window["width"], window["height"] = \
+                self._fit_geometry(*geometry)
+        window["restore_geometry"] = None
+        window["maximized"] = False
+        window["snap"] = None
+
+    def _restore_drag_geometry(self, window, drag, pointer_x, pointer_y):
+        horizontal_anchor = ((drag["start_pointer_x"] - drag["start_x"])
+                             / max(1, drag["start_width"]))
+        vertical_anchor = drag["start_pointer_y"] - drag["start_y"]
+        self._restore_window_geometry(window)
+        x = pointer_x - round(window["width"] * horizontal_anchor)
+        y = pointer_y - min(self.titlebar_height, vertical_anchor)
+        window["x"], window["y"], window["width"], window["height"] = \
+            self._fit_geometry(x, y, window["width"], window["height"])
+        drag["start_x"], drag["start_y"] = window["x"], window["y"]
+        drag["start_width"], drag["start_height"] = window["width"], window["height"]
+        drag["start_pointer_x"], drag["start_pointer_y"] = pointer_x, pointer_y
+        self._apply_window_geometry(window)
+
+    def _snap_window(self, window, edge):
+        if edge == "top":
+            if not window["maximized"]:
+                self.toggle_maximize(window["id"])
+            return True
+        if not window["resizable"] or self.screen_width < self.minimum_width * 2:
+            return False
+        if window["snap"] is None and not window["maximized"]:
+            window["restore_geometry"] = (
+                window["x"], window["y"], window["width"], window["height"])
+        self._set_side_snap_geometry(window, edge)
+        window["snap"] = edge
+        window["maximized"] = False
+        self._apply_window_geometry(window, top=True)
+        return True
+
+    def _snap_edge_at(self, x, y, window=None):
+        if y <= self.snap_edge_size:
+            return "top"
+        if (window is not None and not window["resizable"]
+                or self.screen_width < self.minimum_width * 2):
+            return None
+        if x <= self.snap_edge_size:
+            return "left"
+        if x >= self.screen_width - self.snap_edge_size:
+            return "right"
+        return None
+
+    def _update_snap_preview(self, x, y, window):
+        edge = self._snap_edge_at(x, y, window)
+        if edge == self.snap_preview_edge:
+            return
+        if edge is None:
+            self._hide_snap_preview()
+            return
+
+        if edge == "top":
+            width = self.screen_width
+            height = max(1, self.screen_height - self.taskbar_height)
+            x, y = 0, 0
+        else:
+            width = self.screen_width // 2
+            height = max(1, self.screen_height - self.taskbar_height)
+            x = 0 if edge == "left" else width
+            y = 0
+        self.snap_preview.setdimensions(width, height)
+        self.snap_preview.setbackgroundcolor((0x55 << 24) | (palette.accent & 0xFFFFFF))
+        place(self.snap_preview, x, y, top=True)
+        self.snap_preview.setvisibility(tg.View.VISIBLE)
+        self.snap_preview_edge = edge
+
+    def _hide_snap_preview(self):
+        if self.snap_preview_edge is None:
+            return
+        self.snap_preview.setvisibility(tg.View.GONE)
+        self.snap_preview_edge = None
+
+    def _handle_titlebar_tap(self, window, drag):
+        now = monotonic()
+        x, y = drag["last_pointer_x"], drag["last_pointer_y"]
+        previous = self.last_titlebar_tap
+        self.last_titlebar_tap = (window["id"], now, x, y)
+        if previous is None:
+            return
+        window_id, tapped_at, previous_x, previous_y = previous
+        if (window_id == window["id"] and now - tapped_at <= 0.45
+                and (x - previous_x) ** 2 + (y - previous_y) ** 2 <= 30 ** 2):
+            self.last_titlebar_tap = None
+            self.toggle_maximize(window["id"])
+
+    def _set_side_snap_geometry(self, window, edge):
+        available_height = max(1, self.screen_height - self.taskbar_height)
+        left_width = self.screen_width // 2
+        if edge == "left":
+            window["x"], window["width"] = 0, left_width
+        else:
+            window["x"], window["width"] = left_width, self.screen_width - left_width
+        window["y"], window["height"] = 0, available_height
 
     def set_window_resizable(self, window_id, resizable):
         window = self.windows.get(window_id)
@@ -851,6 +976,7 @@ class WindowManager:
                          "mode": mode, "start_x": window["x"], "start_y": window["y"],
                          "start_width": window["width"], "start_height": window["height"],
                          "start_pointer_x": local_x, "start_pointer_y": local_y,
+                         "last_pointer_x": local_x, "last_pointer_y": local_y,
                          "last_resize_update": 0,
                          "moved": False}
             self.pointer.move(local_x, local_y)
@@ -869,6 +995,8 @@ class WindowManager:
 
             local_x = pointer["x"] / self.density
             local_y = pointer["y"] / self.density
+            self.drag["last_pointer_x"] = local_x
+            self.drag["last_pointer_y"] = local_y
             distance_x = local_x - self.drag["start_pointer_x"]
             distance_y = local_y - self.drag["start_pointer_y"]
             if not self.drag["moved"] and distance_x * distance_x + distance_y * distance_y >= self.drag_threshold ** 2:
@@ -879,14 +1007,17 @@ class WindowManager:
 
             mode = self.drag["mode"]
             if mode == "move":
-                if window["maximized"]:
-                    self.pointer.move(local_x, local_y)
-                    return True
+                if window["maximized"] or window["snap"] is not None:
+                    self._update_snap_preview(local_x, local_y, window)
+                    self._restore_drag_geometry(window, self.drag, local_x, local_y)
+                    distance_x = local_x - self.drag["start_pointer_x"]
+                    distance_y = local_y - self.drag["start_pointer_y"]
                 window["x"] = round(max(0, min(self.screen_width - window["width"],
                                                self.drag["start_x"] + distance_x)))
                 window["y"] = round(max(0, min(self.screen_height - self.taskbar_height - self.titlebar_height,
                                                self.drag["start_y"] + distance_y)))
                 self._place_window(window, top=False)
+                self._update_snap_preview(local_x, local_y, window)
             else:
                 max_bottom = max(1, self.screen_height - self.taskbar_height)
                 max_height = max(1, max_bottom - self.drag["start_y"])
@@ -913,10 +1044,24 @@ class WindowManager:
             self.pointer.move(local_x, local_y)
             return True
         if action in (tg.Event.touch_up, tg.Event.touch_cancel):
-            if self.drag["mode"].startswith("resize-"):
+            drag = self.drag
+            if action == tg.Event.touch_up and drag["mode"] == "move" and drag["moved"]:
+                self.last_titlebar_tap = None
+                x, y = drag["last_pointer_x"], drag["last_pointer_y"]
+                edge = self._snap_edge_at(x, y, window)
+                snapped = edge is not None and self._snap_window(window, edge)
+                if not snapped:
+                    if window["snap"] is not None:
+                        window["snap"] = None
+                        window["restore_geometry"] = None
+                    self._notify_window_geometry(window)
+            elif action == tg.Event.touch_up and drag["mode"] == "move":
+                self._handle_titlebar_tap(window, drag)
+            elif drag["mode"].startswith("resize-"):
                 self._apply_window_geometry(window)
-            elif self.drag["moved"]:
+            elif drag["moved"]:
                 self._notify_window_geometry(window)
+            self._hide_snap_preview()
             self.pointer.hide()
             self.drag = None
             return True

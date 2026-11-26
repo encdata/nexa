@@ -231,3 +231,21 @@ class Connection:
         """Returns the version code of the plugin app.
         Can be used to disable features only present in a newer version or prompting the user to update."""
         return self.send_read_msg({"method": "getVersion", "params": {}})
+
+    def query_downloads_async(self, download_ids: list[int]) -> Future:
+        """Returns Android DownloadManager status for these Nexa download IDs."""
+        if not isinstance(download_ids, list) or len(download_ids) > 50:
+            raise ValueError("download_ids must be a list containing at most 50 ids")
+        if any(type(download_id) is not int or download_id < 0 for download_id in download_ids):
+            raise ValueError("download ids must be non-negative integers")
+        return self.send_read_msg_async({
+            "method": "queryDownloads", "params": {"ids": download_ids},
+        })
+
+    def open_uri_async(self, uri: str) -> Future:
+        """Opens a URI with an Android app that handles its scheme."""
+        if not isinstance(uri, str) or not uri or len(uri) > 8192:
+            raise ValueError("uri must be a non-empty string of at most 8192 characters")
+        return self.send_read_msg_async({
+            "method": "openUri", "params": {"uri": uri},
+        })

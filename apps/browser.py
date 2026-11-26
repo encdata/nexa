@@ -1,6 +1,7 @@
 import html
 import json
 import os
+from time import monotonic
 from urllib.parse import quote_plus, urlsplit
 
 import nexapip as tg
@@ -17,8 +18,9 @@ SEARCH_URL = "https://duckduckgo.com/?q={}"
 class BrowserApp:
     app_id = "browser"
     name = "Nexa Browser"
-    summary = "tabs, bookmarks, history, devtools"
-    description = "Tabbed browsing, bookmarks, history, session restore, and WebView devtools."
+    summary = "tabs, downloads, bookmarks, history, devtools"
+    description = ("Tabbed browsing, download tracking, bookmarks, history, session restore, "
+                   "and WebView devtools.")
     icon = "nexa"
     preload_ui = True
     build_threaded = True
@@ -38,6 +40,8 @@ class BrowserSession:
         self.next_tab_id = 0
         self.active_tab = None
         self.history, self.bookmarks, self.downloads, saved_tabs, saved_active = self._load_data()
+        self.download_query = None
+        self.next_download_query = 0
 
         self.root = tg.LinearLayout(activity, parent)
         self.root.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
@@ -254,8 +258,7 @@ class BrowserSession:
             name.settextcolor(palette.text)
             name.setgravity(0, 1)
             source = urlsplit(item["url"]).hostname or item["url"]
-            state = (f"failed: {item.get('error', 'download could not start')}"
-                     if item.get("state") == "failed" else "queued in Downloads")
+            state = self._download_status_text(item)
             detail = tg.TextView(self.activity, f"{source} · {state}", row_view)
             detail.setdimensions(tg.View.MATCH_PARENT, 24)
             detail.setlinearlayoutparams(0)
@@ -263,6 +266,23 @@ class BrowserSession:
             detail.settextsize(11)
             detail.settextcolor(palette.muted)
             detail.setgravity(0, 1)
+
+    @staticmethod
+    def _download_status_text(item):
+        state = item.get("state", "queued")
+        if state == "running":
+            total = item.get("total", 0)
+            downloaded = item.get("downloaded", 0)
+            return (f"downloading {min(100, downloaded * 100 // total)}%"
+                    if total > 0 else "downloading")
+        if state == "paused":
+            reason = item.get("reason", 0)
+            return "paused" if not reason else f"paused (reason {reason})"
+        if state == "complete":
+            return "complete"
+        if state == "failed":
+            return f"failed: {item.get('error', 'download failed')}"
+        return "queued in Android Downloads"
 
     def _button(self, parent, label, action, width):
         button = tg.TextView(self.activity, label, parent)
@@ -314,8 +334,15 @@ class BrowserSession:
             download_id = item.get("id")
             if type(download_id) is not int:
                 download_id = None
+            state = item.get("state")
+            if state not in {"queued", "running", "paused", "complete", "failed"}:
+                state = "queued"
             record = {"id": download_id, "url": url, "name": name.strip()[:240],
-                      "state": "failed" if item.get("state") == "failed" else "queued"}
+                      "state": state}
+            for key in ("downloaded", "total", "reason"):
+                value = item.get(key)
+                if type(value) is int and value >= 0:
+                    record[key] = value
             error = item.get("error")
             if record["state"] == "failed" and isinstance(error, str):
                 record["error"] = error[:180]
@@ -524,6 +551,64 @@ class BrowserSession:
             self._render_downloads()
         self.status.settext(f"download failed: {error[:64]}")
 
+    def _sync_download_statuses(self):
+        if not self.downloads_visible:
+            return
+        changed = False
+        state_changed = False
+        future = self.download_query
+        if future is not None and future.done():
+            self.download_query = None
+            try:
+                statuses = future.result()
+            except Exception as error:
+                print(f"nexa browser: couldn't read download status: {error}")
+                statuses = []
+            if not isinstance(statuses, list):
+                statuses = []
+            by_id = {item.get("id"): item for item in statuses
+                     if isinstance(item, dict) and type(item.get("id")) is int}
+            for download in self.downloads:
+                status = by_id.get(download["id"])
+                if status is None:
+                    continue
+                new_state = status.get("state")
+                if new_state not in {"queued", "running", "paused", "complete", "failed"}:
+                    continue
+                if download.get("state") != new_state:
+                    download["state"] = new_state
+                    state_changed = True
+                    changed = True
+                for key in ("downloaded", "total", "reason"):
+                    value = status.get(key)
+                    if type(value) is int and value >= 0 and download.get(key) != value:
+                        download[key] = value
+                        changed = True
+                if new_state == "failed":
+                    download["error"] = f"download manager error {download.get('reason', 0)}"
+            if state_changed:
+                self._save_data()
+                self._refresh_home_page()
+            if changed:
+                self._render_downloads()
+
+        now = monotonic()
+        if now < self.next_download_query or self.download_query is not None:
+            return
+        ids = [item["id"] for item in self.downloads
+               if type(item.get("id")) is int
+               and item.get("state") in {"queued", "running", "paused"}]
+        if not ids:
+            return
+        self.next_download_query = now + 1
+        try:
+            self.download_query = self.activity.c.query_downloads_async(ids[-50:])
+        except Exception as error:
+            print(f"nexa browser: couldn't query downloads: {error}")
+
+    def on_tick(self):
+        self._sync_download_statuses()
+
     def _close_tab(self, tab_id):
         tab = self.tabs.get(tab_id)
         if tab is None:
@@ -711,8 +796,9 @@ class BrowserSession:
             f'<li><a href="{html.escape(url, quote=True)}">{html.escape(url)}</a></li>'
             for url in self.history) or "<li>your recent pages will show here</li>"
         downloads = "".join(
-            f'<li>{html.escape(item["name"])} · {html.escape(urlsplit(item["url"]).hostname or item["url"])}'
-            f'{" · failed" if item.get("state") == "failed" else ""}</li>'
+            f'<li>{html.escape(item["name"])} · '
+            f'{html.escape(urlsplit(item["url"]).hostname or item["url"])} · '
+            f'{html.escape(self._download_status_text(item))}</li>'
             for item in self.downloads[:5]) or "<li>no downloads yet</li>"
         return f"""<!doctype html>
 <html><head><meta name="viewport" content="width=device-width, initial-scale=1">

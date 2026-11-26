@@ -1461,6 +1461,13 @@ class ElectronRenderer:
     def _handle_native_call(self, message):
         method = message.get("method")
         args = message.get("args") or []
+        if method == "shell.openExternal":
+            if not args or not isinstance(args[0], str):
+                raise ValueError("Electron shell.openExternal expects a URL")
+            scheme = urlsplit(args[0]).scheme.lower()
+            if not scheme or scheme in {"file", "javascript", "data", "content", "intent"}:
+                raise ValueError("Electron shell.openExternal does not support this URL")
+            return self.activity.c.open_uri_async(args[0])
         if method == "webContents.setUserAgent":
             contents_id = message.get("contentsId")
             view = self._views.get(contents_id) or self._embedded_views.get(contents_id)

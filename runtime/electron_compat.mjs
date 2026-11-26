@@ -1,5 +1,5 @@
 import {EventEmitter} from "node:events";
-import {execFile, execFileSync} from "node:child_process";
+import {execFileSync} from "node:child_process";
 import {createHash, randomBytes} from "node:crypto";
 import dns from "node:dns/promises";
 import fs from "node:fs";
@@ -10,9 +10,6 @@ import {registerHooks} from "node:module";
 import os from "node:os";
 import path from "node:path";
 import {fileURLToPath, pathToFileURL} from "node:url";
-import {promisify} from "node:util";
-
-const execFileAsync = promisify(execFile);
 
 function termuxCommandEnvironment() {
     const environment = {...process.env};
@@ -1912,11 +1909,7 @@ ${source}\n                        }).call(module.exports, exports, require, mod
         if (["file:", "javascript:", "data:"].includes(parsed.protocol)) {
             throw new TypeError(`shell.openExternal does not support ${parsed.protocol}`);
         }
-        return execFileAsync("am", ["start", "-a", "android.intent.action.VIEW", "-d", parsed.href], {
-            timeout: 10000,
-            maxBuffer: 64 * 1024,
-            env: termuxCommandEnvironment()
-        }).then(() => undefined);
+        return nativeCall({method: "shell.openExternal", args: [parsed.href]});
     }
 
     const shell = {
