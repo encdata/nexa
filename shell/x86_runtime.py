@@ -1,14 +1,16 @@
 import os
 import logging
 import hashlib
+from concurrent.futures import CancelledError
 from pathlib import Path
 import re
 import shutil
+import signal
 import shlex
 import subprocess
 import tarfile
 import tempfile
-from threading import Lock
+from threading import Event, Lock, Thread
 from urllib.request import Request, urlopen
 
 _PACKAGE_PROGRESS = re.compile(r"\[\s*(\d{1,3})%\]")
@@ -19,6 +21,66 @@ _NODE_RUNTIME = (Path.home() / ".local/share/nexa/runtime"
                  / f"node-{_NODE_VERSION}-linux-x64/bin/node")
 _node_install_lock = Lock()
 logger = logging.getLogger("nexa.x86")
+
+
+def _check_cancelled(cancelled):
+    if cancelled is not None and cancelled.is_set():
+        raise CancelledError()
+
+
+def _terminate_process(process):
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+
+def _watch_cancellation(process, cancelled):
+    if cancelled is None:
+        return None, None
+    stopped = Event()
+
+    def watch():
+        while not stopped.wait(0.1):
+            if cancelled.is_set():
+                _terminate_process(process)
+                return
+
+    worker = Thread(target=watch, name="nexa-runtime-cancel", daemon=True)
+    worker.start()
+    return stopped, worker
+
+
+def _stop_watcher(stopped, worker):
+    if stopped is None:
+        return
+    stopped.set()
+    worker.join(timeout=0.2)
+
+
+def run_cancellable(command, cancelled, **options):
+    _check_cancelled(cancelled)
+    if cancelled is None:
+        return subprocess.run(command, **options)
+    process = subprocess.Popen(command, start_new_session=True, **options)
+    stopped, watcher = _watch_cancellation(process, cancelled)
+    try:
+        stdout, stderr = process.communicate()
+        _check_cancelled(cancelled)
+    except BaseException:
+        _terminate_process(process)
+        raise
+    finally:
+        _stop_watcher(stopped, watcher)
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def node_runtime_path():
@@ -35,7 +97,8 @@ def node_runtime_path():
     return _NODE_RUNTIME
 
 
-def ensure_node_runtime(on_progress=None):
+def ensure_node_runtime(on_progress=None, cancelled=None):
+    _check_cancelled(cancelled)
     runtime = node_runtime_path()
     if runtime is not None:
         return runtime
@@ -43,6 +106,7 @@ def ensure_node_runtime(on_progress=None):
         raise RuntimeError("the Box64 runtime is required before installing x86 Node.js")
 
     with _node_install_lock:
+        _check_cancelled(cancelled)
         runtime = node_runtime_path()
         if runtime is not None:
             return runtime
@@ -56,6 +120,7 @@ def ensure_node_runtime(on_progress=None):
                 total = int(response.headers.get("Content-Length") or 0)
                 copied = 0
                 while True:
+                    _check_cancelled(cancelled)
                     chunk = response.read(256 * 1024)
                     if not chunk:
                         break
@@ -66,7 +131,11 @@ def ensure_node_runtime(on_progress=None):
 
             digest = hashlib.sha256()
             with archive.open("rb") as source:
-                while chunk := source.read(1024 * 1024):
+                while True:
+                    _check_cancelled(cancelled)
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
                     digest.update(chunk)
             if digest.hexdigest() != _NODE_SHA256:
                 raise RuntimeError("x86 Node.js archive checksum did not match")
@@ -81,7 +150,12 @@ def ensure_node_runtime(on_progress=None):
                     raise RuntimeError("x86 Node.js executable is missing")
                 temporary_node = Path(staging) / "node"
                 with source, temporary_node.open("wb") as target:
-                    shutil.copyfileobj(source, target)
+                    while True:
+                        _check_cancelled(cancelled)
+                        chunk = source.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        target.write(chunk)
             with temporary_node.open("rb") as source:
                 header = source.read(20)
             if (len(header) != 20 or header[:4] != b"\x7fELF" or header[4] != 2
@@ -117,7 +191,8 @@ def installed():
             and (glibc / "lib" / "libwayland-client.so.0").is_file())
 
 
-def _box64_check():
+def _box64_check(cancelled=None):
+    _check_cancelled(cancelled)
     if not installed():
         logger.error("runtime check failed: runtime packages or Wayland libraries are missing")
         return False, "runtime packages or Wayland libraries are missing"
@@ -130,34 +205,43 @@ def _box64_check():
     if shell is not None:
         environment["SHELL"] = shell
     try:
-        result = subprocess.run([runner, "--shell",
-                                 f"{shlex.quote(box64_command())} --version"],
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, timeout=60, env=environment)
-    except subprocess.TimeoutExpired as error:
-        output = error.stdout or ""
-        if isinstance(output, bytes):
-            output = output.decode("utf-8", "replace")
-        details = f"Box64 check timed out after 60 seconds: {output.strip()}"
-        logger.error("%s", details)
-        return False, details
+        process = subprocess.Popen(
+            [runner, "--shell", f"{shlex.quote(box64_command())} --version"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            env=environment, start_new_session=True)
     except OSError as error:
         logger.exception("could not run Box64 readiness check")
         return False, str(error)
-    output = result.stdout.strip()
-    if result.returncode:
-        details = output or f"glibc-runner exited with status {result.returncode}"
+    stopped, watcher = _watch_cancellation(process, cancelled)
+    try:
+        try:
+            output, _ = process.communicate(timeout=60)
+        except subprocess.TimeoutExpired as error:
+            _terminate_process(process)
+            output = error.output or ""
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", "replace")
+            details = f"Box64 check timed out after 60 seconds: {output.strip()}"
+            logger.error("%s", details)
+            return False, details
+        _check_cancelled(cancelled)
+    finally:
+        _stop_watcher(stopped, watcher)
+    output = output.strip()
+    if process.returncode:
+        details = output or f"glibc-runner exited with status {process.returncode}"
         logger.error("Box64 readiness check failed: %s", details)
         return False, details
     logger.info("Box64 readiness check passed: %s", output)
     return True, output
 
 
-def ready():
-    return _box64_check()[0]
+def ready(cancelled=None):
+    return _box64_check(cancelled)[0]
 
 
-def _ensure_gpu_server(pkg, on_status=None):
+def _ensure_gpu_server(pkg, on_status=None, cancelled=None):
+    _check_cancelled(cancelled)
     if shutil.which("virgl_test_server_android") is not None:
         return
     try:
@@ -168,13 +252,19 @@ def _ensure_gpu_server(pkg, on_status=None):
         output = []
         process = subprocess.Popen([pkg, "install", "-y", "virglrenderer-android"],
                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                   text=True, bufsize=1)
-        for line in process.stdout:
-            output.append(line)
-            for match in _PACKAGE_PROGRESS.finditer(line):
-                if on_status is not None:
-                    on_status(status, min(100, int(match.group(1))))
-        result = process.wait()
+                                   text=True, bufsize=1,
+                                   start_new_session=cancelled is not None)
+        stopped, watcher = _watch_cancellation(process, cancelled)
+        try:
+            for line in process.stdout:
+                output.append(line)
+                for match in _PACKAGE_PROGRESS.finditer(line):
+                    if on_status is not None:
+                        on_status(status, min(100, int(match.group(1))))
+            result = process.wait()
+            _check_cancelled(cancelled)
+        finally:
+            _stop_watcher(stopped, watcher)
         if result:
             raise RuntimeError("\n".join(output)[-1000:].strip()
                                or f"pkg exited with status {result}")
@@ -184,33 +274,41 @@ def _ensure_gpu_server(pkg, on_status=None):
         logger.warning("VirGL setup failed; x86 Linux apps cannot use GPU rendering: %s", error)
 
 
-def ensure_installed(on_status=None, electron_node=False):
+def ensure_installed(on_status=None, electron_node=False, cancelled=None):
+    _check_cancelled(cancelled)
     logger.info("checking whether the x86_64 runtime is installed")
     pkg = shutil.which("pkg")
     if pkg is None:
         raise RuntimeError("Termux pkg command is unavailable")
-    if ready():
-        _ensure_gpu_server(pkg, on_status)
+    if ready(cancelled):
+        _ensure_gpu_server(pkg, on_status, cancelled)
         if electron_node:
-            ensure_node_runtime(on_status)
+            ensure_node_runtime(on_status, cancelled)
         return
     logger.warning("installing missing x86_64 runtime packages")
 
     def run(command, status):
+        _check_cancelled(cancelled)
         output = []
         logger.info("%s", status)
         if on_status is not None:
             on_status(status, 0)
         process = subprocess.Popen(command, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, text=True,
-                                   bufsize=1)
-        for line in process.stdout:
-            output.append(line)
-            for match in _PACKAGE_PROGRESS.finditer(line):
-                progress = min(100, int(match.group(1)))
-                if on_status is not None:
-                    on_status(status, progress)
-        result = process.wait()
+                                   bufsize=1,
+                                   start_new_session=cancelled is not None)
+        stopped, watcher = _watch_cancellation(process, cancelled)
+        try:
+            for line in process.stdout:
+                output.append(line)
+                for match in _PACKAGE_PROGRESS.finditer(line):
+                    progress = min(100, int(match.group(1)))
+                    if on_status is not None:
+                        on_status(status, progress)
+            result = process.wait()
+            _check_cancelled(cancelled)
+        finally:
+            _stop_watcher(stopped, watcher)
         if result:
             details = "".join(output)[-1000:].strip()
             raise RuntimeError(f"{status} failed ({result}): {details}")
@@ -226,9 +324,9 @@ def ensure_installed(on_status=None, electron_node=False):
                     "box64-glibc", "libwayland-glibc",
                     "libwayland-protocols-glibc", "libxkbcommon-glibc"):
         install(package)
-    passed, details = _box64_check()
+    passed, details = _box64_check(cancelled)
     if not passed:
         raise RuntimeError(f"x86_64 Wayland runtime installation failed its Box64 check: {details}")
-    _ensure_gpu_server(pkg, on_status)
+    _ensure_gpu_server(pkg, on_status, cancelled)
     if electron_node:
-        ensure_node_runtime(on_status)
+        ensure_node_runtime(on_status, cancelled)

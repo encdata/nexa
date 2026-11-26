@@ -15,9 +15,11 @@ def load_home_items():
                     continue
                 try:
                     is_directory = entry.is_dir(follow_symlinks=True)
+                    is_file = entry.is_file(follow_symlinks=False)
+                    is_symlink = entry.is_symlink()
                 except OSError:
-                    is_directory = False
-                if is_directory or entry.is_file(follow_symlinks=False) or entry.is_symlink():
+                    continue
+                if is_directory or is_file or is_symlink:
                     items.append((entry.path, entry.name, is_directory))
     except OSError as error:
         print(f"nexa: couldn't read home items: {error}")

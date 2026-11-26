@@ -1,4 +1,5 @@
 import configparser
+from concurrent.futures import CancelledError
 import hashlib
 import json
 import lzma
@@ -15,7 +16,8 @@ from xml.sax.saxutils import escape
 from urllib.parse import urljoin, urlsplit
 from urllib.request import urlopen
 
-from shell.x86_runtime import box64_command, node_runtime_path, runner_shell
+from shell.x86_runtime import (box64_command, node_runtime_path, run_cancellable,
+                               runner_shell)
 
 
 PACKAGE_ROOT = Path.home() / ".local" / "share" / "nexa" / "deb-packages"
@@ -29,6 +31,11 @@ DEBIAN_BASE_URL = "https://deb.debian.org/debian/"
 DEBIAN_CACHE = Path.home() / ".cache" / "nexa" / "debian"
 _VALID_ID = re.compile(r"[^a-zA-Z0-9_.-]+")
 _webview_apps_cache = None
+
+
+def _check_cancelled(cancelled):
+    if cancelled is not None and cancelled.is_set():
+        raise CancelledError()
 
 
 class DebApp:
@@ -363,13 +370,15 @@ def graphics_packages_installed():
     return {"libegl1", "libgl1-mesa-dri"}.issubset(installed)
 
 
-def ensure_graphics_packages(on_progress=None):
+def ensure_graphics_packages(on_progress=None, cancelled=None):
+    _check_cancelled(cancelled)
     if graphics_packages_installed():
         return
     PACKAGE_ROOT.mkdir(parents=True, exist_ok=True)
-    dependencies = _resolve_dependencies([], on_progress)
+    dependencies = _resolve_dependencies([], on_progress, cancelled)
     total = max(1, len(dependencies))
     for index, item in enumerate(dependencies):
+        _check_cancelled(cancelled)
         start = int(index * 70 / total)
         end = int((index + 1) * 70 / total)
         if on_progress is not None:
@@ -380,12 +389,13 @@ def ensure_graphics_packages(on_progress=None):
                 on_progress(f"downloading {item['Package']} ({index + 1}/{len(dependencies)})",
                             start + int((end - start) * copied / size))
 
-        package = _download_debian_package(item, download_progress)
+        package = _download_debian_package(item, download_progress, cancelled)
         _extract_package(package, item["Package"],
                          PACKAGE_ROOT / f"{DEPENDENCY_PREFIX}{item['Package']}",
                          item["Version"], dependency=True,
                          provides=item.get("Provides", ""),
-                         multi_arch=item.get("Multi-Arch", ""))
+                         multi_arch=item.get("Multi-Arch", ""),
+                         cancelled=cancelled)
     if on_progress is not None:
         on_progress("Mesa GPU libraries ready", 100)
 
@@ -496,7 +506,8 @@ def _fontconfig_file():
     return target_file
 
 
-def _read_package_index(on_progress=None):
+def _read_package_index(on_progress=None, cancelled=None):
+    _check_cancelled(cancelled)
     DEBIAN_CACHE.mkdir(parents=True, exist_ok=True)
     index = DEBIAN_CACHE / f"{DEBIAN_SUITE}-amd64-Packages.xz"
     if not index.is_file() or time.time() - index.stat().st_mtime > 86400:
@@ -506,6 +517,7 @@ def _read_package_index(on_progress=None):
                 total = int(response.headers.get("Content-Length", 0) or 0)
                 copied = 0
                 while True:
+                    _check_cancelled(cancelled)
                     chunk = response.read(256 * 1024)
                     if not chunk:
                         break
@@ -531,6 +543,7 @@ def _read_package_index(on_progress=None):
     with lzma.open(index, "rt", encoding="utf-8", errors="replace") as source:
         previous = None
         for line in source:
+            _check_cancelled(cancelled)
             if not line.strip():
                 save()
                 fields.clear()
@@ -575,9 +588,10 @@ def _version_satisfies(installed, operator, required):
 
 
 def _dependency_parts(value):
-    match = re.match(
-        r"^([a-zA-Z0-9][a-zA-Z0-9+.-]*)(?::(?:any|native|amd64))?"
-        r"(?:\s*\((<<|<=|=|>=|>>)\s*([^)]*)\))?", value)
+    dependency = re.sub(r"\s+(?:\[[^]]+\]|<[^>]+>)", "", value).strip()
+    match = re.fullmatch(
+        r"([a-zA-Z0-9][a-zA-Z0-9+.-]*)(?::(?:any|native|amd64))?"
+        r"(?:\s*\((<<|<=|=|>=|>>)\s*([^)]*)\))?", dependency)
     if match is None:
         return None
     return match.group(1), match.group(2), (match.group(3) or "").strip()
@@ -589,9 +603,6 @@ def _dependency_qualifier(value):
 
 
 def _dependency_applies(value):
-    qualifier = _dependency_qualifier(value)
-    if qualifier is not None and qualifier not in ("any", "native", "amd64"):
-        return False
     restriction = re.search(r"\[([^]]+)\]", value)
     if restriction is not None:
         architectures = restriction.group(1).split()
@@ -664,7 +675,8 @@ def _installed_multi_arch():
     return multi_arch
 
 
-def _resolve_dependencies(dependencies, on_progress=None):
+def _resolve_dependencies(dependencies, on_progress=None, cancelled=None):
+    _check_cancelled(cancelled)
     installed = _installed_versions()
     installed_provides = _installed_provides()
     installed_multi_arch = _installed_multi_arch()
@@ -675,7 +687,7 @@ def _resolve_dependencies(dependencies, on_progress=None):
         return []
     if on_progress is not None:
         on_progress("reading Debian package catalog", 14)
-    packages = _read_package_index(on_progress)
+    packages = _read_package_index(on_progress, cancelled)
     providers = {}
     for package, fields in packages.items():
         for provided in _split_dependencies(fields.get("Provides", ""), ","):
@@ -755,6 +767,7 @@ def _resolve_dependencies(dependencies, on_progress=None):
         raise RuntimeError(f"no Debian amd64 package can satisfy: {group}")
 
     def visit(fields, include=True):
+        _check_cancelled(cancelled)
         package = fields["Package"]
         version = fields.get("Version", "")
         if package in visiting:
@@ -779,7 +792,8 @@ def _resolve_dependencies(dependencies, on_progress=None):
     return list(resolved.values())
 
 
-def _download_debian_package(fields, on_progress=None):
+def _download_debian_package(fields, on_progress=None, cancelled=None):
+    _check_cancelled(cancelled)
     name = fields["Package"]
     version = fields["Version"]
     digest = fields.get("SHA256", "")
@@ -792,7 +806,11 @@ def _download_debian_package(fields, on_progress=None):
     if target.is_file():
         hasher = hashlib.sha256()
         with open(target, "rb") as cached:
-            for chunk in iter(lambda: cached.read(1024 * 1024), b""):
+            while True:
+                _check_cancelled(cancelled)
+                chunk = cached.read(1024 * 1024)
+                if not chunk:
+                    break
                 hasher.update(chunk)
         if hasher.hexdigest() == digest:
             return target
@@ -803,6 +821,7 @@ def _download_debian_package(fields, on_progress=None):
             total = int(response.headers.get("Content-Length", 0) or 0)
             copied = 0
             while True:
+                _check_cancelled(cancelled)
                 chunk = response.read(256 * 1024)
                 if not chunk:
                     break
@@ -812,7 +831,11 @@ def _download_debian_package(fields, on_progress=None):
                     on_progress(copied, total)
         hasher = hashlib.sha256()
         with open(temporary, "rb") as source:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            while True:
+                _check_cancelled(cancelled)
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
                 hasher.update(chunk)
         if hasher.hexdigest() != digest:
             raise RuntimeError(f"SHA256 mismatch while downloading {name}")
@@ -824,14 +847,18 @@ def _download_debian_package(fields, on_progress=None):
 
 
 def _extract_package(deb, package, target, version, dependency=False, provides="",
-                     multi_arch=""):
+                     multi_arch="", cancelled=None):
+    _check_cancelled(cancelled)
     target.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{package}-", dir=target.parent))
     backup = target.parent / f".{package}-previous"
     dpkg_deb = shutil.which("dpkg-deb")
     try:
-        subprocess.run([dpkg_deb, "-x", str(deb), str(staging)], check=True,
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result = run_cancellable(
+            [dpkg_deb, "-x", str(deb), str(staging)], cancelled,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        result.check_returncode()
+        _check_cancelled(cancelled)
         (staging / ".nexa-package").write_text(package, encoding="utf-8")
         (staging / ".nexa-version").write_text(version, encoding="utf-8")
         (staging / ".nexa-provides").write_text(provides, encoding="utf-8")

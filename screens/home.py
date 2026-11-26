@@ -1,6 +1,7 @@
 import os
 import logging
-from threading import Lock, Thread
+from concurrent.futures import CancelledError
+from threading import Event, Lock, Thread
 from apps import discover
 
 import nexapip as tg
@@ -94,6 +95,7 @@ class DesktopShell:
         self.window_host.apps_changed = self._launcher_apps_changed
         self.wayland_host = None
         self.wayland_start_lock = Lock()
+        self.wayland_cancelled = Event()
         self.wayland_launch_queue = []
         self.wayland_starting = False
         self.wayland_start_error = None
@@ -271,8 +273,10 @@ class DesktopShell:
                     return
                 if needs_setup:
                     self._post_launch_update(requested, "checking x86 runtime", 24)
-                    ensure_installed(on_status=lambda status, percent:
-                                     self._post_launch_update(requested, status, percent))
+                    ensure_installed(
+                        on_status=lambda status, percent:
+                        self._post_launch_update(requested, status, percent),
+                        cancelled=self.wayland_cancelled)
                     with self.wayland_start_lock:
                         if self.closed:
                             return
@@ -323,7 +327,10 @@ class DesktopShell:
                                     on_progress=lambda status, percent:
                                     self._post_launch_update(
                                         ((argv, cwd, env, token),), status,
-                                        28 + int(percent * 0.45)))
+                                        28 + int(percent * 0.45)),
+                                    cancelled=self.wayland_cancelled)
+                            except CancelledError:
+                                raise
                             except Exception as error:
                                 logger.exception("Mesa GPU setup failed")
                                 raise RuntimeError(
@@ -331,9 +338,13 @@ class DesktopShell:
                         refresh_graphics_environment(env)
                     process = host.launch(argv, cwd, env)
                     file_actions.post_to_ui(self._set_launch_process, token, process)
+                except CancelledError:
+                    return
                 except Exception as error:
                     logger.exception("couldn't launch Wayland app %s", argv[0])
                     file_actions.post_to_ui(self._fail_linux_launch, token, error)
+        except CancelledError:
+            return
         except Exception as error:
             failed = True
             logger.exception("couldn't start Wayland host")
@@ -448,6 +459,7 @@ class DesktopShell:
     def close(self):
         with self.wayland_start_lock:
             self.closed = True
+            self.wayland_cancelled.set()
             host, self.wayland_host = self.wayland_host, None
             self.wayland_launch_queue.clear()
         self.desktop.close()

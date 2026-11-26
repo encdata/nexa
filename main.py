@@ -4,6 +4,7 @@ import sys
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 from time import sleep
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "nexapip" / "src"))
@@ -50,9 +51,10 @@ def run_connection(connection):
     loading = show_loading(activity, configuration)
     pending_events = deque()
     loading_active = True
+    startup_cancelled = Event()
 
     def update_loading(status, progress):
-        if loading_active:
+        if loading_active and not startup_cancelled.is_set():
             loading.update(status, progress)
 
     def root_activity_is_closing(event):
@@ -62,7 +64,8 @@ def run_connection(connection):
 
     closing = False
     worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="nexa-startup")
-    startup_future = worker.submit(load_startup, update_loading, configuration)
+    startup_future = worker.submit(load_startup, update_loading, configuration,
+                                   startup_cancelled)
     try:
         while not startup_future.done():
             event = connection.wait_event(0.01)
@@ -76,10 +79,12 @@ def run_connection(connection):
                     break
     except EOFError:
         loading_active = False
+        startup_cancelled.set()
         worker.shutdown(wait=False, cancel_futures=True)
         raise
 
     if closing:
+        startup_cancelled.set()
         worker.shutdown(wait=False, cancel_futures=True)
         return
 

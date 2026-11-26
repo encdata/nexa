@@ -147,7 +147,10 @@ class Desktop:
 
     def _initial_position(self, grid_index, occupied=None):
         x_positions, y_positions = self._grid_axes(self.screen_width, self.screen_height)
-        total = len(self.icons) + self.population_total - self.population_index
+        occupied = ({(icon["x"], icon["y"]) for icon in self.icons.values()}
+                    if occupied is None else occupied)
+        total = max(len(occupied) + 1,
+                    len(self.icons) + self.population_total - self.population_index)
         largest_index = max(
             [grid_index, *(icon["grid_index"] for icon in self.icons.values()),
              *(item[6] for item in self.population_items[self.population_index + 1:])])
@@ -157,8 +160,6 @@ class Desktop:
             y_positions.append(y_positions[-1] + self.icon_height + self.gap)
 
         desired = self._grid_position(grid_index, x_positions, y_positions)
-        if occupied is None:
-            occupied = {(icon["x"], icon["y"]) for icon in self.icons.values()}
         if desired not in occupied:
             return desired
 
@@ -235,7 +236,11 @@ class Desktop:
         if x_positions is None or y_positions is None:
             x_positions, y_positions = self._grid_axes(self.screen_width, self.screen_height)
         col = min(range(len(x_positions)), key=lambda i: abs(x_positions[i] - x))
-        row = min(range(len(y_positions)), key=lambda i: abs(y_positions[i] - y))
+        if y > y_positions[-1]:
+            row = (len(y_positions) - 1
+                   + round((y - y_positions[-1]) / (self.icon_height + self.gap)))
+        else:
+            row = min(range(len(y_positions)), key=lambda i: abs(y_positions[i] - y))
         return row * len(x_positions) + col
 
     def _add_icons(self, items, positions=None, occupied=None):
@@ -243,12 +248,25 @@ class Desktop:
             return
         if occupied is None:
             occupied = {(icon["x"], icon["y"]) for icon in self.icons.values()}
-        if positions is None:
-            positions = []
-            for item in items:
-                position = self._initial_position(item[6], occupied)
-                positions.append(position)
-                occupied.add(position)
+        else:
+            occupied = set(occupied)
+
+        resolved_items = []
+        resolved_positions = []
+        x_positions, y_positions = self._grid_axes(self.screen_width, self.screen_height)
+        for index, item in enumerate(items):
+            desired = (positions[index] if positions is not None else
+                       self._grid_position(item[6], x_positions, y_positions))
+            position = (self._initial_position(item[6], occupied)
+                        if desired in occupied else desired)
+            if position != desired:
+                item = (*item[:6], self._grid_index_for(
+                    position[0], position[1], x_positions, y_positions))
+            resolved_items.append(item)
+            resolved_positions.append(position)
+            occupied.add(position)
+        items = resolved_items
+        positions = resolved_positions
 
         specifications = []
         for index, item in enumerate(items):

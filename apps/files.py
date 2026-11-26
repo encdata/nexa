@@ -245,9 +245,9 @@ class FilesApp:
                 for entry in source:
                     try:
                         is_directory = entry.is_dir(follow_symlinks=True)
+                        info = entry.stat(follow_symlinks=False)
                     except OSError:
-                        is_directory = False
-                    info = entry.stat(follow_symlinks=False)
+                        continue
                     entries.append((entry.path, entry.name, is_directory,
                                     info.st_size, info.st_mtime))
             return sorted(entries, key=lambda item: (not item[2], item[1].casefold()))
