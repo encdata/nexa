@@ -17,6 +17,8 @@ SEARCH_URL = "https://duckduckgo.com/?q={}"
 class BrowserApp:
     app_id = "browser"
     name = "Nexa Browser"
+    summary = "tabs, bookmarks, history, devtools"
+    description = "Tabbed browsing, bookmarks, history, session restore, and WebView devtools."
     icon = "nexa"
     preload_ui = True
     build_threaded = True

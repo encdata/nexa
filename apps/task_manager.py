@@ -114,6 +114,8 @@ def _format_size(size):
 class TaskManagerApp:
     app_id = "task_manager"
     name = "Task Manager"
+    summary = "processes, cpu, memory, end task"
+    description = "Inspect Termux processes, sort and filter CPU and memory usage, and end tasks."
     icon = "apps"
     preload_ui = True
     build_threaded = True

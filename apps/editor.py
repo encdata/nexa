@@ -40,6 +40,8 @@ def _untitled_path():
 class EditorApp:
     app_id = "editor"
     name = "Nexa Editor"
+    summary = "code coloring, Markdown preview"
+    description = "Edit code and text with syntax colors, Markdown preview, and document stats."
     icon = "notepad"
     preload_ui = True
     build_threaded = True

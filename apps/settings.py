@@ -17,6 +17,8 @@ register_page("updates", "Nexa updates", None)
 class SettingsApp:
     app_id = "settings"
     name = "Settings"
+    summary = "theme, wallpaper, app settings"
+    description = "Manage Nexa personalization, including theme and wallpaper."
     icon = "settings"
     preload_ui = True
     build_threaded = True

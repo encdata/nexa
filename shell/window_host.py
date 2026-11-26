@@ -47,10 +47,13 @@ class _LauncherApp:
     external_launcher = True
     preload_ui = False
 
-    def __init__(self, app_id, name, icon, launch, supports_file=None):
+    def __init__(self, app_id, name, icon, launch, supports_file=None, description="",
+                 summary=""):
         self.app_id = app_id
         self.name = name
         self.icon = icon
+        self.description = description or "Linux app launched by Nexa"
+        self.summary = summary or self.description
         self.launch = launch
         self.supports_file = supports_file
 
@@ -128,7 +131,10 @@ class WindowHost:
         if existing is not None and not getattr(existing, "external_launcher", False):
             raise ValueError(f"app id {app_id!r} is already registered")
         supports_file = getattr(existing, "supports_file", None)
-        app = _LauncherApp(str(app_id), str(name), icon, launch, supports_file)
+        description = getattr(existing, "description", "Linux app launched by Nexa")
+        summary = getattr(existing, "summary", description)
+        app = _LauncherApp(str(app_id), str(name), icon, launch, supports_file,
+                           description, summary)
         self._launchers[app.app_id] = app
         self.apps[app.app_id] = app
         if self.apps_changed is not None:

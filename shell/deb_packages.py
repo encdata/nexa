@@ -35,9 +35,13 @@ class DebApp:
     external_launcher = True
     preload_ui = False
 
-    def __init__(self, app_id, name, icon, shortcut, argv, cwd, env):
+    def __init__(self, app_id, name, icon, shortcut, argv, cwd, env, description=""):
         self.app_id = app_id
         self.name = name
+        self.description = description or "Linux app launched by Nexa"
+        self.summary = self.description
+        if len(self.summary) > 48:
+            self.summary = self.summary[:45].rsplit(" ", 1)[0] + "…"
         self.icon = icon
         self.shortcut = str(shortcut)
         self.launch_spec = (tuple(argv), str(cwd), env)
@@ -53,8 +57,9 @@ class DebElectronApp(DebApp):
     external_launcher = False
 
     def __init__(self, app_id, name, icon, shortcut, argv, cwd, env,
-                 archive, entry, main_entry, website_url=None):
-        super().__init__(app_id, name, icon, shortcut, argv, cwd, env)
+                 archive, entry, main_entry, website_url=None, description=""):
+        super().__init__(app_id, name, icon, shortcut, argv, cwd, env,
+                         description or "Electron app hosted by Nexa")
         self.archive = str(archive) if archive is not None else None
         self.renderer_entry = entry
         self.main_entry = main_entry
@@ -778,6 +783,7 @@ def _desktop_app(package, desktop_file, root, schema_directory=None, fontconfig_
             or entry.getboolean("Terminal", fallback=False)):
         return None
     name = entry.get("Name", "").strip()
+    description = entry.get("Comment", "").strip()
     exec_line = entry.get("Exec", "").strip()
     app_id = _desktop_app_id(package, desktop_file, root)
     website_url = (_webview_app_urls().get(app_id)
@@ -853,8 +859,9 @@ def _desktop_app(package, desktop_file, root, schema_directory=None, fontconfig_
         archive, renderer_entry, main_entry = electron_bundle or (None, None, None)
         return DebElectronApp(app_id, name, icon, shortcut, command,
                               working_directory, launch_env, archive,
-                              renderer_entry, main_entry, website_url)
-    return DebApp(app_id, name, icon, shortcut, command, working_directory, launch_env)
+                              renderer_entry, main_entry, website_url, description)
+    return DebApp(app_id, name, icon, shortcut, command, working_directory,
+                  launch_env, description)
 
 
 def discover():

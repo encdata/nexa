@@ -97,6 +97,8 @@ def _format_number(value):
 class CalculatorApp:
     app_id = "calculator"
     name = "Calculator"
+    summary = "scientific math, trig, history"
+    description = "Scientific expressions, trig functions, degree mode, and calculation history."
     icon = "calc"
     preload_ui = True
     build_threaded = True

@@ -57,6 +57,8 @@ def _duration(seconds, tenths=False):
 class ClockApp:
     app_id = "clock"
     name = "Clock"
+    summary = "clock, stopwatch, timer"
+    description = "Clock, stopwatch with laps, and a persistent timer with presets."
     icon = "clock"
     preload_ui = True
     build_threaded = True

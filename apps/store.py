@@ -10,6 +10,8 @@ from shell.text_prompt import TextPrompt
 class AppStoreApp:
     app_id = "store"
     name = "Nexa Store"
+    summary = "discover, install, manage apps"
+    description = "Browse, install, and remove Nexa apps from official and custom repositories."
     icon = "apps"
     build_threaded = True
 

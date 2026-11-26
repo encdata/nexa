@@ -16,6 +16,8 @@ from shell.terminal_screen import TerminalScreen
 class TerminalApp:
     app_id = "terminal"
     name = "Nexa Terminal"
+    summary = "shell, colors, keyboard, mouse"
+    description = "Run interactive shell commands with terminal colors, keyboard, and mouse input."
     icon = "terminal"
     @property
     def content_background(self):

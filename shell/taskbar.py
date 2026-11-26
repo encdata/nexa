@@ -142,7 +142,7 @@ class Taskbar:
         self.app_search.settextcolor(palette.text)
         self.no_apps.settextcolor(palette.muted)
         for view, kind in self.menu_entries:
-            if kind == "heading":
+            if kind in ("heading", "description"):
                 view.settextcolor(palette.muted)
             else:
                 view.setbackgroundcolor(palette.window_content)
@@ -254,14 +254,26 @@ class Taskbar:
             image.setlinearlayoutparams(0)
 
         def add_label():
-            label = tg.TextView(self.activity, app.name, button)
-            label.setheight(56)
-            label.setlinearlayoutparams(1)
-            label.setmargin(12, "left")
-            label.settextsize(15)
-            label.settextcolor(palette.text)
-            label.setgravity(0, 1)
-            self.menu_entries.append((label, "label"))
+            labels = tg.LinearLayout(self.activity, button, vertical=True)
+            labels.setdimensions(0, 56)
+            labels.setlinearlayoutparams(1)
+            labels.setmargin(12, "left")
+            title = tg.TextView(self.activity, app.name, labels)
+            title.setdimensions(tg.View.MATCH_PARENT, 31)
+            title.setlinearlayoutparams(0)
+            title.settextsize(14)
+            title.settextcolor(palette.text)
+            title.setgravity(0, 1)
+            self.menu_entries.append((title, "label"))
+            summary = (getattr(app, "summary", "")
+                       or getattr(app, "description", ""))
+            description = tg.TextView(self.activity, str(summary or ""), labels)
+            description.setdimensions(tg.View.MATCH_PARENT, 23)
+            description.setlinearlayoutparams(0)
+            description.settextsize(11)
+            description.settextcolor(palette.muted)
+            description.setgravity(0, 1)
+            self.menu_entries.append((description, "description"))
 
         if self.rtl:
             add_label()

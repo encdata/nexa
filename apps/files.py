@@ -26,6 +26,8 @@ def _format_size(size):
 class FilesApp:
     app_id = "files"
     name = "File Explorer"
+    summary = "browse files, manage apps, install debs"
+    description = "Browse and search files, manage folders, set app associations, and install deb packages."
     icon = "folder"
     preload_ui = True
     build_threaded = True
