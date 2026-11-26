@@ -7,6 +7,7 @@ from urllib.parse import quote_plus, urlsplit
 import nexapip as tg
 
 from shell import palette
+from shell.context_menu import ContextMenu
 from shell.text_direction import is_rtl
 from shell.ui_layout import LayoutTemplate, button, create_layout, row, text_input
 
@@ -18,9 +19,9 @@ SEARCH_URL = "https://duckduckgo.com/?q={}"
 class BrowserApp:
     app_id = "browser"
     name = "Nexa Browser"
-    summary = "tabs, downloads, bookmarks, history, devtools"
+    summary = "tabs, downloads, bookmarks, history, site data, devtools"
     description = ("Tabbed browsing, download tracking, bookmarks, history, session restore, "
-                   "and WebView devtools.")
+                   "site data controls, and WebView devtools.")
     icon = "nexa"
     preload_ui = True
     build_threaded = True
@@ -32,7 +33,9 @@ class BrowserApp:
 class BrowserSession:
     def __init__(self, activity, parent):
         self.activity = activity
-        self.rtl = is_rtl(activity.getconfiguration())
+        configuration = activity.getconfiguration()
+        self.rtl = is_rtl(configuration)
+        self.density = max(0.1, float(configuration.get("density", 1)))
         self.buttons = {}
         self.button_views = {}
         self.webviews = {}
@@ -42,6 +45,8 @@ class BrowserSession:
         self.history, self.bookmarks, self.downloads, saved_tabs, saved_active = self._load_data()
         self.download_query = None
         self.next_download_query = 0
+        self.pending_site_data = None
+        self.site_data_future = None
 
         self.root = tg.LinearLayout(activity, parent)
         self.root.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
@@ -69,6 +74,7 @@ class BrowserSession:
         ))
         self.new_tab_button = self._button(tab_bar, "+", "new_tab", 42)
         self.new_tab_button.settextsize(22)
+        self.site_data_button = self._button(tab_bar, "site data", "site_data", 76)
         self.download_button = self._button(tab_bar, "↓", "downloads", 42)
         self.download_button.settextsize(20)
 
@@ -101,6 +107,11 @@ class BrowserSession:
         else:
             self.initial_default_navigation = True
             self._new_tab(defer_load=True)
+        self.site_data_menu = ContextMenu(
+            activity, parent,
+            lambda: tuple(round(size / self.density) for size in self.root.getdimensions()),
+            actions=("clear_site_data", "cancel"),
+            labels={"clear_site_data": "clear this site's data", "cancel": "cancel"})
 
     def on_window_open(self):
         tab = self.tabs[self.active_tab]
@@ -123,6 +134,7 @@ class BrowserSession:
             button.settextcolor(palette.text)
         self.download_button.setbackgroundcolor(
             palette.accent if self.downloads_visible else palette.surface_light)
+        self.site_data_menu.refresh_theme()
         self.download_panel.setbackgroundcolor(palette.window_content)
         self.download_header.setbackgroundcolor(palette.surface_light)
         self.download_note.settextcolor(palette.muted)
@@ -608,6 +620,47 @@ class BrowserSession:
 
     def on_tick(self):
         self._sync_download_statuses()
+        pending = self.site_data_future
+        if pending is not None and pending[0].done():
+            self.site_data_future = None
+            try:
+                cleared = pending[0].result()
+            except Exception as error:
+                self.status.settext(f"site data clear failed: {str(error)[:80]}")
+            else:
+                host = urlsplit(pending[1]).hostname or "site"
+                self.status.settext(
+                    f"site data cleared for {host}" if cleared
+                    else "site data clear isn't supported by this WebView")
+
+    def _confirm_clear_site_data(self):
+        tab = self.tabs.get(self.active_tab)
+        if tab is None or not self._is_web_url(tab["url"]):
+            self.status.settext("open a website before clearing site data")
+            return
+        if self.site_data_future is not None:
+            self.status.settext("site data clear is already running")
+            return
+        self.pending_site_data = (tab["id"], tab["url"])
+        width, height = (round(size / self.density) for size in self.root.getdimensions())
+        self.site_data_menu.show(
+            ("clear_site_data", "cancel"), (width - self.site_data_menu.width) // 2,
+            height // 2, self._clear_site_data_choice)
+
+    def _clear_site_data_choice(self, action):
+        pending, self.pending_site_data = self.pending_site_data, None
+        if action != "clear_site_data" or pending is None:
+            return
+        tab = self.tabs.get(pending[0])
+        if tab is None or tab["webview"] is None:
+            self.status.settext("page closed before site data could be cleared")
+            return
+        try:
+            self.site_data_future = (tab["webview"].clear_site_data(pending[1]), pending[1])
+        except Exception as error:
+            self.status.settext(f"site data clear failed: {str(error)[:80]}")
+            return
+        self.status.settext(f"clearing site data for {urlsplit(pending[1]).hostname or 'site'}…")
 
     def _close_tab(self, tab_id):
         tab = self.tabs.get(tab_id)
@@ -868,6 +921,14 @@ a {{ color:#{palette.accent & 0xFFFFFF:06x}; overflow-wrap:anywhere; }} li {{ ma
             self._ensure_tab_loaded(tab)
 
     def handle_event(self, event):
+        if self.site_data_menu.visible:
+            if event.type == tg.Event.back:
+                self.site_data_menu.hide()
+                self.pending_site_data = None
+                return True
+            return self.site_data_menu.handle_event(event) or True
+        if self.site_data_menu.handle_event(event):
+            return True
         if event.type == tg.Event.back:
             if self.downloads_visible:
                 self._select_tab(self.active_tab)
@@ -910,6 +971,8 @@ a {{ color:#{palette.accent & 0xFFFFFF:06x}; overflow-wrap:anywhere; }} li {{ ma
             self._open_devtools()
         elif action == "downloads":
             self._toggle_downloads()
+        elif action == "site_data":
+            self._confirm_clear_site_data()
         elif action == "clear_downloads":
             self.downloads = []
             self._save_data()

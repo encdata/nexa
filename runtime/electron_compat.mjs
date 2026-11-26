@@ -996,7 +996,9 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
         getPreloadResponse() {
             const paths = [...this.session.getPreloads(), this.preloadPath].filter(Boolean);
             const files = paths.map(preloadFileInfo);
-            const contextIsolation = this.options?.webPreferences?.contextIsolation !== false;
+            const preferences = this.options?.webPreferences || {};
+            const contextIsolation = preferences.contextIsolation !== false;
+            const nodeIntegration = preferences.nodeIntegration === true;
             const rendererProcess = {
                 arch: process.arch,
                 argv: process.argv,
@@ -1011,7 +1013,7 @@ export function createElectronCompat({appRoot, appPath = appRoot, resourcesPath 
             };
             const schemes = [...privilegedSchemes.keys()];
             const cacheKey = JSON.stringify([files, schemes, rendererProcess,
-                contextIsolation]);
+                contextIsolation, nodeIntegration]);
             const cachedEntry = preloadScriptCache.get(cacheKey);
             if (cachedEntry !== undefined) {
                 preloadScriptCache.delete(cacheKey);
@@ -1100,7 +1102,7 @@ ${source}\n                        }).call(module.exports, exports, require, mod
             const processSetup = `window.__NEXA_ELECTRON_PROCESS__=${JSON.stringify(rendererProcess)};` +
                 `if(window.process){Object.assign(window.process,window.__NEXA_ELECTRON_PROCESS__);` +
                 `window.process.env=window.__NEXA_ELECTRON_PROCESS__.env;}`;
-            const pageShimCleanup = contextIsolation ? `(() => {
+            const pageShimCleanup = contextIsolation && !nodeIntegration ? `(() => {
                 for (const name of ["require", "process", "global", "Buffer", "electron",
                     "nexaElectron", "__NEXA_ELECTRON_PROCESS__",
                     "__NEXA_ELECTRON_CREATE_REQUIRE__"]) {
@@ -2188,6 +2190,13 @@ ${source}\n                        }).call(module.exports, exports, require, mod
             if (options !== undefined && options !== null &&
                 (typeof options !== "object" || Array.isArray(options))) {
                 throw new TypeError("Electron session.clearStorageData options must be an object");
+            }
+            if (options && Object.keys(options).length === 1 &&
+                Array.isArray(options.storages) && options.storages.length === 1 &&
+                options.storages[0] === "shadercache") {
+                // WebView only exposes a broader resource-cache clear for shadercache.
+                await session.clearCache();
+                return;
             }
             if (options && Object.keys(options).length) {
                 throw new Error("filtered Electron session.clearStorageData is not supported yet");

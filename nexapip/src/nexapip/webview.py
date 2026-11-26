@@ -122,6 +122,11 @@ class WebView(View):
         return self.a.c.send_read_msg_async({"method": "clearWebViewCache", "params": {
             "aid": self.a.aid, "id": self.id}})
 
+    def clear_site_data(self, url: str):
+        """Clears WebView storage for the site containing this URL."""
+        return self.a.c.send_read_msg_async({"method": "clearWebViewSiteData", "params": {
+            "aid": self.a.aid, "id": self.id, "url": url}})
+
     def reload(self):
         self.a.c.send_msg({"method": "reloadWebView", "params": {
             "aid": self.a.aid, "id": self.id}})
