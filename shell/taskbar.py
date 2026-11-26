@@ -75,12 +75,34 @@ class Taskbar:
         heading.settextsize(20)
         heading.settextcolor(palette.text)
         heading.setgravity(0, 1)
+        search_row = tg.LinearLayout(activity, self.menu, vertical=False)
+        search_row.setdimensions(tg.View.MATCH_PARENT, 44)
+        search_row.setlinearlayoutparams(0)
+        search_row.setmargin(8, "left")
+        search_row.setmargin(8, "right")
+        search_row.setbackgroundcolor(palette.window_content)
+        search_icon = tg.ImageView(activity, search_row)
+        search_icon.setdimensions(20, 20)
+        search_icon.setimage(load("search"))
+        search_icon.setmargin(10, "left")
+        search_icon.setmargin(8, "right")
+        search_icon.setmargin(12, "top")
+        self.app_search = tg.EditText(activity, "", search_row, singleline=True,
+                                      line=False, inputtype="text")
+        self.app_search.setdimensions(0, 44)
+        self.app_search.setlinearlayoutparams(1)
+        self.app_search.setbackgroundcolor(palette.window_content)
+        self.app_search.settextsize(14)
+        self.app_search.settextcolor(palette.text)
+        self.app_search.sendtextevent(True)
         divider = tg.LinearLayout(activity, self.menu)
         divider.setdimensions(tg.View.MATCH_PARENT, 1)
         divider.setlinearlayoutparams(0)
         divider.setbackgroundcolor(palette.accent)
         self.divider = divider
         self.menu_entries = []
+        self.app_entries = []
+        self.app_headings = {}
         scroll = tg.NestedScrollView(activity, self.menu, fillviewport=True, nobar=True)
         scroll.setheight(0)
         scroll.setlinearlayoutparams(1)
@@ -88,6 +110,12 @@ class Taskbar:
         entries.setdimensions(tg.View.MATCH_PARENT, tg.View.WRAP_CONTENT)
         self.apps_container = entries
         self.app_menu_roots = []
+        self.no_apps = tg.TextView(activity, "no apps found", entries)
+        self.no_apps.setdimensions(tg.View.MATCH_PARENT, 48)
+        self.no_apps.settextsize(14)
+        self.no_apps.settextcolor(palette.muted)
+        self.no_apps.setgravity(1, 1)
+        self.no_apps.setvisibility(tg.View.GONE)
         self._populate_apps(apps)
         self.context_menu = ContextMenu(
             activity, root,
@@ -110,6 +138,9 @@ class Taskbar:
         self.menu.setbackgroundcolor(palette.surface)
         self.heading.settextcolor(palette.text)
         self.divider.setbackgroundcolor(palette.accent)
+        self.app_search.setbackgroundcolor(palette.window_content)
+        self.app_search.settextcolor(palette.text)
+        self.no_apps.settextcolor(palette.muted)
         for view, kind in self.menu_entries:
             if kind == "heading":
                 view.settextcolor(palette.muted)
@@ -195,6 +226,7 @@ class Taskbar:
         heading.setgravity(0, 1)
         self.menu_entries.append((heading, "heading"))
         self.app_menu_roots.append(heading)
+        self.app_headings[letter] = heading
 
     def _add_app_entry(self, parent, app):
         button = tg.LinearLayout(self.activity, parent, vertical=False)
@@ -209,6 +241,7 @@ class Taskbar:
         button.sendclickevent(True)
         self.buttons[button.id] = ("app", app.app_id)
         self.app_menu_roots.append(button)
+        self.app_entries.append((app, button))
 
         def add_icon():
             image = tg.ImageView(self.activity, button)
@@ -238,15 +271,35 @@ class Taskbar:
             add_label()
 
     def _populate_apps(self, apps):
+        self.apps = tuple(sorted(
+            (app for app in apps.values()
+             if not getattr(app, "hosted_window", False)),
+            key=lambda item: item.name.casefold()))
         previous_letter = None
-        launchers = (app for app in apps.values()
-                     if not getattr(app, "hosted_window", False))
-        for app in sorted(launchers, key=lambda item: item.name.casefold()):
+        for app in self.apps:
             letter = app.name[:1].upper()
             if letter != previous_letter:
                 self._add_app_heading(self.apps_container, letter)
                 previous_letter = letter
             self._add_app_entry(self.apps_container, app)
+        self._filter_apps(self.app_search.gettext())
+
+    def _filter_apps(self, query):
+        query = query.strip().casefold()
+        visible_by_letter = {}
+        visible_count = 0
+        for app, button in self.app_entries:
+            matches = (not query or query in app.name.casefold()
+                       or query in app.app_id.casefold()
+                       or query in str(getattr(app, "description", "")).casefold())
+            button.setvisibility(tg.View.VISIBLE if matches else tg.View.GONE)
+            if matches:
+                visible_by_letter[app.name[:1].upper()] = True
+                visible_count += 1
+        for letter, heading in self.app_headings.items():
+            heading.setvisibility(tg.View.VISIBLE if visible_by_letter.get(letter)
+                                  else tg.View.GONE)
+        self.no_apps.setvisibility(tg.View.GONE if visible_count else tg.View.VISIBLE)
 
     def set_apps(self, apps):
         for view in self.app_menu_roots:
@@ -254,6 +307,9 @@ class Taskbar:
             view.delete()
         self.app_menu_roots.clear()
         self.menu_entries.clear()
+        self.app_entries.clear()
+        self.app_headings.clear()
+        self.no_apps.setvisibility(tg.View.GONE)
         self._populate_apps(apps)
 
     def add_window(self, window_id, app, title=None):
@@ -328,6 +384,9 @@ class Taskbar:
     def handle_event(self, event):
         if self.context_menu.handle_event(event):
             return True
+        if event.type == tg.Event.text and event.id == self.app_search.id:
+            self._filter_apps(event.value.get("text", ""))
+            return True
         if event.type == tg.Event.back and self.context_menu.visible:
             self.dismiss_context_menu()
             return True
@@ -354,6 +413,8 @@ class Taskbar:
             self.menu_visible = not self.menu_visible
             self.menu_frame.setvisibility(tg.View.VISIBLE if self.menu_visible else tg.View.GONE)
             if self.menu_visible:
+                self.app_search.settext("")
+                self._filter_apps("")
                 place(self.menu_frame, 8, self.screen_height - self.height - self.menu_height - 8, top=True)
             return True
 
