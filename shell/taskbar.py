@@ -1,4 +1,5 @@
 from datetime import datetime
+from time import monotonic
 
 import nexapip as tg
 
@@ -33,6 +34,8 @@ class Taskbar:
         self.window_spacer = None
         self.menu_visible = False
         self.active_window = None
+        self.clock_text = None
+        self.next_clock_check = 0
 
         self.frame = tg.FrameLayout(activity, root)
         self.frame.setdimensions(tg.View.MATCH_PARENT, self.height)
@@ -195,12 +198,23 @@ class Taskbar:
             self.window_scroll.setscrollposition(offset, 0, smooth=False)
 
     def _add_clock(self):
-        self.clock = tg.TextView(self.activity, datetime.now().strftime("%H:%M"), self.view)
+        self.clock_text = datetime.now().strftime("%H:%M")
+        self.clock = tg.TextView(self.activity, self.clock_text, self.view)
         self.clock.sendlongclickevent(True)
         self.clock.settextcolor(palette.text)
         self.clock.setgravity(1, 1)
         self.clock.setdimensions(self.clock_width, self.content_height)
         self.clock.setlinearlayoutparams(0)
+
+    def tick(self):
+        now = monotonic()
+        if now < self.next_clock_check:
+            return
+        self.next_clock_check = now + 1
+        clock_text = datetime.now().strftime("%H:%M")
+        if clock_text != self.clock_text:
+            self.clock_text = clock_text
+            self.clock.settext(clock_text)
 
     def _add_menu_button(self):
         button = tg.LinearLayout(self.activity, self.view, vertical=True)
@@ -422,7 +436,6 @@ class Taskbar:
             return True
         if event.type != tg.Event.click or event.id not in self.buttons:
             return False
-        self.clock.settext(datetime.now().strftime("%H:%M"))
         action, value = self.buttons[event.id]
         self.dismiss_context_menu()
         if action == "menu":

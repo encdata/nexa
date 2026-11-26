@@ -427,6 +427,7 @@ class DesktopShell:
             self._resize_screen(config.get("screenwidth", self.screen_width),
                                 config.get("screenheight", self.screen_height))
         self.windows.tick()
+        self.taskbar.tick()
         if (self.preload_queue and self.windows.active_window is None
                 and not any(window.get("prewarming")
                             for window in self.windows.windows.values())):
