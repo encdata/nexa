@@ -383,7 +383,9 @@ def ensure_graphics_packages(on_progress=None):
         package = _download_debian_package(item, download_progress)
         _extract_package(package, item["Package"],
                          PACKAGE_ROOT / f"{DEPENDENCY_PREFIX}{item['Package']}",
-                         item["Version"], dependency=True)
+                         item["Version"], dependency=True,
+                         provides=item.get("Provides", ""),
+                         multi_arch=item.get("Multi-Arch", ""))
     if on_progress is not None:
         on_progress("Mesa GPU libraries ready", 100)
 
@@ -537,8 +539,8 @@ def _read_package_index(on_progress=None):
                 fields[previous] += " " + line.strip()
             elif ": " in line:
                 previous, value = line.split(": ", 1)
-                if previous in ("Package", "Version", "Architecture", "Filename",
-                                "SHA256", "Depends", "Pre-Depends", "Provides"):
+                if previous in ("Package", "Version", "Architecture", "Multi-Arch",
+                                "Filename", "SHA256", "Depends", "Pre-Depends", "Provides"):
                     fields[previous] = value.strip()
         save()
     return packages
@@ -574,14 +576,22 @@ def _version_satisfies(installed, operator, required):
 
 def _dependency_parts(value):
     match = re.match(
-        r"^([a-zA-Z0-9][a-zA-Z0-9+.-]*)(?::(?:any|amd64))?"
+        r"^([a-zA-Z0-9][a-zA-Z0-9+.-]*)(?::(?:any|native|amd64))?"
         r"(?:\s*\((<<|<=|=|>=|>>)\s*([^)]*)\))?", value)
     if match is None:
         return None
     return match.group(1), match.group(2), (match.group(3) or "").strip()
 
 
+def _dependency_qualifier(value):
+    qualifier = re.match(r"^[a-zA-Z0-9][a-zA-Z0-9+.-]*:([a-zA-Z0-9-]+)", value)
+    return qualifier.group(1) if qualifier is not None else None
+
+
 def _dependency_applies(value):
+    qualifier = _dependency_qualifier(value)
+    if qualifier is not None and qualifier not in ("any", "native", "amd64"):
+        return False
     restriction = re.search(r"\[([^]]+)\]", value)
     if restriction is not None:
         architectures = restriction.group(1).split()
@@ -618,8 +628,46 @@ def _installed_versions():
     return installed
 
 
+def _provided_versions(value):
+    entries = {}
+    for item in _split_dependencies(value, ","):
+        parts = _dependency_parts(item)
+        if parts is not None:
+            name, operator, version = parts
+            entries[name] = version if operator == "=" else ""
+    return entries
+
+
+def _installed_provides():
+    provided = {}
+    for root in _package_roots():
+        try:
+            package = (root / ".nexa-package").read_text(encoding="utf-8").strip()
+            value = (root / ".nexa-provides").read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if package:
+            provided[package] = _provided_versions(value)
+    return provided
+
+
+def _installed_multi_arch():
+    multi_arch = {}
+    for root in _package_roots():
+        try:
+            package = (root / ".nexa-package").read_text(encoding="utf-8").strip()
+            value = (root / ".nexa-multi-arch").read_text(encoding="utf-8").strip()
+        except OSError:
+            continue
+        if package:
+            multi_arch[package] = value
+    return multi_arch
+
+
 def _resolve_dependencies(dependencies, on_progress=None):
     installed = _installed_versions()
+    installed_provides = _installed_provides()
+    installed_multi_arch = _installed_multi_arch()
     graphics_packages = [name for name in ("libegl1", "libgl1-mesa-dri")
                          if name not in installed]
     if not graphics_packages and not any(
@@ -631,28 +679,79 @@ def _resolve_dependencies(dependencies, on_progress=None):
     providers = {}
     for package, fields in packages.items():
         for provided in _split_dependencies(fields.get("Provides", ""), ","):
-            name = re.match(r"[a-zA-Z0-9][a-zA-Z0-9+.-]*", provided)
-            if name:
-                providers.setdefault(name.group(), package)
+            parts = _dependency_parts(provided)
+            if parts is not None:
+                name, operator, version = parts
+                if not operator or operator == "=":
+                    providers.setdefault(name, []).append(
+                        (package, version if operator == "=" else ""))
+    for package, entries in installed_provides.items():
+        for name, version in entries.items():
+            providers.setdefault(name, []).append((package, version))
 
     resolved = {}
     visiting = set()
 
     def choose(group):
+        candidates = []
+        applicable = False
         for alternative in _split_dependencies(group, "|"):
             if not _dependency_applies(alternative):
                 continue
+            applicable = True
             parts = _dependency_parts(alternative)
             if parts is None:
                 continue
             name, operator, version = parts
-            package = name if name in packages else providers.get(name)
-            if package is None:
+            qualifier = _dependency_qualifier(alternative)
+            if name in packages:
+                candidates.append((name, None, False, name, operator, version, qualifier))
+            candidates.extend((package, provided_version, True, name, operator, version,
+                               qualifier)
+                              for package, provided_version in providers.get(name, ()))
+
+        for package, provided_version, virtual, name, operator, version, qualifier in candidates:
+            current = installed.get(package)
+            if qualifier == "any":
+                repository_package = packages.get(package)
+                current_multi_arch = installed_multi_arch.get(package)
+                if (current_multi_arch is None and repository_package is not None
+                        and current == repository_package.get("Version")):
+                    current_multi_arch = repository_package.get("Multi-Arch")
+                if current_multi_arch != "allowed":
+                    continue
+            if virtual:
+                current_provides = installed_provides.get(package, {})
+                current_version = current_provides.get(name)
+                current_provided = name in current_provides
+                if current and package not in installed_provides:
+                    repository_package = packages.get(package)
+                    if (repository_package is not None and current ==
+                            repository_package.get("Version")):
+                        current_provides = _provided_versions(
+                            repository_package.get("Provides", ""))
+                        current_version = current_provides.get(name)
+                        current_provided = name in current_provides
+                if current and current_provided and (not operator or (current_version and
+                        _version_satisfies(current_version, operator, version))):
+                    return None
+            else:
+                if current and _version_satisfies(current, operator, version):
+                    return None
+
+        for package, provided_version, virtual, _name, operator, version, qualifier in candidates:
+            if package not in packages:
                 continue
-            current = installed.get(name) or installed.get(package)
-            if current and _version_satisfies(current, operator, version):
-                return None
-            return packages[package]
+            fields = packages[package]
+            if qualifier == "any" and fields.get("Multi-Arch") != "allowed":
+                continue
+            candidate_version = provided_version if virtual else fields.get("Version", "")
+            if operator and (not candidate_version or not _version_satisfies(
+                    candidate_version, operator, version)):
+                continue
+            return fields
+        if not applicable:
+            return None
         raise RuntimeError(f"no Debian amd64 package can satisfy: {group}")
 
     def visit(fields, include=True):
@@ -669,6 +768,8 @@ def _resolve_dependencies(dependencies, on_progress=None):
         visiting.remove(package)
         if include:
             installed[package] = version
+            installed_provides[package] = _provided_versions(fields.get("Provides", ""))
+            installed_multi_arch[package] = fields.get("Multi-Arch", "")
             resolved[package] = fields
 
     for dependency in dependencies:
@@ -722,7 +823,8 @@ def _download_debian_package(fields, on_progress=None):
     return target
 
 
-def _extract_package(deb, package, target, version, dependency=False):
+def _extract_package(deb, package, target, version, dependency=False, provides="",
+                     multi_arch=""):
     target.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=f".{package}-", dir=target.parent))
     backup = target.parent / f".{package}-previous"
@@ -732,6 +834,8 @@ def _extract_package(deb, package, target, version, dependency=False):
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         (staging / ".nexa-package").write_text(package, encoding="utf-8")
         (staging / ".nexa-version").write_text(version, encoding="utf-8")
+        (staging / ".nexa-provides").write_text(provides, encoding="utf-8")
+        (staging / ".nexa-multi-arch").write_text(multi_arch, encoding="utf-8")
         if dependency:
             (staging / ".nexa-dependency").touch()
         if backup.exists():
@@ -997,8 +1101,10 @@ def install(path, on_progress=None):
     PACKAGE_ROOT.mkdir(parents=True, exist_ok=True)
     fields = {"Package": package, "Version": version,
               "Architecture": architecture,
+              "Multi-Arch": _run(dpkg_deb, "-f", str(deb), "Multi-Arch"),
               "Pre-Depends": _run(dpkg_deb, "-f", str(deb), "Pre-Depends"),
-              "Depends": _run(dpkg_deb, "-f", str(deb), "Depends")}
+              "Depends": _run(dpkg_deb, "-f", str(deb), "Depends"),
+              "Provides": _run(dpkg_deb, "-f", str(deb), "Provides")}
     report(f"resolving dependencies for {package}", 10)
     dependencies = _resolve_dependencies([fields], report)
     downloaded = []
@@ -1018,10 +1124,13 @@ def install(path, on_progress=None):
                72 + int(index * 14 / total))
         _extract_package(dependency_deb, item["Package"],
                          PACKAGE_ROOT / f"{DEPENDENCY_PREFIX}{item['Package']}",
-                         item["Version"], dependency=True)
+                         item["Version"], dependency=True,
+                         provides=item.get("Provides", ""),
+                         multi_arch=item.get("Multi-Arch", ""))
 
     report(f"installing {package}", 88)
-    _extract_package(deb, package, PACKAGE_ROOT / package, version)
+    _extract_package(deb, package, PACKAGE_ROOT / package, version,
+                     provides=fields["Provides"], multi_arch=fields["Multi-Arch"])
     report("registering desktop apps", 96)
     apps = [app for app in discover().values() if app.app_id.startswith(f"deb.{package}.")]
     report(f"installed {package}", 100)

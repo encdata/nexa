@@ -243,7 +243,10 @@ class FilesApp:
             with os.scandir(directory) as source:
                 entries = []
                 for entry in source:
-                    is_directory = entry.is_dir(follow_symlinks=False)
+                    try:
+                        is_directory = entry.is_dir(follow_symlinks=True)
+                    except OSError:
+                        is_directory = False
                     info = entry.stat(follow_symlinks=False)
                     entries.append((entry.path, entry.name, is_directory,
                                     info.st_size, info.st_mtime))

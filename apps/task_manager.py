@@ -43,15 +43,7 @@ def _read_process(pid, cpu_percent):
         uid = int(uid_line.split()[1])
         rss_line = next((line for line in status if line.startswith("VmRSS:")), None)
         memory = int(rss_line.split()[1]) * 1024 if rss_line else 0
-        try:
-            with open(f"{directory}/cmdline", "rb") as source:
-                command = source.read(4096).replace(b"\0", b" ").decode(errors="replace").strip()
-        except OSError:
-            command = ""
-        command_parts = command.split()
-        display_name = (" ".join((os.path.basename(command_parts[0]), *command_parts[1:]))
-                        if command_parts else name)
-        return {"pid": pid, "name": display_name[:64], "comm": name, "state": process_state,
+        return {"pid": pid, "name": name[:64], "comm": name, "state": process_state,
                 "ppid": parent_pid, "uid": uid, "memory": memory, "ticks": ticks,
                 "start_time": start_time, "cpu": cpu_percent}
     except (OSError, ValueError, IndexError, StopIteration):
@@ -68,6 +60,21 @@ def _protected_pids():
         current = process["ppid"]
         protected.add(current)
     return protected
+
+
+def _force_stop_if_running(pid, start_time, uid):
+    time.sleep(2)
+    if pid in _protected_pids():
+        return
+    process = _read_process(pid, 0)
+    if (process is None or process["uid"] != uid
+            or process["start_time"] != start_time):
+        return
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError) as error:
+        if isinstance(error, PermissionError):
+            print(f"nexa task manager: couldn't force stop {pid}: {error}")
 
 
 def _sample(previous, previous_time, protected):
@@ -456,6 +463,10 @@ class TaskManagerApp:
             try:
                 os.kill(pid, signal.SIGTERM)
                 activity.c.toast(f"sent end task to {process['name']}")
+                threading.Thread(
+                    target=_force_stop_if_running,
+                    args=(pid, process["start_time"], process["uid"]),
+                    name=f"nexa-end-task-{pid}", daemon=True).start()
             except (ProcessLookupError, PermissionError) as error:
                 activity.c.toast(f"couldn't end task: {error}")
 

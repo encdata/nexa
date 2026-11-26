@@ -9,11 +9,16 @@ def load_home_items():
     home = os.path.expanduser("~")
     try:
         with os.scandir(home) as entries:
-            items = [(entry.path, entry.name, entry.is_dir(follow_symlinks=False))
-                     for entry in entries
-                     if not entry.name.startswith(".")
-                     and (entry.is_dir(follow_symlinks=False)
-                          or entry.is_file(follow_symlinks=False))]
+            items = []
+            for entry in entries:
+                if entry.name.startswith("."):
+                    continue
+                try:
+                    is_directory = entry.is_dir(follow_symlinks=True)
+                except OSError:
+                    is_directory = False
+                if is_directory or entry.is_file(follow_symlinks=False) or entry.is_symlink():
+                    items.append((entry.path, entry.name, is_directory))
     except OSError as error:
         print(f"nexa: couldn't read home items: {error}")
         return []
