@@ -401,8 +401,6 @@ class FilesApp:
             except (OSError, ValueError) as error:
                 print(f"nexa files: {error}")
 
-        load_directory()
-
         def handle_event(event):
             if deb_progress.handle_event(event):
                 return True
@@ -509,8 +507,13 @@ class FilesApp:
             state["prompt"].hide()
             rows.close()
 
+        def on_window_open():
+            if not state["loading"]:
+                load_directory()
+
         handle_event.refresh_theme = refresh_theme
         handle_event.close = close
+        handle_event.on_window_open = on_window_open
         handle_event.set_context = lambda directory: load_directory(directory)
         handle_event.refresh_apps = lambda installed_apps: state["open_with"].set_apps(installed_apps)
         handle_event.on_window_resize = lambda _width, _height: state["prompt"].reposition()
