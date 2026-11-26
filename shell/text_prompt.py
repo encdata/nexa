@@ -38,7 +38,7 @@ class TextPrompt:
         self.title.setgravity(0, 1)
 
         self.input = tg.EditText(activity, "", content, singleline=True, line=False,
-                                 inputtype="text")
+                                 inputtype="text", shortcut_events=True)
         self.input.setdimensions(tg.View.MATCH_PARENT, 40)
         self.input.setlinearlayoutparams(0)
         self.input.setmargin(4, "top")

@@ -516,7 +516,8 @@ class ElectronWebsiteRenderer:
         self.webview = self._create_view()
 
     def _create_view(self):
-        webview = tg.WebView(self.activity, self.parent, enable_javascript=True)
+        webview = tg.WebView(self.activity, self.parent, enable_javascript=True,
+                             shortcut_events=True)
         webview.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
         webview.setdesktopmode(True)
         webview.allownavigation(True)
@@ -602,6 +603,7 @@ class _ElectronWindowView:
         self.webview = tg.WebView(
             activity, parent,
             visibility=tg.View.VISIBLE if self.visible else tg.View.GONE,
+            shortcut_events=True,
             electron_bridge={
                 "origins": sorted({origin for origin in (
                     self.host.origin, _http_origin(url)) if origin}),
@@ -842,6 +844,7 @@ class _ElectronEmbeddedView:
         self.webview = tg.WebView(
             self.activity, self.parent,
             visibility=tg.View.VISIBLE if message.get("visible", True) else tg.View.GONE,
+            shortcut_events=True,
             electron_bridge={
                 "origins": sorted({origin for origin in (
                     self.host.origin, _http_origin(self.url)) if origin}),
@@ -1506,7 +1509,8 @@ class ElectronRenderer:
             frontend_url = view.webview.get_devtools_url()
 
             def build(activity, parent, _state):
-                devtools = tg.WebView(activity, parent, enable_javascript=True)
+                devtools = tg.WebView(activity, parent, enable_javascript=True,
+                                      shortcut_events=True)
                 devtools.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
                 devtools.setdesktopmode(True)
                 devtools.allownavigation(True)

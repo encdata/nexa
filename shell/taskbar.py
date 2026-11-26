@@ -97,7 +97,7 @@ class Taskbar:
         search_icon.setmargin(8, "right")
         search_icon.setmargin(12, "top")
         self.app_search = tg.EditText(activity, "", search_row, singleline=True,
-                                      line=False, inputtype="text")
+                                      line=False, inputtype="text", shortcut_events=True)
         self.app_search.setdimensions(0, 44)
         self.app_search.setlinearlayoutparams(1)
         self.app_search.setbackgroundcolor(palette.window_content)

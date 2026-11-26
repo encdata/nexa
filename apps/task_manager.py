@@ -126,6 +126,7 @@ class TaskManagerApp:
     icon = "apps"
     preload_ui = True
     build_threaded = True
+    tick_interval = 1.0
 
     def build(self, activity, parent, context=None):
         configuration = activity.getconfiguration()
@@ -220,7 +221,7 @@ class TaskManagerApp:
         search_label.setgravity(0, 1)
 
         process_search = tg.EditText(activity, "", process_page, singleline=True,
-                                     line=False, inputtype="text")
+                                     line=False, inputtype="text", shortcut_events=True)
         process_search.setdimensions(tg.View.MATCH_PARENT, 40)
         process_search.setlinearlayoutparams(0)
         process_search.setmargin(8, "left")
@@ -309,14 +310,25 @@ class TaskManagerApp:
                  "display_processes": {}}
         results = queue.Queue(maxsize=1)
         stop = threading.Event()
+        sampling_enabled = threading.Event()
+        sampling_enabled.set()
         protected = _protected_pids()
 
         def sample_processes():
             previous = {}
             previous_time = None
             while not stop.is_set():
+                if not sampling_enabled.is_set():
+                    previous = {}
+                    previous_time = None
+                    sampling_enabled.wait(1)
+                    continue
                 try:
                     snapshot = _sample(previous, previous_time, protected)
+                    if not sampling_enabled.is_set():
+                        previous = {}
+                        previous_time = None
+                        continue
                     previous = snapshot["current"]
                     previous_time = snapshot["sampled_at"]
                     if results.full():
@@ -479,7 +491,19 @@ class TaskManagerApp:
 
         def close():
             stop.set()
+            sampling_enabled.set()
             process_rows.close()
+
+        def on_window_visibility_changed(visible):
+            if visible:
+                sampling_enabled.set()
+            else:
+                sampling_enabled.clear()
+                while True:
+                    try:
+                        results.get_nowait()
+                    except queue.Empty:
+                        break
 
         def theme_refresh_state():
             return {"sort_by": state["sort_by"],
@@ -503,6 +527,7 @@ class TaskManagerApp:
         handle_event.restore_theme_state = restore_theme_state
         handle_event.on_tick = on_tick
         handle_event.on_window_open = start_sampler
+        handle_event.on_window_visibility_changed = on_window_visibility_changed
         handle_event.close = close
         return handle_event
 

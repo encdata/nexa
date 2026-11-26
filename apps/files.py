@@ -99,7 +99,7 @@ class FilesApp:
         search_bar.setlinearlayoutparams(0)
         search_bar.setbackgroundcolor(palette.surface_light)
         search = tg.EditText(activity, "", search_bar, singleline=True, line=False,
-                             inputtype="text")
+                             inputtype="text", shortcut_events=True)
         search.setdimensions(0, 38)
         search.setlinearlayoutparams(1)
         search.setmargin(10, "left")

@@ -198,7 +198,8 @@ class SettingsApp:
 
         path = settings.get("wallpaper") or ""
         wallpaper_path = tg.EditText(self.activity, path, self.content,
-                                     singleline=True, line=False, inputtype="text")
+                                     singleline=True, line=False, inputtype="text",
+                                     shortcut_events=True)
         wallpaper_path.setdimensions(tg.View.MATCH_PARENT, 44)
         wallpaper_path.setbackgroundcolor(palette.surface)
         wallpaper_path.settextcolor(palette.text)

@@ -62,6 +62,7 @@ class ClockApp:
     icon = "clock"
     preload_ui = True
     build_threaded = True
+    tick_interval = 0.1
 
     def build(self, activity, parent, context=None):
         state = _load_state()
@@ -145,7 +146,7 @@ class ClockApp:
         timer_value = add_text(timer_page, "", 100, 52)
         timer_status = add_text(timer_page, "enter a duration in seconds", 30, 13, palette.muted)
         timer_input = tg.EditText(activity, str(state["timer_duration"]), timer_page,
-                                  singleline=True, inputtype="number")
+                                  singleline=True, inputtype="number", shortcut_events=True)
         timer_input.setdimensions(140, 48)
         timer_input.setlinearlayoutparams(0)
         timer_input.setmargin(8, "top")

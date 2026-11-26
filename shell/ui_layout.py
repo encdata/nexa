@@ -356,6 +356,7 @@ def create_edit_text(activity, parent, text="", properties=None, **options):
     options.setdefault("singleline", True)
     options.setdefault("line", False)
     options.setdefault("inputtype", "text")
+    options.setdefault("shortcut_events", True)
     view = tg.EditText(activity, text, parent, **options)
     if properties:
         _set_control_properties(view, properties)

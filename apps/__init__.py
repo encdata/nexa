@@ -2,6 +2,7 @@ from importlib.metadata import entry_points
 from importlib import import_module
 from importlib.util import spec_from_file_location, module_from_spec
 import json
+from math import isfinite
 from os import PathLike
 from pathlib import Path
 from pkgutil import iter_modules
@@ -34,6 +35,10 @@ def _register(apps, app, source):
         raise TypeError(f"{source}.preload_ui must be a bool")
     if not isinstance(getattr(app, "build_threaded", True), bool):
         raise TypeError(f"{source}.build_threaded must be a bool")
+    tick_interval = getattr(app, "tick_interval", 0)
+    if (isinstance(tick_interval, bool) or not isinstance(tick_interval, (int, float))
+            or not isfinite(tick_interval) or tick_interval < 0):
+        raise TypeError(f"{source}.tick_interval must be a finite nonnegative number")
     if app.app_id in apps:
         raise ValueError(f"duplicate app id {app.app_id!r} from {source}")
     apps[app.app_id] = app

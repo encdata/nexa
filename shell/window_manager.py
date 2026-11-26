@@ -24,6 +24,15 @@ class WindowManager:
     snap_edge_size = 28
     minimum_width = 280
     minimum_height = 220
+    key_tab = 61
+    key_f4 = 134
+    key_d = 32
+    key_e = 33
+    key_escape = 111
+    modifier_shift = 3
+    modifier_ctrl = 12
+    modifier_alt = 16
+    modifier_meta = 512
 
     def __init__(self, activity, root, apps, screen_width, screen_height, density, rtl=False):
         self.activity = activity
@@ -45,6 +54,7 @@ class WindowManager:
         self.next_id = 0
         self.id_lock = Lock()
         self.drag = None
+        self.shortcut_keys_down = set()
         self.last_titlebar_tap = None
         self.active_window = None
         self.show_desktop_windows = None
@@ -146,6 +156,7 @@ class WindowManager:
                 window["frame"].setvisibility(tg.View.VISIBLE)
                 self._apply_window_geometry(window, top=True)
                 self._set_active(window["id"])
+                self._notify_window_visibility(window, True)
                 return window["id"]
             self.preloaded[(app_id, None)] = window
         if cache_key is not None and cache_key in self.preloaded:
@@ -160,6 +171,7 @@ class WindowManager:
             window["frame"].setvisibility(tg.View.VISIBLE)
             self._apply_window_geometry(window, top=True)
             self._set_active(window["id"])
+            self._notify_window_visibility(window, True)
             return window["id"]
 
         with self.id_lock:
@@ -256,7 +268,11 @@ class WindowManager:
             "handler_activated": False,
             "app_executor": ThreadPoolExecutor(max_workers=1,
                                                 thread_name_prefix=f"nexa-app-{window_id}"),
+            "resize_lock": Lock(),
+            "pending_resize": None,
+            "resize_worker_active": False,
             "tick_future": None,
+            "next_tick_at": 0,
             "view_ids": set(),
             "button_actions": {control.id: self.button_events[control.id] for control in controls},
         }
@@ -365,6 +381,25 @@ class WindowManager:
         finally:
             self.activity._set_view_owner(None)
 
+    def _run_app_tick(self, window):
+        handler = window["event_handler"]
+        should_tick = getattr(handler, "should_tick", None)
+        if should_tick is None or should_tick():
+            handler.on_tick()
+
+    def _drain_window_resizes(self, window):
+        while True:
+            with window["resize_lock"]:
+                dimensions = window["pending_resize"]
+                window["pending_resize"] = None
+                if dimensions is None:
+                    window["resize_worker_active"] = False
+                    return
+            handler = window.get("event_handler")
+            callback = getattr(handler, "on_window_resize", None)
+            if callback is not None:
+                self._run_app_callback(window, callback, *dimensions)
+
     def _run_window_visibility_callback(self, window, callback, visible):
         if window.get("closing"):
             return
@@ -439,6 +474,8 @@ class WindowManager:
             executor.shutdown(wait=False)
 
     def handle_event(self, event):
+        if self._handle_keyboard_shortcut(event):
+            return True
         event_id = getattr(event, "id", None)
         if event.type == tg.Event.click and event_id in self.button_events:
             window_id, action = self.button_events[event_id]
@@ -453,7 +490,7 @@ class WindowManager:
         if event.type == tg.Event.touch and event_id == self.root.id:
             return self._move_window(event.value)
         window_id = self.view_windows.get(event_id)
-        if window_id is None and event.type in (tg.Event.key, "back"):
+        if window_id is None and event.type == "back":
             window_id = self.active_window
         window = self.windows.get(window_id)
         if window is None or window["event_handler"] is None:
@@ -476,6 +513,65 @@ class WindowManager:
             self._run_app_callback, window,
             self._handle_app_event, window["event_handler"], event)
         return True
+
+    def _handle_keyboard_shortcut(self, event):
+        if event.type != tg.Event.key:
+            return False
+        value = event.value
+        code = value.get("code")
+        action = value.get("action")
+        if type(code) is not int:
+            return False
+        if action == 1 and code in self.shortcut_keys_down:
+            self.shortcut_keys_down.remove(code)
+            return True
+        if action == 0 and code in self.shortcut_keys_down:
+            repeats = value.get("repeatCount", 0)
+            if type(repeats) is int and repeats > 0:
+                return True
+            self.shortcut_keys_down.remove(code)
+        modifiers = value.get("modifiers", 0)
+        if action != 0 or type(modifiers) is not int:
+            return False
+        alt_shortcut = (modifiers & self.modifier_alt
+                        and code in (self.key_tab, self.key_f4))
+        task_manager_shortcut = (
+            modifiers & self.modifier_ctrl == self.modifier_ctrl
+            and modifiers & self.modifier_shift
+            and code == self.key_escape)
+        meta_shortcut = (modifiers & self.modifier_meta
+                         and code in (self.key_d, self.key_e))
+        if not (alt_shortcut or task_manager_shortcut or meta_shortcut):
+            return False
+        if code in self.shortcut_keys_down:
+            return True
+        self.shortcut_keys_down.add(code)
+        if code == self.key_tab:
+            self._cycle_window(bool(modifiers & self.modifier_shift))
+        elif code == self.key_f4 and self.active_window in self.windows:
+            self.close(self.active_window)
+        elif code == self.key_escape and self.on_open_app is not None:
+            self.on_open_app("task_manager")
+        elif code == self.key_e and self.on_open_app is not None:
+            self.on_open_app("files")
+        elif code == self.key_d:
+            self.toggle_show_desktop()
+        return True
+
+    def _cycle_window(self, reverse=False):
+        window_ids = [window_id for window_id in reversed(self.window_order)
+                      if window_id in self.windows]
+        if not window_ids:
+            return
+        try:
+            index = window_ids.index(self.active_window)
+        except ValueError:
+            index = None
+        if index is None:
+            index = 0
+        else:
+            index = (index + (-1 if reverse else 1)) % len(window_ids)
+        self.restore(window_ids[index])
 
     def tick(self):
         for window in tuple(self.windows.values()):
@@ -502,11 +598,12 @@ class WindowManager:
             handler = window["event_handler"]
             on_tick = getattr(handler, "on_tick", None)
             future = window.get("tick_future")
-            should_tick = getattr(handler, "should_tick", None)
-            if (on_tick is not None and (should_tick is None or should_tick())
+            now = monotonic()
+            if (on_tick is not None and now >= window["next_tick_at"]
                     and (future is None or future.done())):
                 window["tick_future"] = window["app_executor"].submit(
-                    self._run_app_callback, window, on_tick)
+                    self._run_app_callback, window, self._run_app_tick, window)
+                window["next_tick_at"] = now + getattr(window["app"], "tick_interval", 0)
 
         if self.theme_refresh_pending and not any(
                 window["build_pending"] or window["build_future"] is not None
@@ -710,13 +807,18 @@ class WindowManager:
 
     def _notify_window_resize(self, handler, width, height, window=None):
         callback = getattr(handler, "on_window_resize", None)
-        if callback is not None:
-            args = (round(width * self.density), round(height * self.density))
-            if window is None:
-                callback(*args)
-            else:
-                window["app_executor"].submit(
-                    self._run_app_callback, window, callback, *args)
+        if callback is None:
+            return
+        args = (round(width * self.density), round(height * self.density))
+        if window is None:
+            callback(*args)
+            return
+        with window["resize_lock"]:
+            window["pending_resize"] = args
+            if window["resize_worker_active"]:
+                return
+            window["resize_worker_active"] = True
+        window["app_executor"].submit(self._drain_window_resizes, window)
 
     def _notify_window_geometry(self, window):
         if window.get("prewarming") or window.get("prewarm_position"):
@@ -1155,6 +1257,7 @@ class WindowManager:
                 and not window.get("build_error")
                 and getattr(window["app"], "preload_ui", False)
                 and window["context"] is None):
+            self._notify_window_visibility(window, False)
             window["frame"].setvisibility(
                 tg.View.HIDDEN if window.get("prewarm_position") else tg.View.GONE)
             window["prewarming"] = False
@@ -1200,6 +1303,7 @@ class WindowManager:
 
     def shutdown(self):
         self.drag = None
+        self.shortcut_keys_down.clear()
         building = [*self.windows.values(), *self.pending_builds]
         for window in building:
             future = window["build_future"]

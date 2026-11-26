@@ -85,7 +85,7 @@ class EditorApp:
             button_views[action] = button
 
         path_field = tg.EditText(activity, context or _untitled_path(), toolbar, singleline=True,
-                                 line=False, inputtype="text")
+                                 line=False, inputtype="text", shortcut_events=True)
         path_field.setdimensions(0, 40)
         path_field.setlinearlayoutparams(1)
         path_field.setmargin(4, "left")
@@ -99,7 +99,7 @@ class EditorApp:
         content.setlinearlayoutparams(1)
 
         editor = tg.EditText(activity, "", content, singleline=False, line=False,
-                             inputtype="textMultiLine")
+                             inputtype="textMultiLine", shortcut_events=True)
         editor.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
         editor.setmargin(10, "left")
         editor.setmargin(10, "right")
@@ -153,7 +153,7 @@ class EditorApp:
         def get_preview_view():
             preview_view = state["preview_view"]
             if preview_view is None:
-                preview_view = tg.WebView(activity, content)
+                preview_view = tg.WebView(activity, content, shortcut_events=True)
                 preview_view.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
                 preview_view.setbackgroundcolor(palette.window_content)
                 preview_view.setvisibility(tg.View.GONE)

@@ -25,6 +25,7 @@ class BrowserApp:
     icon = "nexa"
     preload_ui = True
     build_threaded = True
+    tick_interval = 0.25
 
     def build(self, activity, parent, context=None):
         return BrowserSession(activity, parent)
@@ -460,7 +461,7 @@ class BrowserSession:
         if tab["webview"] is not None:
             return tab["webview"]
         webview = tg.WebView(self.activity, self.pages,
-                             enable_javascript=tab["javascript"])
+                             enable_javascript=tab["javascript"], shortcut_events=True)
         webview.setdimensions(tg.View.MATCH_PARENT, tg.View.MATCH_PARENT)
         self._set_desktop_mode(webview)
         webview.allownavigation(True)

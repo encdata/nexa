@@ -63,7 +63,7 @@ class AppStoreApp:
         search_icon.setmargin(8, "right")
         search_icon.setmargin(11, "top")
         self.search = tg.EditText(activity, "", self.search_frame, singleline=True,
-                                  line=False, inputtype="text")
+                                  line=False, inputtype="text", shortcut_events=True)
         self.search.setdimensions(0, 42)
         self.search.setlinearlayoutparams(1)
         self.search.settextcolor(palette.text)

@@ -15,8 +15,11 @@ class WebView(View):
     def __init__(self, activity: Activity, parent: Optional[View] = None,
                  visibility: Optional[Literal[0, 1, 2]] = None,
                  electron_bridge: Optional[dict] = None,
-                 enable_javascript: bool = False):
+                 enable_javascript: bool = False,
+                 shortcut_events: bool = False):
         args = {"aid": activity.aid, "visibility": visibility}
+        if shortcut_events:
+            args["shortcutEvents"] = True
         profile_name = None
         if enable_javascript:
             args["enableJavascript"] = True
